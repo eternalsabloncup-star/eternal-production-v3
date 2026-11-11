@@ -15,9 +15,9 @@ def test_settings_load_from_environment() -> None:
     assert settings.database_url.startswith("postgresql+asyncpg://")
 
 
-def test_metadata_has_no_business_tables_yet() -> None:
-    # Baseline foundation: no production workflow entities.
-    assert Base.metadata.tables == {}
+def test_metadata_contains_auth_and_work_order_tables() -> None:
+    # Phase 1 live: users + work_orders only (no full workflow tables yet).
+    assert set(Base.metadata.tables) == {"users", "work_orders"}
 
 
 @pytest.mark.asyncio

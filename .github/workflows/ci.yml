@@ -34,6 +34,9 @@ jobs:
       TEST_DATABASE_URL_SYNC: postgresql+psycopg2://epv3_test:epv3_ci_test_only@127.0.0.1:5432/eternal_production_v3_test
       DATABASE_URL: postgresql+asyncpg://epv3_test:epv3_ci_test_only@127.0.0.1:5432/eternal_production_v3_test
       DATABASE_URL_SYNC: postgresql+psycopg2://epv3_test:epv3_ci_test_only@127.0.0.1:5432/eternal_production_v3_test
+      V3_JWT_SECRET: v3_ci_jwt_secret_not_from_v1
+      V3_ACCURATE_READ_GATEWAY_URL: http://127.0.0.1:9
+      V3_ACCURATE_READ_GATEWAY_TOKEN: ci-gateway-token
 
     defaults:
       run:

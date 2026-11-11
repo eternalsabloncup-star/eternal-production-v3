@@ -12,9 +12,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.core.config import get_settings
 from app.db.base import Base
-
-# Import model modules here as they are introduced so metadata is complete.
-# No business entities exist yet for the baseline revision.
+from app.models import User, WorkOrder  # noqa: F401 — register metadata
 
 config = context.config
 

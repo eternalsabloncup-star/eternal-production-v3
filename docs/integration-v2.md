@@ -1,6 +1,8 @@
-# ERP V2 Integration Contract (Proposed)
+# ERP V2 Integration Contract
 
-Status: **documentation only** — no live ERP V2 connections in V3 yet.
+Status: **sandbox foundation in V3** — fixture-only adapter; no live ERP V2 connections.
+
+Evidence basis (Owner handoff): ERP V2 commit `79c548ebadf6fbca22bb379c8984d618c900b451`.
 
 ## Ownership boundaries
 
@@ -9,82 +11,90 @@ Status: **documentation only** — no live ERP V2 connections in V3 yet.
 - Customers
 - Products
 - Sales Orders
-- Official Accurate document references
-- Canonical user identities and branch scope
+- Official Accurate document references / Accurate inbound
+- Canonical user identities and branch scope (enforced inside V2)
+- Surat Jalan / deliveries authority
 
 V3 must not introduce a second official Sales Order authority or a second official Surat Jalan authority.
 
 ### ETERNAL PRODUCTION V3 will own
 
-- Future production workflow state (planning, execution, shop-floor progression, V3-specific operational records)
+- Future production workflow state (not implemented yet)
 - V3-local audit/event history for those workflows
-- Adapter-side idempotency keys and integration receipts for calls made by V3
+- Adapter-side read receipts (in-memory for sandbox)
+
+## Verified V2 HTTP contracts (path-level)
+
+API prefix: `/api`
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/auth/me` | Returns `user_id`, `username`, `display_name`, `role`, `permissions`. **Does not** expose `branch_ids`. |
+| GET | `/api/masters/customers` | Customer list |
+| GET | `/api/masters/customers/{customer_id}` | Customer detail |
+| GET | `/api/masters/products` | Product list |
+| GET | `/api/sales-orders` | `list[SOOut]`; supports **status** filter; **no** pagination contract |
+| GET | `/api/sales-orders/{so_id}` | Detail includes lines with stable line IDs and product IDs |
+
+Auth: Bearer JWT · permission-based · branch scope enforced by ERP V2 · **no** approved service-to-service credential contract.
+
+### Explicit non-endpoints (do not invent)
+
+- No verified `GET /api/masters/products/{product_id}`
+- Sandbox product-by-id resolution uses an **authorized fixture catalog only**
+
+## Stable reference candidates
+
+- `sales_order_id`
+- `sales_order_line_id`
+- `customer_id`
+- `product_id`
+- `branch_id`
+- `production_job_id` (V2 legacy only — CDA / Live Tracking still depend on V2 Production Job)
+
+## V3 sandbox adapter
+
+Package: `backend/app/integration/`
+
+- `ErpV2ReadAdapter` — read-only protocol
+- `FixtureErpV2ReadAdapter` — local fixtures, `allows_network=False`
+- Refs: `CustomerRef`, `ProductRef`, `SalesOrderRef`, `SalesOrderLineRef`
+- `MeProfile` — verified `/auth/me` fields only
+- `AuthContext` — **TEST/SANDBOX ONLY**; carries `simulated_branch_ids` and owner/approver harness sets. These are **not** live `/auth/me` claims.
+- `InMemoryReadReceiptStore` — read audit without business tables
+
+### Fail-closed rules
+
+- Missing/invalid session → unauthorized
+- Missing sandbox permission label → forbidden
+- SO branch not in `AuthContext.simulated_branch_ids` → forbidden (never infer from user-selected branch alone)
+- SO not owner/approver (fixture rules) → forbidden
+- Simulated upstream deny → `IntegrationUpstreamForbidden`
+- Never treat unverified JWT claims as broad access
+
+Sandbox permission labels (`fixture.*.read`) are **local only** and are not claimed to be live V2 permission strings.
+
+## Known gaps (block production live integration)
+
+1. Full response schemas beyond verified ID/status/`/auth/me` fields
+2. Live permission string names
+3. How V3 obtains branch scope at runtime (not present on `/auth/me`)
+4. Service-to-service credential contract
+5. Compatibility mapping for `production_job_id` before CDA / Live Tracking
+6. Staging URL / non-prod credential process
+7. Cloud Agent still cannot read private ERP V2 GitHub source directly
 
 ## Integration style
 
-Preferred approach: **API-based integration**.
+- API-based only; no shared PostgreSQL with V2
+- Sandbox/local/CI: fixtures only; no network to V2 production
+- Live HTTP adapter: Owner approval required; out of current implementation
 
-- V3 reads V2-owned master/document data through a versioned HTTP API (or approved gateway), not by sharing PostgreSQL tables.
-- V3 writes back only through explicit V2 APIs when a production outcome must update V2-owned documents.
-- Direct SQL against V2 databases is forbidden.
-
-## Authentication and permission (future)
-
-- Reuse V2 canonical user identities; do not invent a parallel user directory as system-of-record.
-- Propagate branch scope from V2 auth/session claims into V3 authorization checks.
-- Map V2 roles/permissions into V3 capability checks at the service boundary.
-- Tokens/credentials for V2 must come from environment/secret stores — never hardcoded, never requested from Owner chat during routine work.
-
-## Stable external document references
-
-When V3 stores a reference to a V2 document, persist stable identifiers only, for example:
-
-- `external_system = "erp_v2"`
-- `document_type` (e.g. `sales_order`, `surat_jalan`)
-- `external_id` / `external_number`
-- optional `branch_id`
-- optional content hash / `updated_at` observed at read time
-
-Do not duplicate V2 line-item authority in a way that can diverge silently from V2.
-
-## Data consistency and idempotency
-
-- Reads from V2 are eventually consistent relative to V2 commits; V3 must tolerate stale reads and re-fetch when mutating.
-- Any V3 → V2 write must send an idempotency key so retries do not create duplicate documents/events.
-- V3 should store integration attempt receipts (key, status, response id) for audit and replay safety.
-- Conflict policy: V2 remains authoritative for Customers, Products, Sales Orders, Accurate refs, identities, and branch scope.
-
-## Read-only mock / sandbox adapter
-
-Until live integration is approved, V3 should depend on a narrow adapter interface, for example:
-
-```text
-ErpV2ReadAdapter
-  - get_customer(external_id) -> CustomerRef | NotFound
-  - get_product(external_id) -> ProductRef | NotFound
-  - get_sales_order(external_id) -> SalesOrderRef | NotFound
-  - get_user_branch_scope(user_external_id) -> BranchScope
-```
-
-Rules:
-
-- Default local/dev/test implementations are **mock/sandbox** and read-only.
-- No network calls to V2 production from local or CI.
-- Live adapter implementation is out of scope until Owner approval.
-
-## Future migration mapping requirements
-
-When migrating Production from ERP V2 into V3:
-
-1. Inventory V2 production entities and identify which remain V2-owned vs become V3-owned.
-2. Publish an explicit ID mapping table (`v2_id` → `v3_id`) for migrated workflow records.
-3. Preserve Accurate / official document references without rewriting V2 document numbers.
-4. Provide dry-run and rollback criteria before any cutover.
-5. Keep dual-run read checks against V2 APIs until Owner signs off.
-
-## Explicit non-goals (now)
+## Explicit non-goals (current phase)
 
 - No live ERP V2 HTTP client
 - No shared V2 database credentials
-- No copied V2 production ORM models as V3 schema
+- No business workflow tables / migrations
+- No Accurate calls
 - No second Sales Order / Surat Jalan system of record
+- No workflow UI

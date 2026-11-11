@@ -1,104 +1,84 @@
-import { useEffect, useState } from "react";
-import {
-  ApiClientError,
-  fetchHealth,
-  fetchReady,
-  getApiBaseUrl,
-  type HealthPayload,
-  type ReadyPayload,
-} from "./api/client";
+import { FormEvent, useState } from "react";
+import { getApiBaseUrl } from "./api/client";
 
-type LoadState =
+type LoginState =
+  | { kind: "idle" }
   | { kind: "loading" }
-  | { kind: "ok"; health: HealthPayload; ready: ReadyPayload | null; readyError: string | null }
   | { kind: "error"; message: string };
 
 export default function App() {
-  const [state, setState] = useState<LoadState>({ kind: "loading" });
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [state, setState] = useState<LoginState>({ kind: "idle" });
 
-  useEffect(() => {
-    let cancelled = false;
-
-    async function load() {
-      try {
-        const health = await fetchHealth();
-        let ready: ReadyPayload | null = null;
-        let readyError: string | null = null;
-        try {
-          ready = await fetchReady();
-        } catch (err) {
-          readyError =
-            err instanceof ApiClientError
-              ? `${err.code}: ${err.message}`
-              : "Ready check failed";
-        }
-        if (!cancelled) {
-          setState({ kind: "ok", health, ready, readyError });
-        }
-      } catch (err) {
-        if (!cancelled) {
-          const message =
-            err instanceof ApiClientError
-              ? `${err.code}: ${err.message}`
-              : "Unable to reach backend health endpoint";
-          setState({ kind: "error", message });
-        }
+  async function onSubmit(event: FormEvent) {
+    event.preventDefault();
+    setState({ kind: "loading" });
+    try {
+      const response = await fetch(`${getApiBaseUrl()}/auth/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(
+          body?.error?.message ||
+            (response.status === 503
+              ? "Autentikasi V3 belum dikonfigurasi"
+              : "Login gagal"),
+        );
       }
+      const data = (await response.json()) as { access_token: string };
+      localStorage.setItem("epv3_access_token", data.access_token);
+      window.location.href = "/production.html";
+    } catch (err) {
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : "Login gagal",
+      });
     }
-
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  }
 
   return (
     <div className="shell">
       <header className="shell__header">
         <p className="brand">ETERNAL PRODUCTION V3</p>
-        <p className="lede">Infrastructure status shell — no operational workflows yet.</p>
+        <p className="lede">
+          Login V3 terpisah dari ERP V1. Inbox Accurate hanya setelah sesi sah.
+        </p>
       </header>
-
       <main className="shell__main">
-        <section className="status" aria-live="polite">
-          <h1>Service status</h1>
-          <p className="meta">API base: {getApiBaseUrl()}</p>
-
-          {state.kind === "loading" && <p>Checking backend…</p>}
-
+        <form className="login" onSubmit={onSubmit}>
+          <label>
+            Username
+            <input
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              autoComplete="username"
+              required
+            />
+          </label>
+          <label>
+            Password
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+              required
+            />
+          </label>
+          <button type="submit" disabled={state.kind === "loading"}>
+            {state.kind === "loading" ? "Memverifikasi…" : "Masuk ke Production V49"}
+          </button>
           {state.kind === "error" && (
             <p className="status__error" role="alert">
               {state.message}
             </p>
           )}
-
-          {state.kind === "ok" && (
-            <dl className="status__grid">
-              <div>
-                <dt>Health</dt>
-                <dd>{state.health.status}</dd>
-              </div>
-              <div>
-                <dt>Service</dt>
-                <dd>{state.health.service}</dd>
-              </div>
-              <div>
-                <dt>Version</dt>
-                <dd>{state.health.version}</dd>
-              </div>
-              <div>
-                <dt>Environment</dt>
-                <dd>{state.health.environment}</dd>
-              </div>
-              <div>
-                <dt>Database</dt>
-                <dd>
-                  {state.ready?.database ?? state.readyError ?? "unknown"}
-                </dd>
-              </div>
-            </dl>
-          )}
-        </section>
+        </form>
+        <p className="meta">API: {getApiBaseUrl()}</p>
       </main>
     </div>
   );
