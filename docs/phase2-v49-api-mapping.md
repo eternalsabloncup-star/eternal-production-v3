@@ -7,7 +7,9 @@ No global transaction buttons. Each action is SO/job-contextual.
 
 | V49 UI action | UI function / control | Backend endpoint | Notes |
 |---|---|---|---|
-| Ensure / open production job | inbox → Terproses / PO detail | `POST /` | Creates or returns `production_jobs` + WO mirror |
+| Lookup existing job (read-only) | PO detail open | `GET /by-so/{so}` | **Never creates** on view |
+| Explicit start job | Mulai Proses V3 | `POST /` | Creates or returns existing job + WO mirror |
+| Job board / histories | V3 drawer refresh | `GET /{job_id}/board` | designs, payments, assignments, samples, prep, events |
 | Job gate status | PO detail / tracking | `GET /{job_id}` | design/payment/sample/processing mirrors |
 | Upload design file | `v26Action('designFile')`, intake design | `POST /{job_id}/design/versions` | Version history; prior approved → superseded |
 | Approve design | `v26SourceGate('design',true)`, `intakeAction('design')` | `POST /design/versions/{id}/decision` | `decision=approved` |

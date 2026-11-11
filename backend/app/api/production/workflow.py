@@ -154,6 +154,19 @@ class PrepBody(BaseModel):
     as_correction: bool = False
 
 
+def _job_summary(job) -> dict:
+    return {
+        "id": job.id,
+        "accurate_so_number": job.accurate_so_number,
+        "branch_id": job.branch_id,
+        "customer_name": getattr(job, "customer_name", None),
+        "design_status": job.design_status,
+        "payment_status": job.payment_status,
+        "sample_status": job.sample_status,
+        "processing_status": job.processing_status,
+    }
+
+
 @router.post("")
 async def create_job(
     body: CreateJobBody,
@@ -168,15 +181,32 @@ async def create_job(
         accurate_id=body.accurate_id,
         customer_name=body.customer_name,
     )
-    return {
-        "id": job.id,
-        "accurate_so_number": job.accurate_so_number,
-        "branch_id": job.branch_id,
-        "design_status": job.design_status,
-        "payment_status": job.payment_status,
-        "sample_status": job.sample_status,
-        "processing_status": job.processing_status,
-    }
+    return _job_summary(job)
+
+
+@router.get("/by-so/{so_number:path}")
+async def get_job_by_so(
+    so_number: str,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_permissions(P.JOB_READ)),
+):
+    """Read-only lookup. Returns 404 when no job exists — never creates."""
+    from fastapi import HTTPException
+
+    job = await engine.find_job_by_so(session, user, so_number)
+    if job is None:
+        raise HTTPException(404, "Production job belum dibuat untuk SO ini")
+    return _job_summary(job)
+
+
+@router.get("/{job_id}/board")
+async def get_job_board(
+    job_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_permissions(P.JOB_READ)),
+):
+    job = await engine.get_job(session, job_id)
+    return await engine.job_board(session, user, job)
 
 
 @router.get("/{job_id}")
@@ -190,15 +220,7 @@ async def get_job(
         from fastapi import HTTPException
 
         raise HTTPException(403, "Cabang di luar lingkup akses")
-    return {
-        "id": job.id,
-        "accurate_so_number": job.accurate_so_number,
-        "branch_id": job.branch_id,
-        "design_status": job.design_status,
-        "payment_status": job.payment_status,
-        "sample_status": job.sample_status,
-        "processing_status": job.processing_status,
-    }
+    return _job_summary(job)
 
 
 @router.post("/{job_id}/design/versions")

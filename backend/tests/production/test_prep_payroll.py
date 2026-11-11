@@ -300,3 +300,25 @@ async def test_payroll_rate_history_and_no_duplicate_wages(
     assert lines[0]["operator_name"] == "Rizki"
     assert Decimal(lines[0]["qty_one"]) == Decimal("20")
     assert Decimal(lines[0]["amount_gross"]) == Decimal("500.00")  # 20 * 25
+
+
+@pytest.mark.asyncio
+async def test_by_so_lookup_is_read_only(client: AsyncClient) -> None:
+    h = await _auth(client)
+    missing = await client.get(
+        "/api/v1/production/jobs/by-so/SO/MISSING/001", headers=h
+    )
+    assert missing.status_code == 404
+    job_id, _ = await _ready_job(client, h, "SO/LOOKUP/001")
+    found = await client.get(
+        "/api/v1/production/jobs/by-so/SO/LOOKUP/001", headers=h
+    )
+    assert found.status_code == 200
+    assert found.json()["id"] == job_id
+    board = await client.get(
+        f"/api/v1/production/jobs/{job_id}/board", headers=h
+    )
+    assert board.status_code == 200
+    assert board.json()["job"]["id"] == job_id
+    assert "design_versions" in board.json()
+    assert "events" in board.json()

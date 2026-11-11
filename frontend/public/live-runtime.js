@@ -1,12 +1,46 @@
-/* Live Accurate inbox runtime for V49. Read-only. No fabricated transactions. */
+/* V49 live runtime — Accurate inbox + contextual Production V3 API wiring.
+ * Server is authority. No fabricated transaction success. No auto job-create on view.
+ */
 (function () {
   "use strict";
   const API = (window.V3_API_BASE || "/api/v1").replace(/\/$/, "");
   const TOKEN_KEY = "epv3_access_token";
 
+  if (!document.getElementById("v3-live-style")) {
+    const style = document.createElement("style");
+    style.id = "v3-live-style";
+    style.textContent =
+      ".v3-inbox-tools{display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin:0 0 10px;padding:8px 10px;background:#fff;border:1px solid #dfe7e9;border-radius:8px}" +
+      ".v3-inbox-tools label{font-size:11px;display:flex;flex-direction:column;gap:4px}" +
+      ".v3-actions-grid{display:grid;gap:12px}" +
+      ".v3-section{border:1px solid #dce6e8;border-radius:8px;padding:10px;background:#fafcfc}" +
+      ".v3-section h3{margin:0 0 8px;font-size:13px}" +
+      ".v3-section label{display:flex;flex-direction:column;gap:3px;font-size:11px;margin:0 0 6px}" +
+      ".v3-section .btn{margin:2px 4px 2px 0}" +
+      ".v3-hist{margin-top:8px;font-size:11px}" +
+      ".v3-hist-body{max-height:140px;overflow:auto;margin-top:6px}" +
+      ".v3-open-wf{white-space:nowrap}";
+    document.head.appendChild(style);
+  }
+
   let fetchError = "Koneksi Accurate belum tersedia";
   let lastSync = null;
   let loading = false;
+  let inboxPage = 1;
+  let inboxKeyword = "";
+  let selectedSo = null;
+  let boardCache = Object.create(null); // so -> board
+  let jobCache = Object.create(null); // so -> job summary
+  const inFlight = new Set();
+
+  function escapeHtml(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
 
   function authHeaders() {
     const token = localStorage.getItem(TOKEN_KEY) || "";
@@ -15,20 +49,46 @@
     return headers;
   }
 
+  function idemKey(prefix) {
+    return (
+      String(prefix || "v3") +
+      "-" +
+      Date.now().toString(36) +
+      "-" +
+      Math.random().toString(36).slice(2, 10)
+    );
+  }
+
+  function toast(msg) {
+    if (typeof window.toast === "function") window.toast(msg);
+    else window.alert(msg);
+  }
+
   function clearGhosts() {
     window.queueDemoSave = function () {};
     window.pushDemoSave = function () {};
-    // Prevent offline demo seed from becoming live SO authority.
-    if (typeof window.bootDemo === "function") {
-      const original = window.bootDemo;
-      window.bootDemo = async function () {
-        window.orders = [];
-        window.taskEntries = {};
-        window.history = [];
-        if (typeof window.render === "function") window.render();
-        return original.apply(this, arguments);
-      };
-    }
+    const block = function () {
+      toast("Aksi demo dinonaktifkan — gunakan panel V3 pada SO terpilih");
+      return false;
+    };
+    [
+      "resetDemo",
+      "v36SimulateReceipt",
+      "v26Reset",
+      "bootDemo",
+    ].forEach(function (name) {
+      if (typeof window[name] === "function") {
+        const original = window[name];
+        window[name] = function () {
+          if (name === "bootDemo") {
+            window.orders = window.orders || [];
+            return;
+          }
+          return block();
+        };
+        window[name]._v3Original = original;
+      }
+    });
   }
   clearGhosts();
 
@@ -52,7 +112,7 @@
       qty,
       qtyVerified: s.total_quantity != null,
       sourceLines: lines.map((x, i) => ({
-        id: x.accurate_line_id || "unverified-" + i,
+        id: x.accurate_line_id || "line-" + (i + 1),
         itemId: x.accurate_item_id || null,
         item_code: x.item_code || null,
         name: x.name || null,
@@ -82,6 +142,10 @@
       bufferQty: 0,
       scheduledQty: 0,
       processKind: "UNVERIFIED",
+      v3JobId: null,
+      design_status: null,
+      payment_status: null,
+      sample_status: null,
       delivery: {
         sjNumber: "",
         shipDate: "",
@@ -120,40 +184,62 @@
       localStorage.removeItem(TOKEN_KEY);
       throw new Error("Sesi V3 tidak valid — login ulang");
     }
+    if (response.status === 403) {
+      throw new Error("Akses ditolak (izin/cabang)");
+    }
     if (!response.ok) {
       let detail = "";
       try {
         const errBody = await response.json();
         detail =
           (errBody && errBody.error && errBody.error.message) ||
-          (errBody && errBody.detail) ||
+          (typeof errBody.detail === "string" ? errBody.detail : "") ||
           "";
-      } catch (_) {
-        /* ignore parse errors */
+      } catch (_) {}
+      if (response.status === 503) {
+        throw new Error("Gateway Accurate belum siap / tidak berwenang");
       }
-      throw new Error(
-        response.status === 503
-          ? "Gateway Accurate belum siap / tidak berwenang"
-          : detail || "API V3 mengembalikan HTTP " + response.status,
-      );
+      throw new Error(detail || "API V3 HTTP " + response.status);
     }
     if (response.status === 204) return null;
     return response.json();
   }
 
-  /** Phase 3: SO number → production job id cache (server is authority). */
-  const jobBySo = Object.create(null);
+  function orderBySo(so) {
+    return (window.orders || []).find((x) => x.id === so) || null;
+  }
 
-  async function ensureJob(order) {
+  async function lookupJob(so) {
+    try {
+      const job = await request(
+        API + "/production/jobs/by-so/" + encodeURIComponent(so),
+      );
+      jobCache[so] = job;
+      const o = orderBySo(so);
+      if (o) {
+        o.v3JobId = job.id;
+        o.design_status = job.design_status;
+        o.payment_status = job.payment_status;
+        o.sample_status = job.sample_status;
+        o.productionStatus = job.processing_status || o.productionStatus;
+      }
+      return job;
+    } catch (err) {
+      if (String(err.message || "").includes("belum dibuat") || String(err.message || "").includes("404")) {
+        delete jobCache[so];
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  async function createJob(order) {
     if (!order || !order.id) throw new Error("SO tidak valid");
-    if (jobBySo[order.id]) return jobBySo[order.id];
     const branchId =
       order.branch && order.branch !== "Belum terverifikasi"
         ? String(order.branch)
         : null;
-    if (!branchId) {
-      throw new Error("Cabang SO belum terverifikasi dari Accurate");
-    }
+    if (!branchId) throw new Error("Cabang SO belum terverifikasi dari Accurate");
     const job = await request(API + "/production/jobs", {
       method: "POST",
       body: {
@@ -163,7 +249,7 @@
         customer_name: order.name || null,
       },
     });
-    jobBySo[order.id] = job;
+    jobCache[order.id] = job;
     order.v3JobId = job.id;
     order.design_status = job.design_status;
     order.payment_status = job.payment_status;
@@ -172,16 +258,855 @@
     return job;
   }
 
-  window.v3EnsureJob = ensureJob;
-  window.v3Api = {
-    request: request,
-    ensureJob: ensureJob,
-    post: function (path, body) {
-      return request(API + path, { method: "POST", body: body });
-    },
-    get: function (path) {
-      return request(API + path);
-    },
+  async function loadBoard(so, force) {
+    let job = jobCache[so];
+    if (!job) job = await lookupJob(so);
+    if (!job) return null;
+    if (!force && boardCache[so]) return boardCache[so];
+    const board = await request(API + "/production/jobs/" + job.id + "/board");
+    boardCache[so] = board;
+    jobCache[so] = board.job;
+    return board;
+  }
+
+  async function mutate(lockKey, fn) {
+    if (inFlight.has(lockKey)) {
+      toast("Transaksi masih diproses — tunggu selesai");
+      return null;
+    }
+    inFlight.add(lockKey);
+    try {
+      const result = await fn();
+      if (selectedSo) {
+        delete boardCache[selectedSo];
+        await loadBoard(selectedSo, true);
+        renderWorkflowDrawer(selectedSo);
+      }
+      if (typeof window.render === "function") window.render();
+      return result;
+    } catch (err) {
+      toast(err.message || "Transaksi gagal");
+      throw err;
+    } finally {
+      inFlight.delete(lockKey);
+    }
+  }
+
+  function requireJob(so) {
+    const job = jobCache[so];
+    if (!job) throw new Error("Buat job V3 terlebih dahulu (tombol Mulai Proses V3)");
+    return job;
+  }
+
+  function field(id) {
+    const el = document.getElementById(id);
+    return el ? String(el.value || "").trim() : "";
+  }
+
+  function firstLineId(order) {
+    const line = (order.sourceLines || [])[0];
+    return line && line.id ? String(line.id) : "line-1";
+  }
+
+  function historyList(title, rowsHtml) {
+    return (
+      '<details class="v3-hist"><summary>' +
+      escapeHtml(title) +
+      "</summary><div class=\"v3-hist-body\">" +
+      (rowsHtml || "<p>Tidak ada riwayat</p>") +
+      "</div></details>"
+    );
+  }
+
+  function renderWorkflowDrawer(so) {
+    selectedSo = so;
+    const order = orderBySo(so);
+    const modal = document.getElementById("modal");
+    if (!modal || !order) return;
+    const board = boardCache[so];
+    const job = jobCache[so] || (board && board.job) || null;
+    const designs = (board && board.design_versions) || [];
+    const receipts = (board && board.payment_receipts) || [];
+    const bypasses = (board && board.payment_bypasses) || [];
+    const assignments = (board && board.assignments) || [];
+    const samples = (board && board.samples) || [];
+    const prepStates = (board && board.prep_states) || [];
+    const events = (board && board.events) || [];
+    const pendingDesign = designs.find((d) => d.status === "pending");
+    const activeBypass = bypasses.find((b) => b.active);
+    const pendingSample = samples.find((s) => s.status === "pending");
+
+    const designHist = designs
+      .map(
+        (d) =>
+          "<div>v" +
+          escapeHtml(d.version_no) +
+          " #" +
+          escapeHtml(d.id) +
+          " · " +
+          escapeHtml(d.file_name) +
+          " · <b>" +
+          escapeHtml(d.status) +
+          "</b></div>",
+      )
+      .join("");
+    const payHist =
+      receipts
+        .map(
+          (r) =>
+            "<div>Receipt #" +
+            escapeHtml(r.id) +
+            " · " +
+            escapeHtml(r.accurate_receipt_id) +
+            " · <b>" +
+            escapeHtml(r.status) +
+            "</b></div>",
+        )
+        .join("") +
+      bypasses
+        .map(
+          (b) =>
+            "<div>Bypass #" +
+            escapeHtml(b.id) +
+            " · " +
+            (b.active ? "aktif" : "dicabut") +
+            " · " +
+            escapeHtml(b.reason || "") +
+            "</div>",
+        )
+        .join("");
+    const asgHist = assignments
+      .map(
+        (a) =>
+          "<div>#" +
+          escapeHtml(a.id) +
+          " · " +
+          escapeHtml(a.operator_name) +
+          " / " +
+          escapeHtml(a.machine_name) +
+          " · pass " +
+          escapeHtml(a.color_pass) +
+          " · " +
+          escapeHtml(a.qty_confirmed) +
+          "/" +
+          escapeHtml(a.qty_planned) +
+          " · <b>" +
+          escapeHtml(a.status) +
+          "</b></div>",
+      )
+      .join("");
+    const prepHist = prepStates
+      .map(
+        (p) =>
+          "<div>" +
+          escapeHtml(p.role) +
+          " · line " +
+          escapeHtml(p.so_line_id) +
+          " · qty " +
+          escapeHtml(p.qty) +
+          " · " +
+          escapeHtml(p.evidence_ref || "") +
+          "</div>",
+      )
+      .join("");
+    const sampleHist = samples
+      .map(
+        (s) =>
+          "<div>v" +
+          escapeHtml(s.version_no) +
+          " #" +
+          escapeHtml(s.id) +
+          " · " +
+          escapeHtml(s.file_name) +
+          " · <b>" +
+          escapeHtml(s.status) +
+          "</b></div>",
+      )
+      .join("");
+    const eventHist = events
+      .slice()
+      .reverse()
+      .slice(0, 40)
+      .map(
+        (e) =>
+          "<div>#" +
+          escapeHtml(e.id) +
+          " · " +
+          escapeHtml(e.event_type) +
+          " · qty " +
+          escapeHtml(e.qty_physical == null ? "—" : e.qty_physical) +
+          (e.accurate_sj_number
+            ? " · SJ " + escapeHtml(e.accurate_sj_number)
+            : "") +
+          "</div>",
+      )
+      .join("");
+
+    const disabledNote = !job
+      ? '<p class="v49-quiet">Job V3 belum ada. Gunakan <b>Mulai Proses V3</b> (eksplisit) sebelum transaksi.</p>'
+      : "";
+
+    modal.innerHTML =
+      '<div class="drawerback"><aside class="detaildrawer shipping-drawer" role="dialog" aria-modal="true" data-v3-so="' +
+      escapeHtml(so) +
+      '"><div class="drawerhead"><h2>V3 Workflow · ' +
+      escapeHtml(so) +
+      '</h2><button type="button" class="btn sm" id="v3-close-drawer">✕ Tutup</button></div><div class="drawerbody v3-workflow-body">' +
+      "<p><b>" +
+      escapeHtml(order.name) +
+      "</b> · Cabang " +
+      escapeHtml(order.branch) +
+      " · Qty SO " +
+      escapeHtml(order.qty) +
+      "</p>" +
+      (job
+        ? "<p>Job #<b>" +
+          escapeHtml(job.id) +
+          "</b> · Design <b>" +
+          escapeHtml(job.design_status) +
+          "</b> · Payment <b>" +
+          escapeHtml(job.payment_status) +
+          "</b> · Sample <b>" +
+          escapeHtml(job.sample_status) +
+          "</b> · Proses <b>" +
+          escapeHtml(job.processing_status) +
+          "</b></p>"
+        : disabledNote) +
+      (!job
+        ? '<p><button type="button" class="btn" id="v3-create-job">Mulai Proses V3</button></p>'
+        : "") +
+      '<div class="v3-actions-grid">' +
+      section(
+        "Design",
+        '<label>File<input id="v3-design-file" value="design.pdf"/></label>' +
+          '<label>Storage key<input id="v3-design-key" value="designs/' +
+          escapeHtml(so) +
+          '.pdf"/></label>' +
+          '<button type="button" class="btn sm" data-v3="design-upload">Upload versi</button>' +
+          (pendingDesign
+            ? '<button type="button" class="btn sm" data-v3="design-approve">Approve #' +
+              escapeHtml(pendingDesign.id) +
+              "</button>" +
+              '<button type="button" class="btn sm" data-v3="design-reject">Reject</button>' +
+              '<button type="button" class="btn sm" data-v3="design-customer">Customer approval</button>' +
+              '<label>Bypass reason<input id="v3-design-bypass-reason"/></label>' +
+              '<button type="button" class="btn sm" data-v3="design-bypass">Authorized bypass</button>'
+            : "<p class=\"v49-quiet\">Tidak ada versi pending</p>") +
+          historyList("Riwayat design", designHist),
+      ) +
+      section(
+        "Payment",
+        '<label>Accurate receipt id<input id="v3-pay-rid"/></label>' +
+          '<label>Amount<input id="v3-pay-amt" type="number" min="0" step="0.01"/></label>' +
+          '<button type="button" class="btn sm" data-v3="pay-receipt">Catat receipt</button>' +
+          '<label>Bypass reason<input id="v3-pay-bypass-reason"/></label>' +
+          '<button type="button" class="btn sm" data-v3="pay-bypass">Bypass payment</button>' +
+          (activeBypass
+            ? '<button type="button" class="btn sm" data-v3="pay-revoke">Revoke bypass #' +
+              escapeHtml(activeBypass.id) +
+              "</button>"
+            : "") +
+          historyList("Riwayat payment", payHist),
+      ) +
+      section(
+        "Scheduling",
+        '<label>SO line<input id="v3-asg-line" value="' +
+          escapeHtml(firstLineId(order)) +
+          '"/></label>' +
+          '<label>Operator<input id="v3-asg-op" value="Operator A"/></label>' +
+          '<label>Machine<input id="v3-asg-mc" value="Semi Auto 01"/></label>' +
+          '<label>Date<input id="v3-asg-date" type="date"/></label>' +
+          '<label>Color pass<input id="v3-asg-pass" type="number" min="1" value="1"/></label>' +
+          '<label>Qty planned<input id="v3-asg-qty" type="number" min="1" value="' +
+          escapeHtml(order.qty || 1) +
+          '"/></label>' +
+          '<button type="button" class="btn sm" data-v3="asg-create">Buat assignment</button>' +
+          '<label>Assignment id<input id="v3-asg-id" type="number"/></label>' +
+          '<button type="button" class="btn sm" data-v3="asg-cancel">Cancel remaining</button>' +
+          '<label>Transfer to operator<input id="v3-asg-top"/></label>' +
+          '<label>Transfer machine<input id="v3-asg-tmc" value="Semi Auto 02"/></label>' +
+          '<button type="button" class="btn sm" data-v3="asg-transfer">Transfer remaining</button>' +
+          historyList("Riwayat assignment", asgHist),
+      ) +
+      section(
+        "Screener & Helper",
+        '<label>SO line<input id="v3-prep-line" value="' +
+          escapeHtml(firstLineId(order)) +
+          '"/></label>' +
+          '<label>PO qty ceiling<input id="v3-prep-po" type="number" value="' +
+          escapeHtml(order.qty || 1) +
+          '"/></label>' +
+          '<label>Screen qty<input id="v3-prep-screen" type="number" value="1"/></label>' +
+          '<label>Helper qty<input id="v3-prep-helper" type="number" value="' +
+          escapeHtml(order.qty || 1) +
+          '"/></label>' +
+          '<label>Evidence<input id="v3-prep-ev" value="prep-evidence"/></label>' +
+          '<button type="button" class="btn sm" data-v3="prep-screen">Simpan screener</button>' +
+          '<button type="button" class="btn sm" data-v3="prep-helper">Simpan helper</button>' +
+          historyList("Status prep", prepHist),
+      ) +
+      section(
+        "Sample",
+        '<label>File<input id="v3-sample-file" value="sample.jpg"/></label>' +
+          '<label>Storage key<input id="v3-sample-key" value="samples/' +
+          escapeHtml(so) +
+          '.jpg"/></label>' +
+          '<button type="button" class="btn sm" data-v3="sample-upload">Upload sample</button>' +
+          (pendingSample
+            ? '<button type="button" class="btn sm" data-v3="sample-approve">Approve #' +
+              escapeHtml(pendingSample.id) +
+              "</button>" +
+              '<button type="button" class="btn sm" data-v3="sample-reject">Reject/revise</button>'
+            : "<p class=\"v49-quiet\">Tidak ada sample pending</p>") +
+          historyList("Riwayat sample", sampleHist),
+      ) +
+      section(
+        "Operator output / reject",
+        '<label>Assignment id<input id="v3-out-asg" type="number"/></label>' +
+          '<label>Qty physical<input id="v3-out-qty" type="number" min="1" value="1"/></label>' +
+          '<label>Color pass<input id="v3-out-pass" type="number" min="1" value="1"/></label>' +
+          '<label>Lot<input id="v3-out-lot"/></label>' +
+          '<button type="button" class="btn sm" data-v3="out-confirm">Confirm output</button>' +
+          '<label>Source output event id<input id="v3-out-src" type="number"/></label>' +
+          '<label>Correction delta<input id="v3-out-delta" type="number"/></label>' +
+          '<label>Correction reason<input id="v3-out-creason"/></label>' +
+          '<button type="button" class="btn sm" data-v3="out-correct">Correct output</button>' +
+          '<label>Reject qty<input id="v3-rej-qty" type="number" min="1" value="1"/></label>' +
+          '<label>Reject reason<input id="v3-rej-reason"/></label>' +
+          '<button type="button" class="btn sm" data-v3="rej-record">Register reject</button>' +
+          '<label>Reject event id<input id="v3-rej-id" type="number"/></label>' +
+          '<button type="button" class="btn sm" data-v3="rej-verify">Verify reject</button>',
+      ) +
+      section(
+        "Packing",
+        '<label>SO line<input id="v3-pack-line" value="' +
+          escapeHtml(firstLineId(order)) +
+          '"/></label>' +
+          '<label>Qty<input id="v3-pack-qty" type="number" min="1" value="1"/></label>' +
+          '<label>Lot<input id="v3-pack-lot"/></label>' +
+          '<button type="button" class="btn sm" data-v3="pack">Confirm packing batch</button>',
+      ) +
+      section(
+        "Delivery",
+        '<label>Accurate SJ id<input id="v3-sj-id"/></label>' +
+          '<label>Accurate SJ number<input id="v3-sj-no"/></label>' +
+          '<label>Loading qty<input id="v3-load-qty" type="number" min="1" value="1"/></label>' +
+          '<button type="button" class="btn sm" data-v3="load">Loading</button>' +
+          '<label>POD qty<input id="v3-pod-qty" type="number" min="1" value="1"/></label>' +
+          '<label>Receiver<input id="v3-pod-recv"/></label>' +
+          '<label>Evidence<input id="v3-pod-ev" value="pod-photo"/></label>' +
+          '<button type="button" class="btn sm" data-v3="pod">POD</button>' +
+          '<label>Cancel SJ reason<input id="v3-sj-cancel-reason"/></label>' +
+          '<button type="button" class="btn sm" data-v3="sj-cancel">Cancel/supersede SJ</button>' +
+          '<p class="v49-quiet">SJ harus identitas Accurate resmi. Tanpa id/number, aksi ditolak server.</p>',
+      ) +
+      section(
+        "Tracking",
+        '<button type="button" class="btn sm" data-v3="track-refresh">Refresh timeline</button>' +
+          historyList("Event ledger", eventHist),
+      ) +
+      section(
+        "Payroll",
+        '<label>Rate component<select id="v3-rate-comp"><option value="one">one</option><option value="two">two</option><option value="three">three</option><option value="four">four</option><option value="screen">screen</option><option value="daily">daily</option><option value="overtime">overtime</option></select></label>' +
+          '<label>Amount<input id="v3-rate-amt" type="number" min="0" step="0.01" value="20"/></label>' +
+          '<label>Effective from<input id="v3-rate-from" type="date"/></label>' +
+          '<button type="button" class="btn sm" data-v3="rate-set">Set rate</button>' +
+          '<button type="button" class="btn sm" data-v3="rate-get">Lihat rates hari ini</button>' +
+          '<label>Period start<input id="v3-pay-start" type="date"/></label>' +
+          '<label>Period end<input id="v3-pay-end" type="date"/></label>' +
+          '<button type="button" class="btn sm" data-v3="payroll-run">Hitung periode</button>' +
+          '<pre id="v3-payroll-out" class="v49-quiet"></pre>' +
+          '<p class="v49-quiet">Payroll hanya dari confirmed output server — bukan total frontend.</p>',
+      ) +
+      "</div></div></aside></div>";
+
+    const today = new Date().toISOString().slice(0, 10);
+    ["v3-asg-date", "v3-rate-from", "v3-pay-start", "v3-pay-end"].forEach(
+      function (id) {
+        const el = document.getElementById(id);
+        if (el && !el.value) el.value = today;
+      },
+    );
+    const closeBtn = document.getElementById("v3-close-drawer");
+    if (closeBtn) closeBtn.onclick = function () {
+      selectedSo = null;
+      modal.innerHTML = "";
+    };
+    const createBtn = document.getElementById("v3-create-job");
+    if (createBtn) {
+      createBtn.onclick = function () {
+        mutate("create-" + so, async function () {
+          await createJob(order);
+          toast("Job V3 dibuat untuk " + so);
+          await loadBoard(so, true);
+        });
+      };
+    }
+    modal.querySelectorAll("[data-v3]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        handleAction(btn.getAttribute("data-v3"), so, order);
+      });
+    });
+  }
+
+  function section(title, body) {
+    return (
+      '<section class="v3-section"><h3>' +
+      escapeHtml(title) +
+      "</h3>" +
+      body +
+      "</section>"
+    );
+  }
+
+  async function handleAction(action, so, order) {
+    const lock = action + ":" + so;
+    await mutate(lock, async function () {
+      const job = action === "track-refresh" || action.indexOf("rate") === 0 || action.indexOf("payroll") === 0
+        ? jobCache[so]
+        : requireJob(so);
+      const jid = job && job.id;
+      if (action === "design-upload") {
+        await request(API + "/production/jobs/" + jid + "/design/versions", {
+          method: "POST",
+          body: {
+            file_name: field("v3-design-file") || "design.pdf",
+            storage_key: field("v3-design-key") || "designs/" + so + ".pdf",
+          },
+        });
+        toast("Design version uploaded");
+        return;
+      }
+      if (action.indexOf("design-") === 0 && action !== "design-upload") {
+        const board = boardCache[so] || (await loadBoard(so, true));
+        const pending = (board.design_versions || []).find((d) => d.status === "pending");
+        if (!pending) throw new Error("Tidak ada design pending");
+        const body = { decision: "approved", reason: null, bypass: false, customer_approval: false };
+        if (action === "design-reject") body.decision = "rejected";
+        if (action === "design-customer") body.customer_approval = true;
+        if (action === "design-bypass") {
+          body.bypass = true;
+          body.reason = field("v3-design-bypass-reason");
+          if (!body.reason) throw new Error("Alasan bypass wajib");
+        }
+        await request(
+          API + "/production/jobs/design/versions/" + pending.id + "/decision",
+          { method: "POST", body: body },
+        );
+        toast("Design decision tersimpan");
+        return;
+      }
+      if (action === "pay-receipt") {
+        const rid = field("v3-pay-rid");
+        if (!rid) throw new Error("Accurate receipt id wajib");
+        const amt = field("v3-pay-amt");
+        await request(API + "/production/jobs/" + jid + "/payment/receipts", {
+          method: "POST",
+          body: {
+            accurate_receipt_id: rid,
+            amount: amt ? amt : null,
+          },
+        });
+        toast("Receipt tercatat");
+        return;
+      }
+      if (action === "pay-bypass") {
+        const reason = field("v3-pay-bypass-reason");
+        if (!reason) throw new Error("Alasan bypass wajib");
+        await request(API + "/production/jobs/" + jid + "/payment/bypass", {
+          method: "POST",
+          body: { reason: reason },
+        });
+        toast("Payment bypass aktif");
+        return;
+      }
+      if (action === "pay-revoke") {
+        const board = boardCache[so] || (await loadBoard(so, true));
+        const active = (board.payment_bypasses || []).find((b) => b.active);
+        if (!active) throw new Error("Tidak ada bypass aktif");
+        await request(
+          API + "/production/jobs/payment/bypass/" + active.id + "/revoke",
+          { method: "POST", body: { reason: "revoked from V3 panel" } },
+        );
+        toast("Bypass dicabut");
+        return;
+      }
+      if (action === "asg-create") {
+        await request(API + "/production/jobs/" + jid + "/schedule/assignments", {
+          method: "POST",
+          body: {
+            so_line_id: field("v3-asg-line") || firstLineId(order),
+            color_pass: Number(field("v3-asg-pass") || 1),
+            operator_name: field("v3-asg-op") || "Operator A",
+            machine_name: field("v3-asg-mc") || "Semi Auto 01",
+            work_date: field("v3-asg-date"),
+            qty_planned: field("v3-asg-qty") || "1",
+          },
+        });
+        toast("Assignment dibuat");
+        return;
+      }
+      if (action === "asg-cancel") {
+        const id = field("v3-asg-id");
+        if (!id) throw new Error("Assignment id wajib");
+        await request(
+          API +
+            "/production/jobs/schedule/assignments/" +
+            id +
+            "/cancel-remaining",
+          { method: "POST", body: { reason: "cancel remaining from V3 panel" } },
+        );
+        toast("Sisa assignment dibatalkan");
+        return;
+      }
+      if (action === "asg-transfer") {
+        const id = field("v3-asg-id");
+        if (!id) throw new Error("Assignment id wajib");
+        await request(
+          API +
+            "/production/jobs/schedule/assignments/" +
+            id +
+            "/transfer-remaining",
+          {
+            method: "POST",
+            body: {
+              operator_name: field("v3-asg-top") || "Operator B",
+              machine_name: field("v3-asg-tmc") || "Semi Auto 02",
+              work_date: field("v3-asg-date"),
+              reason: "transfer remaining from V3 panel",
+            },
+          },
+        );
+        toast("Sisa dipindahkan ke assignment baru");
+        return;
+      }
+      if (action === "prep-screen" || action === "prep-helper") {
+        const role = action === "prep-screen" ? "screener" : "helper";
+        const path =
+          API +
+          "/production/jobs/" +
+          jid +
+          "/prep/" +
+          (role === "screener" ? "screener" : "helper");
+        await request(path, {
+          method: "POST",
+          body: {
+            so_line_id: field("v3-prep-line") || firstLineId(order),
+            qty: field(role === "screener" ? "v3-prep-screen" : "v3-prep-helper") || "1",
+            po_qty: field("v3-prep-po") || String(order.qty || 1),
+            evidence_ref: field("v3-prep-ev") || "prep-evidence",
+            idempotency_key: idemKey("prep"),
+            assignment_id: field("v3-asg-id") ? Number(field("v3-asg-id")) : null,
+          },
+        });
+        toast("Prep " + role + " tersimpan");
+        return;
+      }
+      if (action === "sample-upload") {
+        await request(API + "/production/jobs/" + jid + "/samples", {
+          method: "POST",
+          body: {
+            file_name: field("v3-sample-file") || "sample.jpg",
+            storage_key: field("v3-sample-key") || "samples/" + so + ".jpg",
+            assignment_id: field("v3-out-asg") ? Number(field("v3-out-asg")) : null,
+          },
+        });
+        toast("Sample uploaded");
+        return;
+      }
+      if (action === "sample-approve" || action === "sample-reject") {
+        const board = boardCache[so] || (await loadBoard(so, true));
+        const pending = (board.samples || []).find((s) => s.status === "pending");
+        if (!pending) throw new Error("Tidak ada sample pending");
+        await request(API + "/production/jobs/samples/" + pending.id + "/decision", {
+          method: "POST",
+          body: {
+            decision: action === "sample-approve" ? "approved" : "revised",
+            reason: action === "sample-approve" ? null : "revision requested",
+          },
+        });
+        toast("Sample decision tersimpan");
+        return;
+      }
+      if (action === "out-confirm") {
+        const asg = field("v3-out-asg");
+        if (!asg) throw new Error("Assignment id wajib");
+        await request(API + "/production/jobs/" + jid + "/outputs", {
+          method: "POST",
+          body: {
+            assignment_id: Number(asg),
+            qty_physical: field("v3-out-qty") || "1",
+            color_pass: Number(field("v3-out-pass") || 1),
+            lot_code: field("v3-out-lot") || null,
+            idempotency_key: idemKey("out"),
+          },
+        });
+        toast("Output confirmed");
+        return;
+      }
+      if (action === "out-correct") {
+        const src = field("v3-out-src");
+        const delta = field("v3-out-delta");
+        const reason = field("v3-out-creason");
+        if (!src || !delta || !reason) throw new Error("Source, delta, reason wajib");
+        await request(API + "/production/jobs/" + jid + "/outputs/corrections", {
+          method: "POST",
+          body: {
+            source_event_id: Number(src),
+            qty_physical_delta: delta,
+            reason: reason,
+            idempotency_key: idemKey("corr"),
+          },
+        });
+        toast("Correction event tersimpan");
+        return;
+      }
+      if (action === "rej-record") {
+        const asg = field("v3-out-asg");
+        const reason = field("v3-rej-reason");
+        if (!asg || !reason) throw new Error("Assignment dan alasan reject wajib");
+        await request(API + "/production/jobs/" + jid + "/rejects", {
+          method: "POST",
+          body: {
+            assignment_id: Number(asg),
+            qty_physical: field("v3-rej-qty") || "1",
+            color_pass: Number(field("v3-out-pass") || 1),
+            lot_code: field("v3-out-lot") || null,
+            reason: reason,
+            idempotency_key: idemKey("rej"),
+          },
+        });
+        toast("Reject tercatat");
+        return;
+      }
+      if (action === "rej-verify") {
+        const id = field("v3-rej-id");
+        if (!id) throw new Error("Reject event id wajib");
+        await request(API + "/production/jobs/rejects/" + id + "/verify", {
+          method: "POST",
+          body: { approved_qty: field("v3-rej-qty") || "1" },
+        });
+        toast("Reject verified");
+        return;
+      }
+      if (action === "pack") {
+        await request(API + "/production/jobs/" + jid + "/packing", {
+          method: "POST",
+          body: {
+            so_line_id: field("v3-pack-line") || firstLineId(order),
+            qty_physical: field("v3-pack-qty") || "1",
+            lot_code: field("v3-pack-lot") || null,
+            idempotency_key: idemKey("pack"),
+          },
+        });
+        toast("Packing batch tersimpan");
+        return;
+      }
+      if (action === "load") {
+        const sjId = field("v3-sj-id");
+        const sjNo = field("v3-sj-no");
+        if (!sjId || !sjNo) throw new Error("Identitas SJ Accurate wajib");
+        await request(API + "/production/jobs/" + jid + "/loading", {
+          method: "POST",
+          body: {
+            accurate_sj_id: sjId,
+            accurate_sj_number: sjNo,
+            qty_physical: field("v3-load-qty") || "1",
+            idempotency_key: idemKey("load"),
+          },
+        });
+        toast("Loading tersimpan");
+        return;
+      }
+      if (action === "pod") {
+        const sjId = field("v3-sj-id");
+        const recv = field("v3-pod-recv");
+        const ev = field("v3-pod-ev");
+        if (!sjId || !recv || !ev) throw new Error("SJ id, penerima, bukti wajib");
+        await request(API + "/production/jobs/" + jid + "/pod", {
+          method: "POST",
+          body: {
+            accurate_sj_id: sjId,
+            qty_physical: field("v3-pod-qty") || "1",
+            evidence_ref: ev,
+            receiver_name: recv,
+            idempotency_key: idemKey("pod"),
+          },
+        });
+        toast("POD tersimpan");
+        return;
+      }
+      if (action === "sj-cancel") {
+        const sjId = field("v3-sj-id");
+        const reason = field("v3-sj-cancel-reason");
+        if (!sjId || !reason) throw new Error("SJ id dan alasan wajib");
+        await request(API + "/production/jobs/" + jid + "/sj/cancel", {
+          method: "POST",
+          body: {
+            accurate_sj_id: sjId,
+            reason: reason,
+            idempotency_key: idemKey("sjc"),
+          },
+        });
+        toast("SJ cancelled/superseded (history preserved)");
+        return;
+      }
+      if (action === "track-refresh") {
+        await loadBoard(so, true);
+        toast("Timeline di-refresh dari server");
+        return;
+      }
+      if (action === "rate-set") {
+        await request(API + "/production/payroll/rates", {
+          method: "POST",
+          body: {
+            component: field("v3-rate-comp") || "one",
+            amount: field("v3-rate-amt") || "0",
+            effective_from: field("v3-rate-from"),
+          },
+        });
+        toast("Rate tersimpan");
+        return;
+      }
+      if (action === "rate-get") {
+        const rates = await request(API + "/production/payroll/rates");
+        const out = document.getElementById("v3-payroll-out");
+        if (out) out.textContent = JSON.stringify(rates, null, 2);
+        return;
+      }
+      if (action === "payroll-run") {
+        const run = await request(API + "/production/payroll/runs", {
+          method: "POST",
+          body: {
+            period_start: field("v3-pay-start"),
+            period_end: field("v3-pay-end"),
+            idempotency_key: idemKey("payrun"),
+            branch_id:
+              order.branch && order.branch !== "Belum terverifikasi"
+                ? order.branch
+                : null,
+          },
+        });
+        const detail = await request(
+          API + "/production/payroll/runs/" + run.id,
+        );
+        const out = document.getElementById("v3-payroll-out");
+        if (out) out.textContent = JSON.stringify(detail, null, 2);
+        toast("Payroll run #" + run.id);
+        return;
+      }
+      throw new Error("Aksi tidak dikenali: " + action);
+    }).catch(function () {
+      /* toast already shown */
+    });
+  }
+
+  window.v3OpenWorkflow = async function (so) {
+    selectedSo = so;
+    const order = orderBySo(so);
+    if (!order) {
+      toast("SO tidak ada di inbox halaman ini");
+      return;
+    }
+    try {
+      await lookupJob(so);
+      if (jobCache[so]) await loadBoard(so, true);
+    } catch (err) {
+      toast(err.message || "Gagal memuat job");
+    }
+    renderWorkflowDrawer(so);
+  };
+
+  // Read-only PO detail — never creates a job.
+  window.v49PODetail = async function (number) {
+    const o = orderBySo(number);
+    if (!o) return;
+    selectedSo = number;
+    const modal = document.getElementById("modal");
+    modal.innerHTML =
+      '<div class="drawerback"><aside class="detaildrawer shipping-drawer" role="dialog" aria-modal="true"><div class="drawerhead"><h2>Detail Sales Order Accurate</h2><button type="button" class="btn sm" onclick="v49Close()">✕ Tutup</button></div><div class="drawerbody">Memuat detail dokumen…</div></aside></div>';
+    try {
+      const detail = await request(
+        API + "/production/orders/" + encodeURIComponent(number),
+      );
+      const lines = Array.isArray(detail.line_items) ? detail.line_items : [];
+      const cells = lines
+        .map(
+          (line) =>
+            "<tr><td>" +
+            escapeHtml(line.item_code || "—") +
+            "</td><td>" +
+            escapeHtml(line.name || "—") +
+            "</td><td>" +
+            (line.quantity == null
+              ? "Belum diketahui"
+              : escapeHtml(String(line.quantity))) +
+            "</td><td>" +
+            escapeHtml(line.unit || "—") +
+            "</td></tr>",
+        )
+        .join("");
+      let gateHtml =
+        '<p class="v49-quiet">Job produksi V3 belum dibuat. Membuka detail tidak membuat job.</p>';
+      try {
+        const job = await lookupJob(number);
+        if (job) {
+          gateHtml =
+            "<p>Job V3 #<b>" +
+            escapeHtml(String(job.id)) +
+            "</b> · Design: <b>" +
+            escapeHtml(job.design_status || "—") +
+            "</b> · Payment: <b>" +
+            escapeHtml(job.payment_status || "—") +
+            "</b> · Sample: <b>" +
+            escapeHtml(job.sample_status || "—") +
+            "</b> · Proses: <b>" +
+            escapeHtml(job.processing_status || "—") +
+            '</b></p><p><button type="button" class="btn" id="v3-open-from-detail">Buka panel transaksi V3</button></p>';
+        } else {
+          gateHtml +=
+            '<p><button type="button" class="btn" id="v3-open-from-detail">Buka panel transaksi V3</button></p>';
+        }
+      } catch (jobErr) {
+        gateHtml =
+          '<p class="v49-quiet">' +
+          escapeHtml(jobErr.message || "Job tidak dapat dibaca") +
+          "</p>";
+      }
+      modal.querySelector(".drawerbody").innerHTML =
+        "<p><b>" +
+        escapeHtml(detail.po_number) +
+        "</b> · " +
+        escapeHtml(detail.customer || "Pelanggan belum diketahui") +
+        "</p><p>Status proses V3: <b>" +
+        escapeHtml(detail.production_status || "Baru") +
+        "</b></p>" +
+        gateHtml +
+        "<p>Sales: " +
+        escapeHtml(detail.sales || "Belum diketahui") +
+        " · Cabang: " +
+        escapeHtml(detail.branch_id || "Belum diketahui") +
+        "</p><p>Deadline: " +
+        escapeHtml(detail.deadline || "Belum diketahui") +
+        '</p><div class="v26-scroll"><table><thead><tr><th>Kode</th><th>Produk</th><th>Qty</th><th>Satuan</th></tr></thead><tbody>' +
+        (cells || '<tr><td colspan="4">Tidak ada baris</td></tr>') +
+        '</tbody></table></div><p class="v49-quiet">Accurate read-only. Transaksi hanya via panel V3 contextual.</p>';
+      const openBtn = document.getElementById("v3-open-from-detail");
+      if (openBtn) {
+        openBtn.onclick = function () {
+          window.v3OpenWorkflow(number);
+        };
+      }
+    } catch (err) {
+      modal.querySelector(".drawerbody").textContent =
+        "Detail belum tersedia: " + (err.message || err);
+    }
+  };
+
+  window.v49Close = function () {
+    const modal = document.getElementById("modal");
+    if (modal) modal.innerHTML = "";
+    selectedSo = null;
   };
 
   const oldRender = window.render;
@@ -199,10 +1124,42 @@
     status.textContent = loading
       ? "Membaca pesanan Accurate…"
       : lastSync
-        ? "Sumber: Gateway Accurate • Sinkron: " + lastSync
+        ? "Sumber: Gateway Accurate • Sinkron: " +
+          lastSync +
+          " • halaman " +
+          inboxPage
         : "Sumber belum terhubung: " + fetchError;
     const content = root.querySelector(".content");
     if (content && !status.parentElement) content.prepend(status);
+
+    let toolbar = document.getElementById("v3-inbox-tools");
+    if (!toolbar && content) {
+      toolbar = document.createElement("div");
+      toolbar.id = "v3-inbox-tools";
+      toolbar.className = "v3-inbox-tools";
+      toolbar.innerHTML =
+        '<label>Cari SO <input id="v3-inbox-q" type="search" placeholder="Nomor / keyword"/></label>' +
+        '<button type="button" class="btn sm" id="v3-inbox-search">Cari</button>' +
+        '<button type="button" class="btn sm" id="v3-inbox-prev">Prev</button>' +
+        '<button type="button" class="btn sm" id="v3-inbox-next">Next</button>' +
+        '<button type="button" class="btn sm" id="v3-inbox-refresh">Refresh</button>';
+      content.prepend(toolbar);
+      document.getElementById("v3-inbox-search").onclick = function () {
+        inboxKeyword = field("v3-inbox-q");
+        inboxPage = 1;
+        refreshInbox(1);
+      };
+      document.getElementById("v3-inbox-prev").onclick = function () {
+        if (inboxPage > 1) refreshInbox(inboxPage - 1);
+      };
+      document.getElementById("v3-inbox-next").onclick = function () {
+        refreshInbox(inboxPage + 1);
+      };
+      document.getElementById("v3-inbox-refresh").onclick = function () {
+        refreshInbox(inboxPage);
+      };
+    }
+
     root.querySelectorAll(".demo").forEach((x) => x.remove());
     root.querySelectorAll(".v36-sectionhead small").forEach((x) => {
       x.textContent = "Data hanya dari API Accurate; bukan fixture";
@@ -213,24 +1170,66 @@
     root
       .querySelectorAll('button[onclick*="resetDemo"]')
       .forEach((x) => x.remove());
+
+    // Inject contextual V3 open buttons on SO rows without removing existing UI.
+    root.querySelectorAll("tbody tr").forEach(function (tr) {
+      const first = tr.querySelector("td");
+      if (!first) return;
+      const so = (first.textContent || "").trim();
+      if (!so || !orderBySo(so)) return;
+      if (tr.querySelector(".v3-open-wf")) return;
+      const td = document.createElement("td");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn sm v3-open-wf";
+      btn.textContent = "V3";
+      btn.title = "Panel transaksi V3 untuk SO ini";
+      btn.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        window.v3OpenWorkflow(so);
+      });
+      td.appendChild(btn);
+      tr.appendChild(td);
+    });
     return result;
   };
 
   async function refreshInbox(page) {
     if (loading) return;
     loading = true;
+    inboxPage = page || 1;
     if (typeof window.render === "function") window.render();
     try {
       if (!localStorage.getItem(TOKEN_KEY)) {
         throw new Error("Login V3 diperlukan sebelum membaca Inbox Accurate");
       }
-      const data = await request(
-        API + "/production/inbox?page=" + (page || 1) + "&limit=50",
-      );
+      const q =
+        API +
+        "/production/inbox?page=" +
+        inboxPage +
+        "&limit=50" +
+        (inboxKeyword
+          ? "&keyword=" + encodeURIComponent(inboxKeyword)
+          : "");
+      const data = await request(q);
       if (!Array.isArray(data.rows) || data.mode !== "live") {
         throw new Error("Respons sumber bukan data live yang terverifikasi");
       }
+      const prevJobs = jobCache;
       window.orders = data.rows.map(mapOrder).filter(Boolean);
+      window.orders.forEach(function (o) {
+        if (prevJobs[o.id]) {
+          o.v3JobId = prevJobs[o.id].id;
+          o.design_status = prevJobs[o.id].design_status;
+          o.payment_status = prevJobs[o.id].payment_status;
+          o.sample_status = prevJobs[o.id].sample_status;
+        }
+      });
+      // Drop board cache for SO not on this page to limit cross-PO leakage memory.
+      Object.keys(boardCache).forEach(function (so) {
+        if (!orderBySo(so)) delete boardCache[so];
+      });
       window.taskEntries = {};
       window.history = [];
       lastSync = new Date().toLocaleTimeString("id-ID");
@@ -252,106 +1251,55 @@
     localStorage.removeItem(TOKEN_KEY);
     window.location.href = "/";
   };
-
-  window.v49PODetail = async function (number) {
-    const o = (window.orders || []).find((x) => x.id === number);
-    if (!o) return;
-    const modal = document.getElementById("modal");
-    modal.innerHTML =
-      '<div class="drawerback"><aside class="detaildrawer shipping-drawer" role="dialog" aria-modal="true"><div class="drawerhead"><h2>Detail Sales Order Accurate</h2><button class="btn sm" onclick="v49Close()">✕ Tutup</button></div><div class="drawerbody">Memuat detail dokumen…</div></aside></div>';
-    try {
-      const detail = await request(
-        API + "/production/orders/" + encodeURIComponent(number),
-      );
-      const lines = Array.isArray(detail.line_items) ? detail.line_items : [];
-      const cells = lines
-        .map(
-          (line) =>
-            "<tr><td>" +
-            escape(line.item_code || "—") +
-            "</td><td>" +
-            escape(line.name || "—") +
-            "</td><td>" +
-            (line.quantity == null
-              ? "Belum diketahui"
-              : escape(String(line.quantity))) +
-            "</td><td>" +
-            escape(line.unit || "—") +
-            "</td></tr>",
-        )
-        .join("");
-      let gateHtml =
-        '<p class="v49-quiet">Job produksi V3 belum dibuat untuk SO ini.</p>';
-      try {
-        const job = await ensureJob(
-          Object.assign({}, o, {
-            branch: detail.branch_id || o.branch,
-            accurateId: detail.accurate_id || o.accurateId,
-            name: detail.customer || o.name,
-          }),
-        );
-        gateHtml =
-          "<p>Job V3 #<b>" +
-          escape(String(job.id)) +
-          "</b> · Design: <b>" +
-          escape(job.design_status || "—") +
-          "</b> · Payment: <b>" +
-          escape(job.payment_status || "—") +
-          "</b> · Sample: <b>" +
-          escape(job.sample_status || "—") +
-          "</b> · Proses: <b>" +
-          escape(job.processing_status || "—") +
-          "</b></p>";
-      } catch (jobErr) {
-        gateHtml =
-          '<p class="v49-quiet">Job V3: ' +
-          escape(jobErr.message || "belum dapat dibuat") +
-          "</p>";
-      }
-      modal.querySelector(".drawerbody").innerHTML =
-        "<p><b>" +
-        escape(detail.po_number) +
-        "</b> · " +
-        escape(detail.customer || "Pelanggan belum diketahui") +
-        "</p><p>Status proses V3: <b>" +
-        escape(detail.production_status || "Baru") +
-        "</b></p>" +
-        gateHtml +
-        "<p>Sales: " +
-        escape(detail.sales || "Belum diketahui") +
-        " · Cabang: " +
-        escape(detail.branch_id || "Belum diketahui") +
-        "</p><p>Deadline: " +
-        escape(detail.deadline || "Belum diketahui") +
-        '</p><div class="v26-scroll"><table><thead><tr><th>Kode</th><th>Produk</th><th>Qty</th><th>Satuan</th></tr></thead><tbody>' +
-        (cells || '<tr><td colspan="4">Tidak ada baris</td></tr>') +
-        '</tbody></table></div><p class="v49-quiet">Accurate tetap read-only. Mutasi produksi memakai API kanonik V3 (Phase 3 wiring bertahap).</p>';
-    } catch (err) {
-      modal.querySelector(".drawerbody").textContent =
-        "Detail belum tersedia: " + err.message;
-    }
+  window.v3Api = {
+    request: request,
+    lookupJob: lookupJob,
+    createJob: createJob,
+    loadBoard: loadBoard,
+    escapeHtml: escapeHtml,
+    idemKey: idemKey,
   };
+  window.v3EnsureJob = createJob; // explicit create only — do not use on view
 
-  // Block mutation-looking demo confirmations from claiming success without API.
   document.addEventListener(
     "click",
     function (event) {
       const button = event.target.closest("button");
       if (!button) return;
+      if (button.closest(".v3-workflow-body") || button.classList.contains("v3-open-wf")) {
+        return;
+      }
       const label = (button.textContent || "").toLowerCase();
+      const onclick = button.getAttribute("onclick") || "";
       if (
         label.includes("simulasi") ||
         label.includes("demo") ||
-        label.includes("reset demo")
+        label.includes("reset demo") ||
+        onclick.includes("resetDemo") ||
+        onclick.includes("v36SimulateReceipt")
       ) {
         event.preventDefault();
         event.stopPropagation();
-        if (typeof window.toast === "function") {
-          window.toast("Aksi transaksi belum aktif — menunggu API V3");
-        }
+        toast("Aksi demo/simulasi dinonaktifkan — gunakan panel V3");
       }
     },
     true,
+  );
+
+  // Neutralize legacy mutation helpers that would invent success without API.
+  ["advance", "pack", "printOn", "approveSample", "cancelRemaining"].forEach(
+    function (name) {
+      if (typeof window[name] === "function") {
+        window[name] = function () {
+          toast(
+            "Gunakan panel V3 pada SO terpilih — " +
+              name +
+              " demo tidak menulis ledger server",
+          );
+          return false;
+        };
+      }
+    },
   );
 
   window.orders = [];

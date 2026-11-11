@@ -991,3 +991,201 @@ async def tracking_timeline(
         )
     ).all()
     return list(rows)
+
+
+async def find_job_by_so(
+    session: AsyncSession, user: User, so_number: str
+) -> ProductionJob | None:
+    """Read-only lookup — never creates a job."""
+    _require(user, P.JOB_READ)
+    job = await session.scalar(
+        select(ProductionJob).where(ProductionJob.accurate_so_number == so_number)
+    )
+    if job is None:
+        return None
+    _branch(user, job.branch_id)
+    return job
+
+
+async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> dict:
+    """Authoritative drawer payload for one selected SO/job."""
+    _require(user, P.JOB_READ)
+    _branch(user, job.branch_id)
+    from app.models.production.prep import JobLineQty, PrepEvent, PrepState
+
+    designs = (
+        await session.scalars(
+            select(DesignVersion)
+            .where(DesignVersion.job_id == job.id)
+            .order_by(DesignVersion.version_no.desc())
+        )
+    ).all()
+    receipts = (
+        await session.scalars(
+            select(PaymentReceiptRef)
+            .where(PaymentReceiptRef.job_id == job.id)
+            .order_by(PaymentReceiptRef.id.desc())
+        )
+    ).all()
+    bypasses = (
+        await session.scalars(
+            select(PaymentBypass)
+            .where(PaymentBypass.job_id == job.id)
+            .order_by(PaymentBypass.id.desc())
+        )
+    ).all()
+    assignments = (
+        await session.scalars(
+            select(ScheduleAssignment)
+            .where(ScheduleAssignment.job_id == job.id)
+            .order_by(ScheduleAssignment.id.asc())
+        )
+    ).all()
+    samples = (
+        await session.scalars(
+            select(SampleVersion)
+            .where(SampleVersion.job_id == job.id)
+            .order_by(SampleVersion.version_no.desc())
+        )
+    ).all()
+    prep_states = (
+        await session.scalars(
+            select(PrepState).where(PrepState.job_id == job.id)
+        )
+    ).all()
+    prep_events = (
+        await session.scalars(
+            select(PrepEvent)
+            .where(PrepEvent.job_id == job.id)
+            .order_by(PrepEvent.id.desc())
+            .limit(50)
+        )
+    ).all()
+    lines = (
+        await session.scalars(
+            select(JobLineQty).where(JobLineQty.job_id == job.id)
+        )
+    ).all()
+    events = (
+        await session.scalars(
+            select(ProductionEvent)
+            .where(ProductionEvent.job_id == job.id)
+            .order_by(ProductionEvent.created_at.asc(), ProductionEvent.id.asc())
+        )
+    ).all()
+    return {
+        "job": {
+            "id": job.id,
+            "accurate_so_number": job.accurate_so_number,
+            "branch_id": job.branch_id,
+            "customer_name": job.customer_name,
+            "design_status": job.design_status,
+            "payment_status": job.payment_status,
+            "sample_status": job.sample_status,
+            "processing_status": job.processing_status,
+        },
+        "design_versions": [
+            {
+                "id": d.id,
+                "version_no": d.version_no,
+                "file_name": d.file_name,
+                "status": d.status,
+                "bypass": d.bypass,
+                "customer_approval": d.customer_approval,
+                "decision_reason": d.decision_reason,
+            }
+            for d in designs
+        ],
+        "payment_receipts": [
+            {
+                "id": r.id,
+                "accurate_receipt_id": r.accurate_receipt_id,
+                "accurate_receipt_number": r.accurate_receipt_number,
+                "amount": str(r.amount) if r.amount is not None else None,
+                "status": r.status,
+            }
+            for r in receipts
+        ],
+        "payment_bypasses": [
+            {
+                "id": b.id,
+                "reason": b.reason,
+                "active": b.active,
+                "revoke_reason": b.revoke_reason,
+            }
+            for b in bypasses
+        ],
+        "assignments": [
+            {
+                "id": a.id,
+                "so_line_id": a.so_line_id,
+                "color_pass": a.color_pass,
+                "operator_name": a.operator_name,
+                "machine_name": a.machine_name,
+                "work_date": str(a.work_date),
+                "qty_planned": str(a.qty_planned),
+                "qty_confirmed": str(a.qty_confirmed),
+                "qty_cancelled_remaining": str(a.qty_cancelled_remaining),
+                "status": a.status,
+                "location_provenance": a.location_provenance,
+            }
+            for a in assignments
+        ],
+        "samples": [
+            {
+                "id": s.id,
+                "version_no": s.version_no,
+                "file_name": s.file_name,
+                "status": s.status,
+                "assignment_id": s.assignment_id,
+            }
+            for s in samples
+        ],
+        "prep_states": [
+            {
+                "id": p.id,
+                "so_line_id": p.so_line_id,
+                "role": p.role,
+                "qty": str(p.qty),
+                "evidence_ref": p.evidence_ref,
+                "assignment_id": p.assignment_id,
+            }
+            for p in prep_states
+        ],
+        "prep_events": [
+            {
+                "id": e.id,
+                "role": e.role,
+                "event_type": e.event_type,
+                "so_line_id": e.so_line_id,
+                "qty_before": str(e.qty_before),
+                "qty_after": str(e.qty_after),
+                "evidence_ref": e.evidence_ref,
+            }
+            for e in prep_events
+        ],
+        "job_lines": [
+            {"so_line_id": ln.so_line_id, "po_qty": str(ln.po_qty)} for ln in lines
+        ],
+        "events": [
+            {
+                "id": e.id,
+                "event_type": e.event_type,
+                "qty_physical": str(e.qty_physical)
+                if e.qty_physical is not None
+                else None,
+                "qty_pass_ops": str(e.qty_pass_ops)
+                if e.qty_pass_ops is not None
+                else None,
+                "assignment_id": e.assignment_id,
+                "so_line_id": e.so_line_id,
+                "color_pass": e.color_pass,
+                "lot_code": e.lot_code,
+                "accurate_sj_id": e.accurate_sj_id,
+                "accurate_sj_number": e.accurate_sj_number,
+                "reason": e.reason,
+                "created_at": e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in events
+        ],
+    }
