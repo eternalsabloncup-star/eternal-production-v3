@@ -29,7 +29,7 @@ Probe (fail-closed, no fixtures):
 
 ```bash
 GATEWAY_MODE=live \
-ACCURATE_API_TOKEN=… ACCURATE_DATABASE_ID=… \
+ACCURATE_API_TOKEN=… ACCURATE_SIGNATURE_SECRET=… \
 python3 scripts/phase5_live_probe.py
 ```
 

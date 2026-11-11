@@ -27,10 +27,36 @@ def _upstream_http(exc: AccurateUpstreamError) -> HTTPException:
 
 
 def _mode(settings: GatewaySettings) -> str:
-    mode = (settings.gateway_mode or "fixture").strip().lower()
+    """Only exact live|fixture. Unknown values fail closed (never silent fixture)."""
+    mode = (settings.gateway_mode or "").strip().lower()
     if mode == "live":
         return "live"
-    return "fixture"
+    if mode in {"", "fixture"}:
+        return "fixture"
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "code": "gateway_mode_invalid",
+            "message": "GATEWAY_MODE must be live or fixture",
+        },
+    )
+
+
+def _require_live_ready(settings: GatewaySettings) -> AccurateClient:
+    """Live mode: credentials required; never fall back to fixtures/demo data."""
+    client = _client(settings)
+    if not client.configured():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "accurate_credentials_missing",
+                "message": (
+                    "GATEWAY_MODE=live requires ACCURATE_API_TOKEN and "
+                    "ACCURATE_SIGNATURE_SECRET — fixture fallback forbidden"
+                ),
+            },
+        )
+    return client
 
 
 @router.get("/sales-orders")
@@ -63,8 +89,9 @@ async def list_sales_orders(
             "source": "fixture",
             "live_verified": False,
         }
+    # LIVE — fixtures unreachable on this branch
     try:
-        items = await _client(settings).list_sales_orders(
+        items = await _require_live_ready(settings).list_sales_orders(
             customer=needle, branch=branch, status=status, limit=limit
         )
     except AccurateUpstreamError as exc:
@@ -105,7 +132,7 @@ async def get_sales_order(
             "live_verified": False,
         }
     try:
-        row = await _client(settings).get_sales_order(number)
+        row = await _require_live_ready(settings).get_sales_order(number)
     except AccurateUpstreamError as exc:
         raise _upstream_http(exc) from exc
     detail = so_detail(row)
@@ -138,7 +165,7 @@ async def get_receipt(
         out["live_verified"] = False
         return out
     try:
-        row = await _client(settings).get_receipt(receipt_id)
+        row = await _require_live_ready(settings).get_receipt(receipt_id)
     except AccurateUpstreamError as exc:
         raise _upstream_http(exc) from exc
     out = receipt_contract(row)
@@ -168,7 +195,7 @@ async def get_delivery_note(
         out["live_verified"] = False
         return out
     try:
-        row = await _client(settings).get_delivery_note(dn_id)
+        row = await _require_live_ready(settings).get_delivery_note(dn_id)
     except AccurateUpstreamError as exc:
         raise _upstream_http(exc) from exc
     out = delivery_note_contract(row)

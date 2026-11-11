@@ -15,18 +15,32 @@ Never loads ERP V1 credentials or databases.
 
 ## Modes
 
-- `GATEWAY_MODE=fixture` (default): deterministic local corpus for CI / staging dry-run. `live_verified=false`.
-- `GATEWAY_MODE=live`: Accurate Online via `ACCURATE_API_TOKEN` + `ACCURATE_DATABASE_ID` (open-db session). Fail closed if missing.
+- `GATEWAY_MODE=fixture` (default): deterministic local corpus for CI. `live_verified=false`.
+- `GATEWAY_MODE=live`: Accurate Online API Token 1.0.3. **Never falls back to fixtures** on missing creds or upstream errors.
+
+## Live auth (API Token 1.0.3)
+
+Every Accurate request:
+
+- `Authorization: Bearer <ACCURATE_API_TOKEN>`
+- `X-Api-Timestamp` (`dd/MM/yyyy HH:mm:ss`, Asia/Jakarta)
+- `X-Api-Signature` Base64(HMAC-SHA256(Signature Secret, timestamp))
+
+Host + database id from `POST https://account.accurate.id/api/api-token.do` (`d.database.*`).  
+`ACCURATE_DATABASE_ID` is optional pin only. HTTP 308 re-signs.
 
 ## Env
 
 ```
-GATEWAY_M2M_TOKEN=...          # shared with V3_ACCURATE_READ_GATEWAY_TOKEN
+GATEWAY_M2M_TOKEN=...                 # secret — shared with V3_ACCURATE_READ_GATEWAY_TOKEN
 GATEWAY_MODE=fixture|live
-ACCURATE_API_TOKEN=...         # Accurate API token (Owner)
-ACCURATE_DATABASE_ID=...       # Accurate DB id for open-db
+ACCURATE_API_TOKEN=...                # secret — replacement token only
+ACCURATE_SIGNATURE_SECRET=...         # secret
+ACCURATE_DATABASE_ID=                 # optional pin
 ACCURATE_ACCOUNT_BASE=https://account.accurate.id
 ```
+
+See `docs/live-credential-readiness.md`.
 
 ## Run
 
