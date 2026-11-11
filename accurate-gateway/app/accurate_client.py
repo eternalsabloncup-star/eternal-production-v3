@@ -394,11 +394,11 @@ class AccurateClient:
             "upstream_branch_filter": upstream_branch,
         }
 
-    async def get_sales_order(self, number: str) -> dict[str, Any]:
+    async def _fetch_so_detail(self, params: dict[str, Any]) -> dict[str, Any]:
         data = await self._request(
             "GET",
             "/accurate/api/sales-order/detail.do",
-            params={"number": number},
+            params=params,
         )
         row = data.get("d") or data.get("data") or data
         if not isinstance(row, dict):
@@ -408,6 +408,78 @@ class AccurateClient:
                 status_code=502,
             )
         return normalize_sales_order(row)
+
+    async def _resolve_so_id_by_number(self, so_number: str) -> int:
+        """Map Accurate document number → internal id. Never log the number."""
+        attempts: list[dict[str, Any]] = [
+            {
+                "fields": "id,number",
+                "sp.pageSize": 20,
+                "sp.page": 1,
+                "filter.number.op": "EQUAL",
+                "filter.number.val": so_number,
+            },
+            {
+                "fields": "id,number",
+                "sp.pageSize": 50,
+                "sp.page": 1,
+                "filter.keywords.op": "EQUAL",
+                "filter.keywords.val": so_number,
+            },
+        ]
+        for params in attempts:
+            try:
+                data = await self._request(
+                    "GET", "/accurate/api/sales-order/list.do", params=params
+                )
+            except AccurateUpstreamError as exc:
+                # Unsupported filter variants → try next strategy; never invent detail.
+                if exc.status_code in {404, 502}:
+                    continue
+                raise
+            rows = data.get("d") or data.get("data") or []
+            if not isinstance(rows, list):
+                continue
+            exact = [
+                r
+                for r in rows
+                if isinstance(r, dict)
+                and str(r.get("number") or r.get("no") or "").strip() == so_number
+            ]
+            if len(exact) == 1 and exact[0].get("id") is not None:
+                try:
+                    return int(exact[0]["id"])
+                except (TypeError, ValueError) as exc:
+                    raise AccurateUpstreamError(
+                        "accurate_detail_shape",
+                        "sales-order id tidak valid",
+                        status_code=502,
+                    ) from exc
+        raise AccurateUpstreamError(
+            "accurate_not_found",
+            "dokumen tidak ditemukan di Accurate",
+            status_code=404,
+        )
+
+    async def get_sales_order(self, number: str) -> dict[str, Any]:
+        """Load SO detail.
+
+        Accurate Online ``sales-order/detail.do`` requires the numeric internal
+        ``id`` (not document number). Callers may pass either:
+        - internal id (digits) → detail.do?id=
+        - document number → resolve via list, then detail.do?id=
+        """
+        key = (number or "").strip()
+        if not key:
+            raise AccurateUpstreamError(
+                "accurate_not_found",
+                "dokumen tidak ditemukan di Accurate",
+                status_code=404,
+            )
+        if key.isdigit():
+            return await self._fetch_so_detail({"id": int(key)})
+        so_id = await self._resolve_so_id_by_number(key)
+        return await self._fetch_so_detail({"id": so_id})
 
     async def get_receipt(self, receipt_id: str) -> dict[str, Any]:
         params: dict[str, Any]

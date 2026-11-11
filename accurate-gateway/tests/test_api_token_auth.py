@@ -231,7 +231,10 @@ async def test_http_308_resigns_and_updates_host(monkeypatch):
                     "d": {"database": {"id": 1, "host": "https://old.accurate.id"}},
                 },
             )
+        # Numeric id path — detail.do?id= only (no number query).
         if host == "old.accurate.id" and "sales-order/detail.do" in path:
+            assert request.url.params.get("id") == "77"
+            assert request.url.params.get("number") is None
             return httpx.Response(
                 308,
                 headers={
@@ -246,6 +249,7 @@ async def test_http_308_resigns_and_updates_host(monkeypatch):
                 json={
                     "s": True,
                     "d": {
+                        "id": 77,
                         "number": "SO/X",
                         "statusName": "OPEN",
                         "detailItem": [],
@@ -258,8 +262,9 @@ async def test_http_308_resigns_and_updates_host(monkeypatch):
 
     _patch_client(handler, monkeypatch)
     client = AccurateClient(_settings())
-    detail = await client.get_sales_order("SO/X")
+    detail = await client.get_sales_order("77")
     assert detail["number"] == "SO/X"
+    assert detail["accurate_id"] == "77"
     assert client._host == "https://new.accurate.id"
 
 

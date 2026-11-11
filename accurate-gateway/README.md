@@ -9,7 +9,7 @@ Never loads ERP V1 credentials or databases.
 |--------|------|------|
 | GET | `/health` | none |
 | GET | `/sales-orders` | Bearer `GATEWAY_M2M_TOKEN` |
-| GET | `/sales-orders/{number}` | Bearer |
+| GET | `/sales-orders/{key}` | Bearer — Accurate SO number or internal id (`detail.do` requires `id`) |
 | GET | `/receipts/{id}` | Bearer |
 | GET | `/delivery-notes/{id}` | Bearer |
 

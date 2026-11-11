@@ -125,20 +125,28 @@ async def list_sales_orders(
     }
 
 
-@router.get("/sales-orders/{number}")
+@router.get("/sales-orders/{number:path}")
 async def get_sales_order(
     number: str,
     settings: GatewaySettings = Depends(get_settings),
 ) -> dict[str, Any]:
+    """Detail by Accurate document number or internal id (path may include '/')."""
     mode = _mode(settings)
+    key = (number or "").strip()
     if mode == "fixture":
-        row = fixtures.get_sales_order(number)
+        row = fixtures.get_sales_order(key)
+        if row is None and key.isdigit():
+            # Allow fixture lookup by accurate_id as well as document number.
+            for candidate in fixtures.FIXTURE_SALES_ORDERS.values():
+                if str(candidate.get("accurate_id") or candidate.get("id") or "") == key:
+                    row = fixtures.get_sales_order(str(candidate["number"]))
+                    break
         if row is None:
             raise HTTPException(
                 404,
                 detail={
                     "code": "document_not_found",
-                    "message": f"SO {number} tidak ada di fixture",
+                    "message": "SO tidak ada di fixture",
                 },
             )
         detail = so_detail(row)
@@ -149,8 +157,9 @@ async def get_sales_order(
             "live_verified": False,
         }
     try:
-        row = await _require_live_ready(settings).get_sales_order(number)
+        row = await _require_live_ready(settings).get_sales_order(key)
     except AccurateUpstreamError as exc:
+        # Preserve upstream vs local distinction via error code (no document id logged).
         raise _upstream_http(exc) from exc
     detail = so_detail(row)
     links = detail.get("links") if isinstance(detail.get("links"), dict) else {}
