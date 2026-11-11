@@ -3,6 +3,12 @@
 from app.models.auth_audit import AuthAuditEvent
 from app.models.production import (
     DesignVersion,
+    JobLineQty,
+    OperatorRate,
+    PayrollLine,
+    PayrollRun,
+    PrepEvent,
+    PrepState,
     ProductionEvent,
     ProductionJob,
     SampleVersion,
@@ -23,4 +29,10 @@ __all__ = [
     "ScheduleAssignment",
     "SampleVersion",
     "ProductionEvent",
+    "JobLineQty",
+    "PrepState",
+    "PrepEvent",
+    "OperatorRate",
+    "PayrollRun",
+    "PayrollLine",
 ]

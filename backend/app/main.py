@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
+from app.api.production.payroll import router as production_payroll_router
 from app.api.production.workflow import router as production_workflow_router
 from app.api.production_inbox import router as production_inbox_router
 from app.core.config import get_settings
@@ -42,6 +43,9 @@ def create_app() -> FastAPI:
     application.include_router(production_inbox_router, prefix=settings.api_prefix)
     application.include_router(
         production_workflow_router, prefix=settings.api_prefix
+    )
+    application.include_router(
+        production_payroll_router, prefix=settings.api_prefix
     )
     return application
 

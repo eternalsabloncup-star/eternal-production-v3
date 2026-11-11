@@ -13,6 +13,7 @@ from app.core.security import get_current_user, require_permissions
 from app.db.session import get_db_session
 from app.models.user import User
 from app.services.production import engine, permissions as P
+from app.services.production import prep as prep_svc
 
 router = APIRouter(prefix="/production/jobs", tags=["production-workflow"])
 
@@ -140,6 +141,17 @@ class CancelSjBody(BaseModel):
     accurate_sj_id: str
     reason: str
     idempotency_key: str = Field(min_length=8, max_length=120)
+
+
+class PrepBody(BaseModel):
+    so_line_id: str
+    qty: Decimal
+    evidence_ref: str
+    idempotency_key: str = Field(min_length=8, max_length=120)
+    po_qty: Decimal | None = None
+    assignment_id: int | None = None
+    reason: str | None = None
+    as_correction: bool = False
 
 
 @router.post("")
@@ -344,6 +356,68 @@ async def schedule_transfer(
         reason=body.reason,
     )
     return {"id": row.id, "status": row.status, "qty_planned": str(row.qty_planned)}
+
+
+@router.post("/{job_id}/prep/screener")
+async def prep_screener(
+    job_id: int,
+    body: PrepBody,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    job = await engine.get_job(session, job_id)
+    state = await prep_svc.set_preparation(
+        session,
+        user,
+        job,
+        role="screener",
+        so_line_id=body.so_line_id,
+        qty=body.qty,
+        po_qty=body.po_qty,
+        evidence_ref=body.evidence_ref,
+        idempotency_key=body.idempotency_key,
+        assignment_id=body.assignment_id,
+        reason=body.reason,
+        as_correction=body.as_correction,
+    )
+    remaining = await prep_svc.remaining_helper_qty(session, job.id, body.so_line_id)
+    return {
+        "id": state.id,
+        "role": state.role,
+        "qty": str(state.qty),
+        "helper_remaining_vs_po": str(remaining),
+    }
+
+
+@router.post("/{job_id}/prep/helper")
+async def prep_helper(
+    job_id: int,
+    body: PrepBody,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    job = await engine.get_job(session, job_id)
+    state = await prep_svc.set_preparation(
+        session,
+        user,
+        job,
+        role="helper",
+        so_line_id=body.so_line_id,
+        qty=body.qty,
+        po_qty=body.po_qty,
+        evidence_ref=body.evidence_ref,
+        idempotency_key=body.idempotency_key,
+        assignment_id=body.assignment_id,
+        reason=body.reason,
+        as_correction=body.as_correction,
+    )
+    remaining = await prep_svc.remaining_helper_qty(session, job.id, body.so_line_id)
+    return {
+        "id": state.id,
+        "role": state.role,
+        "qty": str(state.qty),
+        "remaining_vs_po": str(remaining),
+    }
 
 
 @router.post("/{job_id}/samples")

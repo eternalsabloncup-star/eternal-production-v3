@@ -38,6 +38,8 @@ ALL_PERMS = [
     P.PAYMENT_BYPASS,
     P.PAYMENT_REVOKE,
     P.SCHEDULE_MANAGE,
+    P.PREP_SCREENER,
+    P.PREP_HELPER,
     P.SAMPLE_UPLOAD,
     P.SAMPLE_DECIDE,
     P.OUTPUT_CONFIRM,
@@ -46,6 +48,8 @@ ALL_PERMS = [
     P.PACKING_RECORD,
     P.DELIVERY_MANAGE,
     P.TRACKING_READ,
+    P.PAYROLL_MANAGE,
+    P.PAYROLL_READ,
 ]
 
 
@@ -169,6 +173,34 @@ async def test_full_happy_path_and_guards(client: AsyncClient) -> None:
     assert asg.status_code == 200
     assignment_id = asg.json()["id"]
 
+    screen = await client.post(
+        f"/api/v1/production/jobs/{job_id}/prep/screener",
+        headers=h,
+        json={
+            "so_line_id": "line-1",
+            "qty": "2",
+            "po_qty": "100",
+            "evidence_ref": "screen-photo-1",
+            "idempotency_key": "prep-screen-1",
+            "assignment_id": assignment_id,
+        },
+    )
+    assert screen.status_code == 200
+    helper = await client.post(
+        f"/api/v1/production/jobs/{job_id}/prep/helper",
+        headers=h,
+        json={
+            "so_line_id": "line-1",
+            "qty": "80",
+            "po_qty": "100",
+            "evidence_ref": "cup-photo-1",
+            "idempotency_key": "prep-helper-1",
+            "assignment_id": assignment_id,
+        },
+    )
+    assert helper.status_code == 200
+    assert Decimal(helper.json()["remaining_vs_po"]) == Decimal("20")
+
     sample = await client.post(
         f"/api/v1/production/jobs/{job_id}/samples",
         headers=h,
@@ -189,11 +221,12 @@ async def test_full_happy_path_and_guards(client: AsyncClient) -> None:
         },
     )
     assert out_blocked.status_code == 409
-    await client.post(
+    sample_ok = await client.post(
         f"/api/v1/production/jobs/samples/{sample.json()['id']}/decision",
         headers=h,
         json={"decision": "approved"},
     )
+    assert sample_ok.status_code == 200
 
     out = await client.post(
         f"/api/v1/production/jobs/{job_id}/outputs",

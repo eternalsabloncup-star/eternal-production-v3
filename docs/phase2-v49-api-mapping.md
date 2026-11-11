@@ -21,7 +21,8 @@ No global transaction buttons. Each action is SO/job-contextual.
 | Create schedule assignment | `v26Action('assign')`, schedule editor | `POST /{job_id}/schedule/assignments` | Operator/machine/date/pass/qty; gates required |
 | Cancel remaining qty | `cancelRemaining` | `POST /schedule/assignments/{id}/cancel-remaining` | Never cancels confirmed output |
 | Transfer remaining | `v23TransferRemaining`, `v26MoveAction` | `POST /schedule/assignments/{id}/transfer-remaining` | New assignment + provenance |
-| Screener / helper prepare | `v26Action('prepare')` | **GAP** (next slice) | Parallel prep qty + evidence |
+| Screener prepare | workflow Screen / `v26Action('prepare')` | `POST /{job_id}/prep/screener` | Evidence + idempotency; parallel after gates |
+| Helper prepare cups | Prepare Cup / `v26Action('prepare')` | `POST /{job_id}/prep/helper` | PO ceiling + cannot reduce below confirmed output |
 | Upload sample | sample drawer / Renea sample | `POST /{job_id}/samples` | Version + optional assignment |
 | Approve / reject sample | `approveSample`, sample decision UI | `POST /samples/{id}/decision` | Blocks print output while pending |
 | Confirm operator output | print-on / output modal | `POST /{job_id}/outputs` | Idempotency key; physical vs pass ops |
@@ -34,7 +35,8 @@ No global transaction buttons. Each action is SO/job-contextual.
 | Proof of delivery | `confirmDriverDelivery`, `v26ShipAction(...,'pod')` | `POST /{job_id}/pod` | Evidence + receiver; cannot bypass Loading |
 | Cancel / supersede SJ | `v26ShipAction(...,'delete')` | `POST /{job_id}/sj/cancel` | History preserved as `sj_cancelled` |
 | Live tracking timeline | tracking drawer / monitor | `GET /{job_id}/tracking` | Authoritative event ledger |
-| Operator payroll | payroll / salary slip UI | **GAP** (next slice) | Needs historical rate tables |
+| Operator payroll rates | salary slip tarif inputs | `POST/GET /production/payroll/rates` | Effective-dated + historical close |
+| Operator payroll period | `payCalc` / `showSalarySlip` | `POST/GET /production/payroll/runs` | Confirmed events only; idempotent run |
 
 ## Explicitly out of scope for Phase 2 wiring
 

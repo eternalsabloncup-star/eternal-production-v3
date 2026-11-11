@@ -494,6 +494,23 @@ async def decide_sample(
     _branch(user, job.branch_id)
     if decision not in {"approved", "rejected", "revised"}:
         raise HTTPException(422, "Keputusan sample tidak valid")
+    if decision == "approved":
+        from app.models.production.prep import PrepState
+
+        screen = await session.scalar(
+            select(func.coalesce(func.sum(PrepState.qty), 0)).where(
+                PrepState.job_id == job.id, PrepState.role == "screener"
+            )
+        )
+        prepared = await session.scalar(
+            select(func.coalesce(func.sum(PrepState.qty), 0)).where(
+                PrepState.job_id == job.id, PrepState.role == "helper"
+            )
+        )
+        if Decimal(screen or 0) <= 0 or Decimal(prepared or 0) <= 0:
+            raise HTTPException(
+                409, "Sample approval membutuhkan screener & helper prep > 0"
+            )
     ver.status = decision
     ver.decision_by = user.id
     ver.decision_reason = reason
@@ -549,6 +566,37 @@ async def confirm_output(
     )
     if qty_physical > remaining:
         raise HTTPException(409, "Qty melebihi sisa assignment")
+    # Helper preparation ceiling (V49: output must not exceed prepared cups).
+    from app.services.production.prep import helper_prepared_qty
+
+    prepared = await helper_prepared_qty(session, job.id, assignment.so_line_id)
+    if prepared > 0 or color_pass == 1:
+        # If helper has recorded prep, enforce; color-pass 1 always requires prep>0
+        # once any prep state exists for the line.
+        from app.models.production.prep import PrepState
+
+        has_helper = await session.scalar(
+            select(func.count())
+            .select_from(PrepState)
+            .where(
+                PrepState.job_id == job.id,
+                PrepState.so_line_id == assignment.so_line_id,
+                PrepState.role == "helper",
+            )
+        )
+        if int(has_helper or 0) > 0:
+            already = await session.scalar(
+                select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+                    ProductionEvent.job_id == job.id,
+                    ProductionEvent.so_line_id == assignment.so_line_id,
+                    ProductionEvent.event_type.in_(
+                        ["output_confirmed", "output_correction"]
+                    ),
+                    ProductionEvent.color_pass == 1,
+                )
+            )
+            if color_pass == 1 and Decimal(already or 0) + qty_physical > prepared:
+                raise HTTPException(409, "Output melebihi qty helper siap")
     event = ProductionEvent(
         job_id=job.id,
         assignment_id=assignment_id,
