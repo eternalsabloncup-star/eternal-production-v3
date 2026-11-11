@@ -10,7 +10,9 @@ See PR #2 latest commit on `cursor/v49-live-phase1-3e4e`.
 
 ## B. Live Accurate connectivity status
 
-**Status: BLOCKED — credentials not present in agent environment.**
+**Status: BLOCKED — live probe has not passed. Do not claim Accurate connectivity.**
+
+Six secrets are stored/bound in Cursor (Accurate×2, M2M×2, JWT, pepper) but are **not** all injected into this agent VM. Gateway process is not persistently running here. See `docs/internal-gateway-url.md`.
 
 Required for live (independent V3 machine credentials — never ERP V1):
 
@@ -19,9 +21,9 @@ Required for live (independent V3 machine credentials — never ERP V1):
 | `ACCURATE_API_TOKEN` | Accurate Online API Token (Bearer) |
 | `ACCURATE_SIGNATURE_SECRET` | Signature Secret for HMAC-SHA256 (`X-Api-Signature`) |
 | `ACCURATE_DATABASE_ID` | Optional pin vs `api-token.do` → `d.database.id` |
-| `GATEWAY_MODE=live` | Disables fixture corpus |
+| `GATEWAY_MODE=live` | Disables fixture corpus — never fall back |
 | `GATEWAY_M2M_TOKEN` | Gateway M2M (= `V3_ACCURATE_READ_GATEWAY_TOKEN`) |
-| `V3_ACCURATE_READ_GATEWAY_URL` | HTTPS URL of deployed gateway |
+| `V3_ACCURATE_READ_GATEWAY_URL` | Same-host plan: `http://127.0.0.1:8091` (no path prefix) |
 
 Auth (API Token doc 1.0.3): every request sends `Authorization: Bearer`, `X-Api-Timestamp` (`dd/MM/yyyy HH:mm:ss` Asia/Jakarta), and Base64 `X-Api-Signature`. Host resolved via `POST /api/api-token.do`. HTTP 308 re-signs (no stale redirect).
 
@@ -89,16 +91,16 @@ See also `docs/staging-biznet.md` (reuse as production prep sketches; do not app
 
 ## G. Remaining blockers
 
-1. Accurate API token + database id (Owner — secure form)
-2. Shared M2M gateway token + HTTPS gateway URL
-3. V3 JWT secret + password pepper (distinct)
+1. Inject Cursor-stored Accurate + M2M secrets into gateway/API **process env** on the V3 host (store presence ≠ runtime injection)
+2. Persist `V3_ACCURATE_READ_GATEWAY_URL=http://127.0.0.1:8091` on same-host V3 API; keep gateway up on `127.0.0.1:8091`
+3. `phase5_live_probe.py` PASS (`live_verified=true`) — required before any Accurate success claim
 4. VPS access / DNS / TLS for `produksieternalpackaging.id`
 5. Isolated V3 PostgreSQL provisioned on host
-6. Explicit Owner approval after live probe PASS
+6. Explicit Owner approval after live probe PASS — **no merge / no deploy** from this task
 
 ## H. Owner approval actions
 
-1. Add the 7 secret values in the Cursor secure form (Accurate + gateway + V3 auth)
+1. Confirm the six Cursor secrets remain bound; set `V3_ACCURATE_READ_GATEWAY_URL=http://127.0.0.1:8091` in the secure form / host env
 2. Provide VPS access (or apply checklist) without touching ERP V1
 3. Point DNS + issue TLS
 4. After agent re-runs `phase5_live_probe.py` successfully: approve merge/cutover separately

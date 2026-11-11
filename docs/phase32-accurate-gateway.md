@@ -87,7 +87,7 @@ Live Accurate verification is **not** claimed until these exist on the gateway h
 2. `ACCURATE_DATABASE_ID` — database id accepted by `oauth/open-db.do`.
 3. `GATEWAY_MODE=live`.
 4. `GATEWAY_M2M_TOKEN` / `V3_ACCURATE_READ_GATEWAY_TOKEN` shared secret.
-5. `V3_ACCURATE_READ_GATEWAY_URL` pointing at the deployed gateway (HTTPS).
+5. `V3_ACCURATE_READ_GATEWAY_URL` — same-host plan `http://127.0.0.1:8091` (no path prefix); otherwise HTTPS. See `docs/internal-gateway-url.md`.
 6. Network egress from gateway host to `account.accurate.id` and tenant Accurate host.
 
 ERP V1 source parity remains **unverified** (V1 source not readable from this environment).

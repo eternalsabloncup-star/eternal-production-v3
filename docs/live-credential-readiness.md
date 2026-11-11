@@ -12,7 +12,7 @@
 | 3 | `ACCURATE_DATABASE_ID` | Non-secret pin (optional) | No | Host + id come from `POST /api/api-token.do`. Set only to pin/assert identity |
 | 4 | `GATEWAY_M2M_TOKEN` | **Secret** | Yes | Machine token V3 → gateway |
 | 5 | `V3_ACCURATE_READ_GATEWAY_TOKEN` | **Secret** | Yes | Must equal `GATEWAY_M2M_TOKEN` |
-| 6 | `V3_ACCURATE_READ_GATEWAY_URL` | Non-secret setting | Yes | HTTPS gateway base URL (localhost HTTP allowed in dev only) |
+| 6 | `V3_ACCURATE_READ_GATEWAY_URL` | Non-secret setting | Yes | Same-host plan: `http://127.0.0.1:8091` (no path prefix). Other hosts require HTTPS. See `docs/internal-gateway-url.md` |
 | 7 | `V3_JWT_SECRET` | **Secret** | Yes (V3 API) | Distinct from pepper; never V1 JWT |
 | 8 | `V3_PASSWORD_PEPPER` | **Secret** | Yes (V3 API) | Must differ from `V3_JWT_SECRET` |
 
@@ -41,9 +41,9 @@ Any API Token that appeared in a screenshot/chat is **compromised**.
 2. Copy **API Token** and **Signature Secret** into the Cursor Secrets page or VPS env file — values never enter git/PR/logs.  
 3. Set `GATEWAY_MODE=live` on the gateway host.  
 4. Do **not** require manual DB id unless pinning: gateway calls `POST https://account.accurate.id/api/api-token.do` with signed headers and uses `d.database.host` (+ `d.database.id`).  
-5. Point V3 at the gateway: `V3_ACCURATE_READ_GATEWAY_URL` + matching M2M token.  
+5. Point V3 at the gateway: `V3_ACCURATE_READ_GATEWAY_URL=http://127.0.0.1:8091` (same host only; client paths `/sales-orders`, `/receipts/{id}`, `/delivery-notes/{id}` — no extra prefix) + matching M2M token.  
 6. Run `GATEWAY_MODE=live python3 scripts/phase5_live_probe.py` — expects sanitized evidence only.  
-7. Confirm `live_verified=true` in probe output before any cutover approval.
+7. Confirm `live_verified=true` in probe output before any cutover approval. Never claim Accurate connectivity without that PASS.
 
 ## 5. Tests
 
