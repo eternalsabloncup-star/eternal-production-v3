@@ -17,6 +17,7 @@ os.environ["DATABASE_URL_SYNC"] = os.environ.get(
 )
 os.environ["APP_ENV"] = "test"
 os.environ["V3_JWT_SECRET"] = "v3_test_jwt_secret_not_from_v1"
+os.environ["V3_PASSWORD_PEPPER"] = "v3_test_password_pepper_distinct"
 os.environ["V3_ACCURATE_READ_GATEWAY_URL"] = "http://127.0.0.1:9"
 os.environ["V3_ACCURATE_READ_GATEWAY_TOKEN"] = "test-gateway-token"
 

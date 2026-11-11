@@ -16,8 +16,12 @@ def test_settings_load_from_environment() -> None:
 
 
 def test_metadata_contains_auth_and_work_order_tables() -> None:
-    # Phase 1 live: users + work_orders only (no full workflow tables yet).
-    assert set(Base.metadata.tables) == {"users", "work_orders"}
+    # Phase 1.5: users + work_orders + auth audit (no full workflow tables yet).
+    assert set(Base.metadata.tables) == {
+        "users",
+        "work_orders",
+        "auth_audit_events",
+    }
 
 
 @pytest.mark.asyncio

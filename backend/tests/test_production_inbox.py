@@ -67,6 +67,7 @@ async def test_unconfigured_gateway_fails_closed():
     with pytest.raises(HTTPException) as exc:
         await gw.get("/sales-orders")
     assert exc.value.status_code == 503
+    assert exc.value.detail["code"] == "gateway_unconfigured"
 
 
 @pytest.mark.asyncio
@@ -75,3 +76,4 @@ async def test_insecure_gateway_rejected():
     with pytest.raises(HTTPException) as exc:
         await gw.get("/sales-orders")
     assert exc.value.status_code == 503
+    assert exc.value.detail["code"] == "gateway_insecure_url"

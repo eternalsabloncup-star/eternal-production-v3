@@ -1,11 +1,12 @@
-"""Narrow read-only Accurate gateway adapter for Production V3.
+"""Narrow read-only Accurate gateway client for Production V3.
 
-No legacy JWT/Accurate secrets are copied into V3. A separate, authenticated,
-read-only integration gateway is required. Fail closed when not configured.
+Machine-to-machine Bearer token against a dedicated gateway.
+No ERP V1 JWT/Accurate secrets. Fail closed. Bounded retries on transport only.
 """
 
 from __future__ import annotations
 
+import asyncio
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -13,8 +14,29 @@ from fastapi import HTTPException
 
 from app.core.config import Settings, get_settings
 
+_MAX_RETRIES = 2
+_RETRYABLE = {408, 429, 500, 502, 503, 504}
+
+
+class GatewayError(Exception):
+    """Structured gateway failure (translated to HTTP at the edge)."""
+
+    def __init__(self, code: str, message: str, *, status_code: int = 502) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status_code = status_code
+
+    def as_http(self) -> HTTPException:
+        return HTTPException(
+            self.status_code,
+            detail={"code": self.code, "message": self.message},
+        )
+
 
 class ReadGateway:
+    """M2M client: Authorization Bearer <V3_ACCURATE_READ_GATEWAY_TOKEN>."""
+
     def __init__(
         self,
         *,
@@ -30,7 +52,11 @@ class ReadGateway:
 
     def check_configuration(self) -> None:
         if not self.base_url or not self.token:
-            raise HTTPException(503, "Gateway Accurate read-only belum dikonfigurasi")
+            raise GatewayError(
+                "gateway_unconfigured",
+                "Gateway Accurate read-only belum dikonfigurasi",
+                status_code=503,
+            )
         parsed = urlparse(self.base_url)
         if (
             (
@@ -46,37 +72,86 @@ class ReadGateway:
             or parsed.query
             or parsed.fragment
         ):
-            raise HTTPException(503, "Konfigurasi gateway Accurate tidak aman")
+            raise GatewayError(
+                "gateway_insecure_url",
+                "Konfigurasi gateway Accurate tidak aman",
+                status_code=503,
+            )
 
     async def get(self, path: str, *, params: dict | None = None) -> dict:
-        self.check_configuration()
+        try:
+            self.check_configuration()
+        except GatewayError as exc:
+            raise exc.as_http() from exc
+
         headers = {
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/json",
+            "X-Client": "eternal-production-v3",
         }
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(12, connect=3),
-                follow_redirects=False,
-                trust_env=False,
-            ) as client:
-                resp = await client.get(
-                    self.base_url + path, params=params, headers=headers
-                )
-            if resp.status_code in (401, 403):
-                raise HTTPException(503, "Gateway Accurate menolak akses baca")
-            if resp.status_code == 404:
-                raise HTTPException(404, "Dokumen tidak ditemukan di Accurate")
-            if resp.status_code != 200:
-                raise HTTPException(502, "Gateway Accurate gagal membaca dokumen")
-            result = resp.json()
-            if not isinstance(result, dict):
-                raise HTTPException(502, "Format respons gateway Accurate tidak valid")
-            return result
-        except httpx.HTTPError as exc:
-            raise HTTPException(502, "Gateway Accurate tidak dapat dihubungi") from exc
-        except ValueError as exc:
-            raise HTTPException(502, "Respons gateway Accurate bukan JSON valid") from exc
+        last_error: Exception | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(12, connect=3),
+                    follow_redirects=False,
+                    trust_env=False,
+                ) as client:
+                    resp = await client.get(
+                        self.base_url + path, params=params, headers=headers
+                    )
+                if resp.status_code in (401, 403):
+                    raise GatewayError(
+                        "gateway_auth_rejected",
+                        "Gateway Accurate menolak akses baca",
+                        status_code=503,
+                    ).as_http()
+                if resp.status_code == 404:
+                    raise GatewayError(
+                        "document_not_found",
+                        "Dokumen tidak ditemukan di Accurate",
+                        status_code=404,
+                    ).as_http()
+                if resp.status_code in _RETRYABLE and attempt < _MAX_RETRIES:
+                    await asyncio.sleep(0.25 * (2**attempt))
+                    continue
+                if resp.status_code != 200:
+                    raise GatewayError(
+                        "gateway_bad_status",
+                        "Gateway Accurate gagal membaca dokumen",
+                        status_code=502,
+                    ).as_http()
+                result = resp.json()
+                if not isinstance(result, dict):
+                    raise GatewayError(
+                        "gateway_invalid_payload",
+                        "Format respons gateway Accurate tidak valid",
+                        status_code=502,
+                    ).as_http()
+                return result
+            except HTTPException:
+                raise
+            except httpx.HTTPError as exc:
+                last_error = exc
+                if attempt < _MAX_RETRIES:
+                    await asyncio.sleep(0.25 * (2**attempt))
+                    continue
+                raise GatewayError(
+                    "gateway_unreachable",
+                    "Gateway Accurate tidak dapat dihubungi",
+                    status_code=502,
+                ).as_http() from last_error
+            except ValueError as exc:
+                raise GatewayError(
+                    "gateway_invalid_json",
+                    "Respons gateway Accurate bukan JSON valid",
+                    status_code=502,
+                ).as_http() from exc
+        raise GatewayError(
+            "gateway_unreachable",
+            "Gateway Accurate tidak dapat dihubungi",
+            status_code=502,
+        ).as_http()
 
 
 def sanitize_so_number(number: str) -> str:

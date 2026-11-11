@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.core.config import get_settings
 from app.db.base import Base
-from app.models import User, WorkOrder  # noqa: F401 — register metadata
+from app.models import AuthAuditEvent, User, WorkOrder  # noqa: F401 — register metadata
 
 config = context.config
 

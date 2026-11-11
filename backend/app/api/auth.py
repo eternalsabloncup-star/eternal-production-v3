@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,10 +11,12 @@ from app.core.security import (
     create_access_token,
     get_current_user,
     require_jwt_secret,
+    require_password_pepper,
     verify_password,
 )
 from app.db.session import get_db_session
 from app.models.user import User
+from app.services.audit import record_auth_event
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -47,18 +49,46 @@ class MeResponse(BaseModel):
 @router.post("/login", response_model=LoginResponse)
 async def login(
     body: LoginRequest,
+    request: Request,
     session: AsyncSession = Depends(get_db_session),
 ) -> LoginResponse:
     require_jwt_secret()
+    require_password_pepper()
+    host = request.client.host if request.client else None
     result = await session.execute(
         select(User).where(User.username == body.username.strip())
     )
     user = result.scalar_one_or_none()
     if user is None or not user.is_active:
+        await record_auth_event(
+            session,
+            event_type="login",
+            username=body.username.strip(),
+            result="failed",
+            detail="unknown_or_inactive_user",
+            client_host=host,
+        )
         raise HTTPException(401, "Username atau password salah")
     if not verify_password(body.password, user.password_hash):
+        await record_auth_event(
+            session,
+            event_type="login",
+            username=user.username,
+            user_id=user.id,
+            result="failed",
+            detail="bad_password",
+            client_host=host,
+        )
         raise HTTPException(401, "Username atau password salah")
     token = create_access_token(user)
+    await record_auth_event(
+        session,
+        event_type="login",
+        username=user.username,
+        user_id=user.id,
+        result="ok",
+        client_host=host,
+    )
     return LoginResponse(
         access_token=token,
         user_id=user.id,

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import jwt
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,34 +23,76 @@ _bearer = HTTPBearer(auto_error=False)
 PERM_INBOX_READ = "production.inbox.read"
 PERM_ORDER_READ = "production.order.read"
 
+_PLACEHOLDER_SECRETS = {
+    "",
+    "change_me",
+    "replace_with_v3_jwt_secret",
+    "replace_with_v3_password_pepper",
+}
+
+
+def require_jwt_secret(settings: Settings | None = None) -> str:
+    cfg = settings or get_settings()
+    if not cfg.v3_jwt_secret or cfg.v3_jwt_secret in _PLACEHOLDER_SECRETS:
+        raise HTTPException(
+            503, "Autentikasi V3 belum dikonfigurasi (V3_JWT_SECRET)"
+        )
+    return cfg.v3_jwt_secret
+
+
+def require_password_pepper(settings: Settings | None = None) -> str:
+    """Password hashing material — must differ from JWT signing key."""
+    cfg = settings or get_settings()
+    if not cfg.v3_password_pepper or cfg.v3_password_pepper in _PLACEHOLDER_SECRETS:
+        raise HTTPException(
+            503, "Autentikasi V3 belum dikonfigurasi (V3_PASSWORD_PEPPER)"
+        )
+    if cfg.v3_password_pepper == cfg.v3_jwt_secret:
+        raise HTTPException(
+            503,
+            "V3_PASSWORD_PEPPER harus berbeda dari V3_JWT_SECRET",
+        )
+    return cfg.v3_password_pepper
+
 
 def hash_password(password: str, *, settings: Settings | None = None) -> str:
-    cfg = settings or get_settings()
-    secret = cfg.v3_jwt_secret.encode("utf-8")
+    """PBKDF2-HMAC with dedicated pepper + per-password random salt.
+
+    Stored format: pbkdf2_sha256$iterations$salt_hex$digest_hex
+    """
+    pepper = require_password_pepper(settings)
+    salt = secrets.token_bytes(16)
     digest = hashlib.pbkdf2_hmac(
-        "sha256", password.encode("utf-8"), secret, 120_000
+        "sha256",
+        password.encode("utf-8"),
+        salt + pepper.encode("utf-8"),
+        120_000,
     )
-    return digest.hex()
+    return f"pbkdf2_sha256$120000${salt.hex()}${digest.hex()}"
 
 
 def verify_password(
     password: str, password_hash: str, *, settings: Settings | None = None
 ) -> bool:
-    candidate = hash_password(password, settings=settings)
-    return hmac.compare_digest(candidate, password_hash)
-
-
-def require_jwt_secret(settings: Settings | None = None) -> str:
-    cfg = settings or get_settings()
-    if not cfg.v3_jwt_secret or cfg.v3_jwt_secret in {
-        "",
-        "change_me",
-        "replace_with_v3_jwt_secret",
-    }:
-        raise HTTPException(
-            503, "Autentikasi V3 belum dikonfigurasi (V3_JWT_SECRET)"
-        )
-    return cfg.v3_jwt_secret
+    try:
+        algo, iter_s, salt_hex, digest_hex = password_hash.split("$", 3)
+    except ValueError:
+        return False
+    if algo != "pbkdf2_sha256":
+        return False
+    try:
+        iterations = int(iter_s)
+        salt = bytes.fromhex(salt_hex)
+    except ValueError:
+        return False
+    pepper = require_password_pepper(settings)
+    candidate = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt + pepper.encode("utf-8"),
+        iterations,
+    )
+    return hmac.compare_digest(candidate.hex(), digest_hex)
 
 
 def create_access_token(
@@ -106,9 +149,24 @@ async def get_current_user(
 
 
 def require_permissions(*needed: str):
-    async def _dep(user: User = Depends(get_current_user)) -> User:
+    async def _dep(
+        request: Request,
+        user: User = Depends(get_current_user),
+        session: AsyncSession = Depends(get_db_session),
+    ) -> User:
         have = set(user.permissions or [])
         if not set(needed).issubset(have):
+            from app.services.audit import record_auth_event
+
+            await record_auth_event(
+                session,
+                event_type="permission_denied",
+                username=user.username,
+                user_id=user.id,
+                result="forbidden",
+                detail=",".join(needed),
+                client_host=request.client.host if request.client else None,
+            )
             raise HTTPException(403, "Izin tidak mencukupi")
         return user
 
@@ -120,6 +178,5 @@ def user_can_access_branch(user: User, branch_id: str | None) -> bool:
     if not allowed:
         return False
     if branch_id is None or branch_id == "":
-        # Fail closed: unknown branch is not broadly allowed.
         return False
     return branch_id in allowed
