@@ -28,15 +28,17 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 alembic upgrade head
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8100
 
 cd ../frontend
 npm ci
 npm run dev
 ```
 
-Health: `GET http://127.0.0.1:8000/api/v1/health`
-Ready: `GET http://127.0.0.1:8000/api/v1/ready`
+Frontend API default is same-origin `/api/v1` (Vite proxies `/api` → `127.0.0.1:8100`). Do not point the UI at ERP V1 `:8000`.
+
+Health: `GET http://127.0.0.1:8100/api/v1/health`
+Ready: `GET http://127.0.0.1:8100/api/v1/ready`
 
 ## Safety
 

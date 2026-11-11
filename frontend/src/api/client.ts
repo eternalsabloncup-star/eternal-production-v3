@@ -1,7 +1,12 @@
-const DEFAULT_BASE = "http://127.0.0.1:8000/api/v1";
+/** Same-origin V3 API — never default to ERP V1 port 8000. */
+const DEFAULT_BASE = "/api/v1";
 
 export function getApiBaseUrl(): string {
-  return import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "") || DEFAULT_BASE;
+  const configured = import.meta.env.VITE_API_BASE_URL?.trim();
+  if (configured) {
+    return configured.replace(/\/$/, "");
+  }
+  return DEFAULT_BASE;
 }
 
 export type HealthPayload = {
