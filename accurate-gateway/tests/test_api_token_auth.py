@@ -106,29 +106,115 @@ async def test_api_token_do_resolves_host_and_lists_so(monkeypatch):
                 },
             )
         if host == "public.accurate.id" and "sales-order/list.do" in path:
+            assert request.url.params.get("sp.page") == "1"
+            assert request.url.params.get("sp.pageSize") == "10"
             return httpx.Response(
                 200,
                 json={
                     "s": True,
                     "d": [
                         {
+                            "id": 55,
                             "number": "SO/TEST/1",
+                            "poNumber": "CUST-PO-9",
                             "statusName": "OPEN",
                             "customer": {"id": 1, "name": "X"},
                             "branch": {"id": 2, "name": "JKT"},
                             "totalAmount": 1000,
                         }
                     ],
+                    "sp": {"page": 1, "pageSize": 10, "rowCount": 42},
                 },
             )
         return httpx.Response(404, json={"s": False, "d": "unexpected"})
 
     _patch_client(handler, monkeypatch)
     client = AccurateClient(_settings())
-    rows = await client.list_sales_orders(limit=10)
+    listed = await client.list_sales_orders(limit=10, page=1)
+    rows = listed["rows"]
     assert len(rows) == 1
     assert rows[0]["number"] == "SO/TEST/1"
+    assert rows[0]["accurate_id"] == "55"
+    assert rows[0]["po_number"] == "CUST-PO-9"
+    assert listed["accurate_total"] == 42
+    assert listed["filter_incomplete"] is False
     assert any(r.url.path.endswith("/api/api-token.do") for r in seen)
+
+
+@pytest.mark.asyncio
+async def test_database_pin_match_allows_traffic(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        path = request.url.path
+        if host == "account.accurate.id" and path.endswith("/api/api-token.do"):
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": {
+                        "database": {
+                            "id": 823960,
+                            "host": "https://public.accurate.id",
+                        }
+                    },
+                },
+            )
+        if "sales-order/list.do" in path:
+            return httpx.Response(
+                200, json={"s": True, "d": [], "sp": {"rowCount": 0}}
+            )
+        return httpx.Response(404, json={"s": False})
+
+    _patch_client(handler, monkeypatch)
+    client = AccurateClient(_settings(**{"ACCURATE_DATABASE_ID": "823960"}))
+    listed = await client.list_sales_orders(limit=5)
+    assert listed["rows"] == []
+
+
+@pytest.mark.asyncio
+async def test_database_pin_mismatch_fails_closed(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "account.accurate.id":
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": {
+                        "database": {
+                            "id": 111,
+                            "host": "https://public.accurate.id",
+                        }
+                    },
+                },
+            )
+        return httpx.Response(500, json={"s": False})
+
+    _patch_client(handler, monkeypatch)
+    client = AccurateClient(_settings(**{"ACCURATE_DATABASE_ID": "823960"}))
+    with pytest.raises(AccurateUpstreamError) as exc:
+        await client.list_sales_orders(limit=5)
+    assert exc.value.code == "accurate_database_mismatch"
+    assert "823960" not in (exc.value.message or "")  # no pin value echoed as secret
+
+
+@pytest.mark.asyncio
+async def test_database_pin_missing_resolved_id_fails_closed(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "account.accurate.id":
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": {"database": {"host": "https://public.accurate.id"}},
+                },
+            )
+        return httpx.Response(500, json={"s": False})
+
+    _patch_client(handler, monkeypatch)
+    client = AccurateClient(_settings(**{"ACCURATE_DATABASE_ID": "823960"}))
+    with pytest.raises(AccurateUpstreamError) as exc:
+        await client.list_sales_orders(limit=5)
+    assert exc.value.code == "accurate_database_id_missing"
 
 
 @pytest.mark.asyncio

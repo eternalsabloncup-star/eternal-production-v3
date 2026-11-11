@@ -28,7 +28,9 @@ class Gateway:
             }
         return {
             "preview": {
-                "po_number": "SO/TEST/001",
+                "accurate_id": "501",
+                "number": "SO/TEST/001",
+                "po_number": None,
                 "customer": "Customer",
                 "branch_id": "branch-a",
                 "line_items": [

@@ -104,8 +104,9 @@ class _Gw:
         self.orders = {
             f"/sales-orders/SO-P4-{i:03d}": {
                 "sales_order": {
+                    "accurate_id": str(10000 + i),
                     "number": f"SO-P4-{i:03d}",
-                    "po_number": f"SO-P4-{i:03d}",
+                    "po_number": None,
                     "branch_id": "branch-a",
                     "customer": f"Customer P4 {i:03d}",
                     "line_items": [
@@ -136,8 +137,9 @@ class _Gw:
                     continue
                 rows.append(
                     {
+                        "accurate_id": str(10000 + i),
                         "number": number,
-                        "po_number": number,
+                        "po_number": None,
                         "branch_id": "branch-a",
                         "customer": f"Customer P4 {i:03d}",
                     }
@@ -146,8 +148,9 @@ class _Gw:
             rows = (
                 [
                     {
+                        "accurate_id": "9001",
                         "number": "SO-LIVE-001",
-                        "po_number": "SO-LIVE-001",
+                        "po_number": "PO-CUST-001",
                         "branch_id": "branch-a",
                         "customer": "PT Contoh",
                     }

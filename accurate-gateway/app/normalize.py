@@ -53,6 +53,30 @@ def _lines(raw: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _customer_po_number(raw: dict[str, Any]) -> str | None:
+    """Customer-provided PO only — never copy Accurate SO number."""
+    for key in (
+        "poNumber",
+        "poNo",
+        "customerPoNumber",
+        "customerPONumber",
+        "purchaseOrderNumber",
+        "purchaseOrderNo",
+    ):
+        val = raw.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return None
+
+
+def _document_id(raw: dict[str, Any]) -> str:
+    for key in ("id", "salesOrderId", "soId"):
+        val = raw.get(key)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    return ""
+
+
 def normalize_sales_order_list_item(raw: dict[str, Any]) -> dict[str, Any]:
     customer = raw.get("customer")
     if not isinstance(customer, dict):
@@ -60,13 +84,20 @@ def normalize_sales_order_list_item(raw: dict[str, Any]) -> dict[str, Any]:
     branch = raw.get("branch")
     if not isinstance(branch, dict):
         branch = {"id": raw.get("branchId"), "name": raw.get("branchName")}
+    so_number = str(raw.get("number") or raw.get("no") or "")
+    customer_po = _customer_po_number(raw)
     return {
-        "number": str(raw.get("number") or raw.get("no") or ""),
+        "id": _document_id(raw),
+        "accurate_id": _document_id(raw),
+        "number": so_number,
+        # Real customer PO only; null when Accurate does not provide one.
+        "po_number": customer_po,
         "status": _status(raw),
         "customer": _party(customer),
         "branch": _party(branch),
         "currency": str(raw.get("currency") or raw.get("currencyCode") or "IDR"),
         "total": float(raw.get("totalAmount") or raw.get("total") or 0),
+        "order_date": raw.get("transDate") or raw.get("orderDate") or raw.get("order_date"),
     }
 
 
@@ -74,6 +105,7 @@ def normalize_sales_order(raw: dict[str, Any]) -> dict[str, Any]:
     base = normalize_sales_order_list_item(raw)
     base["line_items"] = _lines(raw)
     # Optional linked document hints when Accurate includes them.
+    # Empty links are NOT payment/delivery verification.
     receipt_ids: list[str] = []
     delivery_ids: list[str] = []
     for key in ("salesReceipt", "salesReceipts", "receiptList"):
@@ -103,6 +135,10 @@ def normalize_sales_order(raw: dict[str, Any]) -> dict[str, Any]:
     base["links"] = {
         "receipt_ids": receipt_ids,
         "delivery_note_ids": delivery_ids,
+        "receipts_present": bool(receipt_ids),
+        "delivery_notes_present": bool(delivery_ids),
+        # Explicit: discovery hints only — never authority for gates.
+        "evidence_authority": False,
     }
     return base
 

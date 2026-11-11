@@ -88,23 +88,40 @@ async def list_sales_orders(
             "pageSize": limit,
             "source": "fixture",
             "live_verified": False,
+            "filter_incomplete": False,
         }
     # LIVE — fixtures unreachable on this branch
     try:
-        items = await _require_live_ready(settings).list_sales_orders(
-            customer=needle, branch=branch, status=status, limit=limit
+        listed = await _require_live_ready(settings).list_sales_orders(
+            customer=needle,
+            branch=branch,
+            status=status,
+            limit=limit,
+            page=page,
         )
     except AccurateUpstreamError as exc:
         raise _upstream_http(exc) from exc
-    rows = [so_list_row(r) for r in items]
+    rows = [so_list_row(r) for r in listed["rows"]]
+    accurate_total = listed.get("accurate_total")
+    filter_incomplete = bool(listed.get("filter_incomplete"))
+    # Prefer Accurate total; never invent a full filtered corpus from one page.
+    if accurate_total is not None and not filter_incomplete:
+        total_out: int | None = int(accurate_total)
+    elif accurate_total is not None and filter_incomplete:
+        # Upstream total is unfiltered / incomplete relative to local page filter.
+        total_out = int(accurate_total)
+    else:
+        total_out = None
     return {
         "rows": rows,
         "items": rows,
-        "total": len(rows),
-        "page": page,
-        "pageSize": limit,
+        "total": total_out if total_out is not None else len(rows),
+        "accurate_total": accurate_total,
+        "page": listed.get("page", page),
+        "pageSize": listed.get("page_size", limit),
         "source": "accurate_live",
         "live_verified": True,
+        "filter_incomplete": filter_incomplete,
     }
 
 
@@ -136,11 +153,18 @@ async def get_sales_order(
     except AccurateUpstreamError as exc:
         raise _upstream_http(exc) from exc
     detail = so_detail(row)
+    links = detail.get("links") if isinstance(detail.get("links"), dict) else {}
     return {
         "sales_order": detail,
         "preview": detail,
         "source": "accurate_live",
         "live_verified": True,
+        # Missing receipt/SJ refs are discovery gaps — not verification.
+        "links_authoritative": False,
+        "receipts_linked": bool(links.get("receipts_present") or links.get("receipt_ids")),
+        "delivery_notes_linked": bool(
+            links.get("delivery_notes_present") or links.get("delivery_note_ids")
+        ),
     }
 
 

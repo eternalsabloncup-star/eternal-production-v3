@@ -8,7 +8,11 @@ from typing import Any
 
 FIXTURE_SALES_ORDERS: dict[str, dict[str, Any]] = {
     "SO-LIVE-001": {
+        "id": "9001",
+        "accurate_id": "9001",
         "number": "SO-LIVE-001",
+        # Customer PO distinct from SO number — never fabricate.
+        "po_number": "PO-CUST-001",
         "status": "OPEN",
         "customer": {"id": "C-100", "name": "PT Contoh"},
         "branch": {"id": "BR-JKT", "name": "Jakarta"},
@@ -26,17 +30,29 @@ FIXTURE_SALES_ORDERS: dict[str, dict[str, Any]] = {
         "links": {
             "receipt_ids": ["RCP-OK-1"],
             "delivery_note_ids": ["SJ-OK-1"],
+            "receipts_present": True,
+            "delivery_notes_present": True,
+            "evidence_authority": False,
         },
     },
     "SO-CANCELLED": {
+        "id": "9002",
+        "accurate_id": "9002",
         "number": "SO-CANCELLED",
+        "po_number": None,
         "status": "CANCELLED",
         "customer": {"id": "C-100", "name": "PT Contoh"},
         "branch": {"id": "BR-JKT", "name": "Jakarta"},
         "currency": "IDR",
         "total": 0,
         "line_items": [],
-        "links": {"receipt_ids": [], "delivery_note_ids": []},
+        "links": {
+            "receipt_ids": [],
+            "delivery_note_ids": [],
+            "receipts_present": False,
+            "delivery_notes_present": False,
+            "evidence_authority": False,
+        },
     },
 }
 
@@ -152,7 +168,10 @@ def _perf_sales_orders() -> dict[str, dict[str, Any]]:
     for i in range(1, 71):
         number = f"SO-P4-{i:03d}"
         out[number] = {
+            "id": str(10000 + i),
+            "accurate_id": str(10000 + i),
             "number": number,
+            "po_number": None,
             "status": "OPEN",
             "customer": {"id": f"C-P4-{i:03d}", "name": f"Customer P4 {i:03d}"},
             "branch": {"id": "branch-a", "name": "Jakarta A"},

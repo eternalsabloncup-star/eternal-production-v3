@@ -20,10 +20,19 @@ def so_list_row(row: dict[str, Any]) -> dict[str, Any]:
     else:
         branch_id = str(row.get("branch_id") or "")
         branch_name = str(branch or "")
+    so_number = str(row.get("number") or "")
+    # Customer PO only when explicitly provided — never fabricate from SO number.
+    raw_po = row.get("po_number")
+    customer_po = (
+        str(raw_po).strip()
+        if raw_po is not None and str(raw_po).strip()
+        else None
+    )
+    accurate_id = str(row.get("accurate_id") or row.get("id") or "").strip() or None
     return {
-        "accurate_id": str(row.get("id") or row.get("accurate_id") or ""),
-        "number": str(row.get("number") or ""),
-        "po_number": str(row.get("number") or row.get("po_number") or ""),
+        "accurate_id": accurate_id,
+        "number": so_number,
+        "po_number": customer_po,
         "customer": customer_out,
         "customer_id": customer_id,
         "outlet": branch_name or None,

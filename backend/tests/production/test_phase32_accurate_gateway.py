@@ -169,6 +169,30 @@ async def test_sj_cancelled_and_mismatch(enforce, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_receipt_missing_so_link_fails_closed(enforce, monkeypatch):
+    gw = _FakeGateway(
+        {
+            "/receipts/RCP-NOLINK": {
+                "id": "RCP-NOLINK",
+                "status": "POSTED",
+                "cancelled": False,
+                "reversed": False,
+                "verifiable": True,
+                "sales_order_number": "",
+                "branch": {"id": "BR-JKT", "name": "Jakarta"},
+                "amount": 1000,
+            }
+        }
+    )
+    monkeypatch.setattr(evidence_mod, "ReadGateway", lambda: gw)
+    with pytest.raises(Exception) as exc:
+        await evidence_mod.require_valid_receipt(
+            "RCP-NOLINK", expected_so_number="SO-1"
+        )
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
 async def test_receipt_ok_passes(enforce, monkeypatch):
     gw = _FakeGateway(
         {

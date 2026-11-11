@@ -162,10 +162,22 @@ def sanitize_so_number(number: str) -> str:
 
 
 def normalize_summary(row: dict) -> dict:
-    """No guessing item qty, processed state, or approvals from legacy stage."""
+    """No guessing item qty, processed state, or approvals from legacy stage.
+
+    V3 inbox historically stores the Accurate SO number in the field named
+    ``po_number``. Customer-provided PO is exposed separately and never
+    fabricated from the SO number.
+    """
     so_id = str(row.get("accurate_id") or row.get("id") or "").strip() or None
-    number = str(row.get("po_number") or row.get("number") or "").strip()
-    if not number:
+    so_number = str(row.get("number") or "").strip()
+    raw_customer_po = row.get("po_number") or row.get("customer_po_number")
+    customer_po = (
+        str(raw_customer_po).strip()
+        if raw_customer_po is not None and str(raw_customer_po).strip()
+        else None
+    )
+    # Compatibility: inbox/frontend key ``po_number`` = Accurate SO number.
+    if not so_number:
         return {}
     customer = row.get("customer") or row.get("customer_name")
     if isinstance(customer, dict):
@@ -175,7 +187,9 @@ def normalize_summary(row: dict) -> dict:
         branch_id = row["branch"].get("id")
     return {
         "accurate_id": so_id,
-        "po_number": number,
+        "number": so_number,
+        "po_number": so_number,
+        "customer_po_number": customer_po,
         "customer": customer,
         "outlet": row.get("outlet"),
         "branch_id": branch_id,
@@ -214,7 +228,7 @@ async def list_sales_orders(
 async def get_sales_order(gateway: ReadGateway, number: str) -> dict:
     data = await gateway.get(f"/sales-orders/{sanitize_so_number(number)}")
     so = data.get("sales_order", data.get("preview", data))
-    if not isinstance(so, dict) or not (so.get("po_number") or so.get("number")):
+    if not isinstance(so, dict) or not so.get("number"):
         raise HTTPException(502, "Detail Sales Order tidak valid")
     result = normalize_summary(so)
     lines = so.get("line_items")

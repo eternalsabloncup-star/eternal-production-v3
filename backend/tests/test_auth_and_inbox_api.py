@@ -57,7 +57,9 @@ class FakeGateway:
             }
         return {
             "preview": {
-                "po_number": "SO/TEST/001",
+                "accurate_id": "77",
+                "number": "SO/TEST/001",
+                "po_number": None,
                 "customer": "A",
                 "branch_id": "branch-a",
                 "line_items": [

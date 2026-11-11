@@ -59,16 +59,28 @@ async def test_list_and_detail_sales_orders(client: AsyncClient):
     assert payload["live_verified"] is False
     assert payload["total"] >= 70
     assert len(payload["rows"]) == 20
+    assert payload["rows"][0]["number"]
+    # SO number must not be fabricated into customer PO when fixture has none / distinct.
+    # Customer PO must never be fabricated as a copy of SO number.
+    for row in payload["rows"]:
+        if row.get("po_number") is not None:
+            assert row["po_number"] != row["number"]
     page2 = await client.get("/sales-orders?limit=20&page=2", headers=_auth())
     assert page2.status_code == 200
     assert page2.json()["rows"][0]["number"] != payload["rows"][0]["number"]
 
     detail = await client.get("/sales-orders/SO-LIVE-001", headers=_auth())
     assert detail.status_code == 200
-    so = detail.json()["sales_order"]
-    assert so["po_number"] == "SO-LIVE-001"
+    body = detail.json()
+    so = body["sales_order"]
+    assert so["number"] == "SO-LIVE-001"
+    assert so["accurate_id"] == "9001"
+    assert so["po_number"] == "PO-CUST-001"
+    assert so["po_number"] != so["number"]
     assert so["line_items"][0]["item_code"] == "BOX-A"
     assert so["line_items"][0]["quantity"] == 100
+    assert body.get("links_authoritative") is not True
+    assert so["links"].get("evidence_authority") is False
 
 
 @pytest.mark.asyncio

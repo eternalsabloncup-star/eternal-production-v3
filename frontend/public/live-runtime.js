@@ -93,7 +93,8 @@
   clearGhosts();
 
   function mapOrder(s) {
-    const number = String(s.po_number || "").trim();
+    // Accurate SO number: prefer explicit number; V3 inbox still may send po_number as SO key.
+    const number = String(s.number || s.po_number || "").trim();
     if (!number) return null;
     const lines = Array.isArray(s.line_items) ? s.line_items : [];
     const qty =

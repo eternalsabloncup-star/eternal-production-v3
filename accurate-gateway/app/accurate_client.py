@@ -164,17 +164,25 @@ class AccurateClient:
             )
         self._host = host
         self._database_id = db_id
-        # Optional pin: if Owner set ACCURATE_DATABASE_ID, it must match.
+        # Pin: when ACCURATE_DATABASE_ID is set, resolved id must be present and match.
         expected = (self._settings.accurate_database_id or "").strip()
-        if expected and db_id and expected != db_id:
-            raise AccurateUpstreamError(
-                "accurate_database_mismatch",
-                "Database id dari api-token.do tidak cocok dengan konfigurasi",
-                status_code=502,
-            )
+        if expected:
+            if not db_id:
+                raise AccurateUpstreamError(
+                    "accurate_database_id_missing",
+                    "api-token.do tidak mengembalikan database.id — pin gagal",
+                    status_code=502,
+                )
+            if expected != str(db_id).strip():
+                raise AccurateUpstreamError(
+                    "accurate_database_mismatch",
+                    "Database id dari api-token.do tidak cocok dengan konfigurasi",
+                    status_code=502,
+                )
+        # Never log token/secret/database credentials — flags only.
         logger.info(
             "accurate host resolved",
-            extra={"has_database_id": bool(db_id), "host_set": True},
+            extra={"has_database_id": bool(db_id), "host_set": True, "pin_enforced": bool(expected)},
         )
 
     async def _request(
@@ -288,6 +296,26 @@ class AccurateClient:
             assert last_error is not None
             raise last_error
 
+    @staticmethod
+    def _extract_list_total(data: dict[str, Any], page_len: int) -> int | None:
+        """Accurate list totals when present — never invent from page length alone."""
+        sp = data.get("sp") if isinstance(data.get("sp"), dict) else {}
+        for key in ("rowCount", "rowTotal", "totalRows", "totalRow"):
+            val = sp.get(key)
+            if val is not None:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    pass
+        for key in ("rowCount", "total", "totalRows"):
+            val = data.get(key)
+            if val is not None:
+                try:
+                    return int(val)
+                except (TypeError, ValueError):
+                    pass
+        return None
+
     async def list_sales_orders(
         self,
         *,
@@ -295,14 +323,32 @@ class AccurateClient:
         branch: str | None = None,
         status: str | None = None,
         limit: int = 50,
-    ) -> list[dict[str, Any]]:
+        page: int = 1,
+    ) -> dict[str, Any]:
+        page_n = max(1, int(page or 1))
+        page_size = max(1, min(int(limit or 50), 200))
         params: dict[str, Any] = {
-            "fields": "id,number,statusName,status,customer,customerId,branch,branchId,transDate,totalAmount",
-            "sp.pageSize": max(1, min(limit, 200)),
+            "fields": (
+                "id,number,statusName,status,customer,customerId,branch,branchId,"
+                "transDate,totalAmount,poNumber,poNo,customerPoNumber"
+            ),
+            "sp.pageSize": page_size,
+            "sp.page": page_n,
         }
         if customer:
             params["filter.keywords.op"] = "CONTAIN"
             params["filter.keywords.val"] = customer
+        # Prefer Accurate-side filters so page totals stay meaningful.
+        upstream_status = False
+        upstream_branch = False
+        if status:
+            params["filter.statusName.op"] = "EQUAL"
+            params["filter.statusName.val"] = status
+            upstream_status = True
+        if branch and str(branch).strip().isdigit():
+            params["filter.branchId.op"] = "EQUAL"
+            params["filter.branchId.val"] = int(str(branch).strip())
+            upstream_branch = True
         data = await self._request(
             "GET", "/accurate/api/sales-order/list.do", params=params
         )
@@ -314,17 +360,39 @@ class AccurateClient:
                 status_code=502,
             )
         out = [normalize_sales_order_list_item(r) for r in rows if isinstance(r, dict)]
-        if branch:
+        filter_incomplete = False
+        # Name-based branch cannot be fully expressed upstream — page-local only.
+        if branch and not upstream_branch:
             needle = branch.lower()
+            before = len(out)
             out = [
                 r
                 for r in out
-                if needle in str(r.get("branch", {}).get("name", "")).lower()
-                or needle == str(r.get("branch", {}).get("id", "")).lower()
+                if needle in str((r.get("branch") or {}).get("name", "")).lower()
+                or needle == str((r.get("branch") or {}).get("id", "")).lower()
             ]
+            if len(out) != before:
+                filter_incomplete = True
+        # If status still mismatches after upstream filter, narrow page only.
         if status:
-            out = [r for r in out if str(r.get("status", "")).upper() == status.upper()]
-        return out
+            before = len(out)
+            out = [
+                r for r in out if str(r.get("status", "")).upper() == status.upper()
+            ]
+            if len(out) != before:
+                filter_incomplete = True
+            if not upstream_status and before != len(out):
+                filter_incomplete = True
+        accurate_total = self._extract_list_total(data, len(out))
+        return {
+            "rows": out,
+            "accurate_total": accurate_total,
+            "page": page_n,
+            "page_size": page_size,
+            "filter_incomplete": filter_incomplete,
+            "upstream_status_filter": upstream_status,
+            "upstream_branch_filter": upstream_branch,
+        }
 
     async def get_sales_order(self, number: str) -> dict[str, Any]:
         data = await self._request(

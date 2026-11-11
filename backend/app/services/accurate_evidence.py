@@ -112,17 +112,22 @@ async def require_valid_receipt(
     if status in _INVALID_RECEIPT_STATUS:
         raise HTTPException(409, "Receipt Accurate tidak valid / sudah dibatalkan")
 
+    # SO link only from receipt→SO fields — never treat customer PO / missing link
+    # as verification against the job.
     so_link = str(
-        data.get("sales_order_number")
-        or data.get("so_number")
-        or data.get("po_number")
-        or ""
+        data.get("sales_order_number") or data.get("so_number") or ""
     ).strip()
-    if expected_so_number and so_link and so_link != expected_so_number.strip():
-        raise HTTPException(
-            409,
-            "Receipt Accurate tidak cocok dengan Sales Order job",
-        )
+    if expected_so_number:
+        if not so_link:
+            raise HTTPException(
+                409,
+                "Receipt Accurate tidak menautkan Sales Order — verifikasi ditolak",
+            )
+        if so_link != expected_so_number.strip():
+            raise HTTPException(
+                409,
+                "Receipt Accurate tidak cocok dengan Sales Order job",
+            )
 
     branch = data.get("branch")
     branch_id = _party_id(branch) or str(data.get("branch_id") or "").strip()
@@ -220,16 +225,19 @@ async def require_valid_sj(
         raise HTTPException(409, "Surat Jalan Accurate tidak aktif")
 
     so_link = str(
-        data.get("sales_order_number")
-        or data.get("so_number")
-        or data.get("po_number")
-        or ""
+        data.get("sales_order_number") or data.get("so_number") or ""
     ).strip()
-    if expected_so_number and so_link and so_link != expected_so_number.strip():
-        raise HTTPException(
-            409,
-            "Surat Jalan Accurate tidak cocok dengan Sales Order job",
-        )
+    if expected_so_number:
+        if not so_link:
+            raise HTTPException(
+                409,
+                "Surat Jalan Accurate tidak menautkan Sales Order — loading ditolak",
+            )
+        if so_link != expected_so_number.strip():
+            raise HTTPException(
+                409,
+                "Surat Jalan Accurate tidak cocok dengan Sales Order job",
+            )
 
     branch = data.get("branch")
     branch_id = _party_id(branch) or str(data.get("branch_id") or "").strip()

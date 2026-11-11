@@ -22,7 +22,7 @@ class GatewaySettings(BaseSettings):
     accurate_signature_secret: str = Field(
         default="", alias="ACCURATE_SIGNATURE_SECRET"
     )
-    # Optional pin after api-token.do resolves d.database.id
+    # When set: api-token.do database.id must be present and equal (fail closed).
     accurate_database_id: str = Field(default="", alias="ACCURATE_DATABASE_ID")
     accurate_account_base: str = Field(
         default="https://account.accurate.id", alias="ACCURATE_ACCOUNT_BASE"
