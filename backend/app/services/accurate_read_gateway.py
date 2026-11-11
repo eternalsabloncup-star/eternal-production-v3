@@ -183,27 +183,35 @@ def normalize_summary(row: dict) -> dict:
     if isinstance(customer, dict):
         customer = customer.get("name") or customer.get("id")
     branch_id = row.get("branch_id")
-    if not branch_id and isinstance(row.get("branch"), dict):
-        branch_id = row["branch"].get("id")
+    branch_name = row.get("branch_name") or row.get("outlet")
+    if isinstance(row.get("branch"), dict):
+        branch_id = branch_id or row["branch"].get("id")
+        branch_name = branch_name or row["branch"].get("name")
     buffer_stock = row.get("buffer_stock")
     if buffer_stock is not None and not isinstance(buffer_stock, bool):
         buffer_stock = None
     urgent_state = row.get("urgent_state")
     if urgent_state is not None:
         urgent_state = str(urgent_state).strip() or None
+    sales = row.get("sales")
+    if sales is not None:
+        sales = str(sales).strip() or None
     return {
         "accurate_id": so_id,
         "number": so_number,
         "po_number": so_number,
         "customer_po_number": customer_po,
         "customer": customer,
-        "outlet": row.get("outlet"),
+        "outlet": branch_name or row.get("outlet"),
         "branch_id": branch_id,
-        "sales": row.get("sales"),
+        "branch_name": branch_name,
+        "sales": sales,
         "order_date": row.get("order_date") or row.get("trans_date"),
         "deadline": row.get("deadline") or row.get("estimated_delivery"),
+        # List summaries intentionally omit lines — detail endpoint is source of truth.
         "line_items": None,
         "total_quantity": None,
+        "line_count": None,
         "production_status": "Baru",
         # Nullable — missing Accurate mapping stays null (not false).
         "buffer_stock": buffer_stock,
@@ -243,37 +251,58 @@ async def get_sales_order(gateway: ReadGateway, number: str) -> dict:
     lines = so.get("line_items")
     if not isinstance(lines, list):
         raise HTTPException(502, "Detail Sales Order tidak memiliki daftar item")
+    parsed_lines = []
+    for line in lines:
+        if not isinstance(line, dict):
+            continue
+        process = line.get("production_process")
+        if process not in {"print", "non_print", "unknown"}:
+            process = "unknown"
+        parsed_lines.append(
+            {
+                "accurate_line_id": line.get("accurate_line_id") or line.get("id"),
+                "accurate_item_id": line.get("accurate_item_id")
+                or line.get("item_id"),
+                "item_code": line.get("item_code") or line.get("sku"),
+                "name": line.get("name") or line.get("description"),
+                "quantity": line.get("quantity")
+                if line.get("quantity") is not None
+                else line.get("qty"),
+                "unit": line.get("unit") or line.get("uom"),
+                "color": line.get("color"),
+                "notes": line.get("notes"),
+                "production_process": process,
+            }
+        )
+    total_qty = so.get("total_quantity")
+    if total_qty is None:
+        total_qty = 0
+        for line in parsed_lines:
+            try:
+                total_qty += float(line.get("quantity") or 0)
+            except (TypeError, ValueError):
+                pass
     result.update(
         {
-            "line_items": [
-                {
-                    "accurate_line_id": line.get("accurate_line_id") or line.get("id"),
-                    "accurate_item_id": line.get("accurate_item_id")
-                    or line.get("item_id"),
-                    "item_code": line.get("item_code"),
-                    "name": line.get("name"),
-                    "quantity": line.get("quantity"),
-                    "unit": line.get("unit"),
-                    "color": line.get("color"),
-                    "notes": line.get("notes"),
-                    "production_process": (
-                        line.get("production_process")
-                        if line.get("production_process")
-                        in {"print", "non_print", "unknown"}
-                        else "unknown"
-                    ),
-                }
-                for line in lines
-                if isinstance(line, dict)
-            ],
-            "total_quantity": so.get("total_quantity"),
+            "line_items": parsed_lines,
+            "total_quantity": total_qty,
+            "line_count": so.get("line_count")
+            if so.get("line_count") is not None
+            else len(parsed_lines),
             "address": so.get("address"),
             "recipient": so.get("recipient"),
             "payment_terms": so.get("payment_terms"),
             "created_by_user": so.get("created_by_user"),
             "expedition": so.get("expedition"),
             "delivery_zone": so.get("delivery_zone"),
+            "deadline": so.get("estimated_delivery")
+            or so.get("deadline")
+            or result.get("deadline"),
             "notes": so.get("notes"),
+            "branch_name": so.get("branch_name")
+            or result.get("branch_name")
+            or result.get("outlet"),
+            "sales": so.get("sales") if so.get("sales") is not None else result.get("sales"),
             "buffer_stock": result.get("buffer_stock"),
             "urgent_state": result.get("urgent_state"),
         }

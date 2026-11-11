@@ -8,14 +8,24 @@ from typing import Any
 def _party(raw: Any, id_key: str = "id", name_key: str = "name") -> dict[str, Any]:
     if isinstance(raw, dict):
         return {
-            "id": str(raw.get(id_key) or raw.get("customerId") or raw.get("branchId") or ""),
-            "name": str(raw.get(name_key) or raw.get("customerName") or raw.get("branchName") or ""),
+            "id": str(
+                raw.get(id_key)
+                or raw.get("customerId")
+                or raw.get("branchId")
+                or ""
+            ),
+            "name": str(
+                raw.get(name_key)
+                or raw.get("customerName")
+                or raw.get("branchName")
+                or ""
+            ),
         }
     return {"id": "", "name": str(raw or "")}
 
 
 def _status(raw: dict[str, Any]) -> str:
-    for key in ("statusName", "status", "charField1"):
+    for key in ("statusName", "status"):
         val = raw.get(key)
         if val is not None and str(val).strip():
             return str(val).strip().upper().replace(" ", "_")
@@ -24,11 +34,91 @@ def _status(raw: dict[str, Any]) -> str:
     return "UNKNOWN"
 
 
+def _first_str(*values: Any) -> str | None:
+    for val in values:
+        if val is None:
+            continue
+        if isinstance(val, dict):
+            nested = val.get("name") or val.get("number") or val.get("no")
+            if nested is not None and str(nested).strip():
+                return str(nested).strip()
+            continue
+        text = str(val).strip()
+        if text:
+            return text
+    return None
+
+
+def _sales_name(raw: dict[str, Any]) -> str | None:
+    """Official salesperson only — never confuse with document creator."""
+    nested = (
+        raw.get("salesPerson")
+        or raw.get("salesperson")
+        or raw.get("salesman")
+        or raw.get("sales")
+    )
+    if isinstance(nested, dict):
+        name = _first_str(nested.get("name"), nested.get("fullName"))
+        if name:
+            return name
+    return _first_str(
+        raw.get("salesPersonName"),
+        raw.get("salespersonName"),
+        raw.get("salesmanName"),
+        raw.get("salesName"),
+        raw.get("sales") if not isinstance(raw.get("sales"), dict) else None,
+    )
+
+
+def _created_by_user(raw: dict[str, Any]) -> str | None:
+    nested = (
+        raw.get("createdUser")
+        or raw.get("createdByUser")
+        or raw.get("inputUser")
+        or raw.get("user")
+    )
+    if isinstance(nested, dict):
+        name = _first_str(
+            nested.get("name"),
+            nested.get("fullName"),
+            nested.get("email"),
+        )
+        if name:
+            return name
+    return _first_str(
+        raw.get("createdByUserName"),
+        raw.get("createdUserName"),
+        raw.get("inputUserName"),
+        raw.get("userName"),
+        raw.get("createdBy") if not isinstance(raw.get("createdBy"), dict) else None,
+    )
+
+
+def _uom(row: dict[str, Any], item: dict[str, Any]) -> str:
+    unit = row.get("itemUnit") or row.get("unit") or row.get("uom") or item.get("unit")
+    if isinstance(unit, dict):
+        return str(unit.get("name") or unit.get("code") or unit.get("id") or "")
+    return str(unit or "")
+
+
+def _qty(row: dict[str, Any]) -> float:
+    raw = row.get("quantity")
+    if raw is None:
+        raw = row.get("qty")
+    if raw is None:
+        return 0.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _explicit_production_process(row: dict[str, Any]) -> str:
     """Only exact print|non_print from an explicit production_process field.
 
     Never infer from charField*, numericField*, item flags, or name heuristics.
-    Missing/unrecognized → unknown (not false, not print).
+    Never treat blank as print (legacy V1 fallback is intentionally not copied).
+    Missing/unrecognized → unknown.
     """
     raw = row.get("production_process")
     if raw is None:
@@ -38,7 +128,32 @@ def _explicit_production_process(row: dict[str, Any]) -> str:
     normalized = str(raw).strip().lower().replace(" ", "_").replace("-", "_")
     if normalized in {"print", "non_print"}:
         return normalized
+    # Display labels from verified Eternal classification only — not name heuristics.
+    if normalized in {"cetak"}:
+        return "print"
+    if normalized in {"tidak_cetak", "noncetak", "non-cetak"}:
+        return "non_print"
     return "unknown"
+
+
+def _line_color(row: dict[str, Any], item: dict[str, Any]) -> str | None:
+    return _first_str(
+        row.get("color"),
+        row.get("warna"),
+        row.get("detailColor"),
+        item.get("color"),
+        item.get("warna"),
+    )
+
+
+def _line_notes(row: dict[str, Any]) -> str | None:
+    return _first_str(
+        row.get("notes"),
+        row.get("detailNotes"),
+        row.get("detailNote"),
+        row.get("description2"),
+        row.get("memo"),
+    )
 
 
 def _line_identity(row: dict[str, Any], item: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -72,16 +187,20 @@ def _lines(raw: dict[str, Any]) -> list[dict[str, Any]]:
                     row.get("itemNo")
                     or item.get("no")
                     or row.get("sku")
-                    or row.get("itemId")
                     or ""
                 ),
                 "description": str(
-                    row.get("detailName") or row.get("itemName") or item.get("name") or ""
+                    row.get("detailName")
+                    or row.get("itemName")
+                    or item.get("name")
+                    or ""
                 ),
-                "qty": float(row.get("quantity") or row.get("qty") or 0),
-                "uom": str(row.get("itemUnit") or row.get("unit") or row.get("uom") or ""),
+                "qty": _qty(row),
+                "uom": _uom(row, item),
                 "unit_price": float(row.get("unitPrice") or row.get("price") or 0),
-                # Slice 0: Accurate print candidates unproven — stay unknown unless explicit.
+                "color": _line_color(row, item),
+                "notes": _line_notes(row),
+                # Slice 0: print candidates unproven unless explicit process field.
                 "production_process": _explicit_production_process(row),
             }
         )
@@ -112,15 +231,29 @@ def _document_id(raw: dict[str, Any]) -> str:
     return ""
 
 
+def _branch_party(raw: dict[str, Any]) -> dict[str, Any]:
+    branch = raw.get("branch")
+    if not isinstance(branch, dict):
+        branch = {
+            "id": raw.get("branchId"),
+            "name": raw.get("branchName"),
+        }
+    party = _party(branch)
+    if not party.get("name"):
+        party["name"] = _first_str(raw.get("branchName")) or ""
+    if not party.get("id"):
+        party["id"] = _first_str(raw.get("branchId")) or ""
+    return party
+
+
 def normalize_sales_order_list_item(raw: dict[str, Any]) -> dict[str, Any]:
     customer = raw.get("customer")
     if not isinstance(customer, dict):
         customer = {"id": raw.get("customerId"), "name": raw.get("customerName")}
-    branch = raw.get("branch")
-    if not isinstance(branch, dict):
-        branch = {"id": raw.get("branchId"), "name": raw.get("branchName")}
+    branch = _branch_party(raw)
     so_number = str(raw.get("number") or raw.get("no") or "")
     customer_po = _customer_po_number(raw)
+    sales = _sales_name(raw)
     return {
         "id": _document_id(raw),
         "accurate_id": _document_id(raw),
@@ -129,10 +262,11 @@ def normalize_sales_order_list_item(raw: dict[str, Any]) -> dict[str, Any]:
         "po_number": customer_po,
         "status": _status(raw),
         "customer": _party(customer),
-        "branch": _party(branch),
+        "branch": branch,
         "currency": str(raw.get("currency") or raw.get("currencyCode") or "IDR"),
         "total": float(raw.get("totalAmount") or raw.get("total") or 0),
         "order_date": raw.get("transDate") or raw.get("orderDate") or raw.get("order_date"),
+        "sales": sales,
         # Slice 0: Buffer/Urgent missing in live Accurate sample — never invent false.
         "buffer_stock": None,
         "urgent_state": None,
@@ -141,7 +275,55 @@ def normalize_sales_order_list_item(raw: dict[str, Any]) -> dict[str, Any]:
 
 def normalize_sales_order(raw: dict[str, Any]) -> dict[str, Any]:
     base = normalize_sales_order_list_item(raw)
-    base["line_items"] = _lines(raw)
+    lines = _lines(raw)
+    base["line_items"] = lines
+    base["total_quantity"] = sum(float(li.get("qty") or 0) for li in lines)
+    base["line_count"] = len(lines)
+    base["created_by_user"] = _created_by_user(raw)
+    base["address"] = _first_str(
+        raw.get("toAddress"),
+        raw.get("shipAddress"),
+        raw.get("address"),
+        raw.get("customerAddress"),
+    )
+    base["recipient"] = _first_str(
+        raw.get("recipient"),
+        raw.get("toName"),
+        raw.get("shipToName"),
+    )
+    base["payment_terms"] = _first_str(
+        raw.get("paymentTermName"),
+        raw.get("paymentTerms"),
+        raw.get("paymentTerm"),
+        raw.get("termName"),
+        raw.get("paymentTerm") if not isinstance(raw.get("paymentTerm"), dict) else None,
+        (raw.get("paymentTerm") or {}).get("name")
+        if isinstance(raw.get("paymentTerm"), dict)
+        else None,
+    )
+    base["expedition"] = _first_str(
+        raw.get("expedition"),
+        raw.get("expeditionName"),
+        raw.get("courier"),
+        raw.get("shippingInfo"),
+    )
+    base["estimated_delivery"] = (
+        raw.get("estimatedDeliveryDate")
+        or raw.get("shipDate")
+        or raw.get("dueDate")
+        or raw.get("deliveryDate")
+    )
+    base["delivery_zone"] = _first_str(
+        raw.get("deliveryZone"),
+        raw.get("zone"),
+        raw.get("deliveryZoneName"),
+    )
+    base["notes"] = _first_str(
+        raw.get("description"),
+        raw.get("notes"),
+        raw.get("memo"),
+        raw.get("remark"),
+    )
     # Optional linked document hints when Accurate includes them.
     # Empty links are NOT payment/delivery verification.
     receipt_ids: list[str] = []
@@ -209,9 +391,7 @@ def normalize_receipt(raw: dict[str, Any]) -> dict[str, Any]:
     customer = raw.get("customer")
     if not isinstance(customer, dict):
         customer = {"id": raw.get("customerId"), "name": raw.get("customerName")}
-    branch = raw.get("branch")
-    if not isinstance(branch, dict):
-        branch = {"id": raw.get("branchId"), "name": raw.get("branchName")}
+    branch = _branch_party(raw)
     status = _status(raw)
     verifiable = not cancelled and not reversed_ and status not in {
         "UNKNOWN",
@@ -227,7 +407,7 @@ def normalize_receipt(raw: dict[str, Any]) -> dict[str, Any]:
         "currency": str(raw.get("currency") or raw.get("currencyCode") or "IDR"),
         "paid_at": raw.get("transDate") or raw.get("chequeDate") or raw.get("paidAt"),
         "customer": _party(customer),
-        "branch": _party(branch),
+        "branch": branch,
         "reversed": reversed_,
         "cancelled": cancelled,
         "verifiable": verifiable,
@@ -247,9 +427,7 @@ def normalize_delivery_note(raw: dict[str, Any]) -> dict[str, Any]:
     customer = raw.get("customer")
     if not isinstance(customer, dict):
         customer = {"id": raw.get("customerId"), "name": raw.get("customerName")}
-    branch = raw.get("branch")
-    if not isinstance(branch, dict):
-        branch = {"id": raw.get("branchId"), "name": raw.get("branchName")}
+    branch = _branch_party(raw)
     status = _status(raw)
     verifiable = not cancelled and status not in {"UNKNOWN", "DRAFT", "UNPOSTED", "CANCELLED"}
     return {
@@ -258,7 +436,7 @@ def normalize_delivery_note(raw: dict[str, Any]) -> dict[str, Any]:
         "status": status,
         "sales_order_number": str(so_number or ""),
         "customer": _party(customer),
-        "branch": _party(branch),
+        "branch": branch,
         "shipped_at": raw.get("shipDate") or raw.get("transDate") or raw.get("shippedAt"),
         "cancelled": cancelled,
         "verifiable": verifiable,

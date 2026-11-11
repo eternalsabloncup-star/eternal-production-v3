@@ -35,6 +35,9 @@ def so_list_row(row: dict[str, Any]) -> dict[str, Any]:
     urgent_state = row.get("urgent_state")
     if urgent_state is not None:
         urgent_state = str(urgent_state).strip() or None
+    sales = row.get("sales")
+    if sales is not None:
+        sales = str(sales).strip() or None
     return {
         "accurate_id": accurate_id,
         "number": so_number,
@@ -43,12 +46,13 @@ def so_list_row(row: dict[str, Any]) -> dict[str, Any]:
         "customer_id": customer_id,
         "outlet": branch_name or None,
         "branch_id": branch_id or None,
+        "branch_name": branch_name or None,
         "branch": branch if isinstance(branch, dict) else {"id": branch_id, "name": branch_name},
         "status": row.get("status"),
         "currency": row.get("currency"),
         "total": row.get("total"),
         "order_date": row.get("order_date"),
-        "sales": row.get("sales"),
+        "sales": sales,
         # Nullable classifications — never coerce missing → false.
         "buffer_stock": buffer_stock,
         "urgent_state": urgent_state,
@@ -85,16 +89,25 @@ def so_detail(row: dict[str, Any]) -> dict[str, Any]:
                     "production_process": process,
                 }
             )
+    line_count = row.get("line_count")
+    if line_count is None:
+        line_count = len(lines)
     base.update(
         {
             "line_items": lines,
             "total_quantity": row.get("total_quantity")
             if row.get("total_quantity") is not None
             else total_qty,
+            "line_count": line_count,
             "links": row.get("links") or {},
             "address": row.get("address"),
             "recipient": row.get("recipient"),
             "payment_terms": row.get("payment_terms"),
+            "created_by_user": row.get("created_by_user"),
+            "expedition": row.get("expedition"),
+            "estimated_delivery": row.get("estimated_delivery")
+            or row.get("deadline"),
+            "delivery_zone": row.get("delivery_zone"),
             "notes": row.get("notes"),
         }
     )

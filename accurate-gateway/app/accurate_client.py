@@ -328,9 +328,12 @@ class AccurateClient:
         page_n = max(1, int(page or 1))
         page_size = max(1, min(int(limit or 50), 200))
         params: dict[str, Any] = {
+            # List is summary-only (no detailItem). Extra identity fields when Accurate returns them.
             "fields": (
-                "id,number,statusName,status,customer,customerId,branch,branchId,"
-                "transDate,totalAmount,poNumber,poNo,customerPoNumber"
+                "id,number,statusName,status,customer,customerId,customerName,"
+                "branch,branchId,branchName,transDate,totalAmount,"
+                "poNumber,poNo,customerPoNumber,"
+                "salesPersonName,salesmanName,salesName,salesPerson"
             ),
             "sp.pageSize": page_size,
             "sp.page": page_n,

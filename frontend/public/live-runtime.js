@@ -169,12 +169,28 @@
     const number = String(s.number || s.po_number || "").trim();
     if (!number) return null;
     const lines = Array.isArray(s.line_items) ? s.line_items : [];
-    const qty =
-      Number.isFinite(Number(s.total_quantity)) && s.total_quantity != null
-        ? Number(s.total_quantity)
-        : 0;
+    const qtyVerified =
+      s.total_quantity != null ||
+      (lines.length > 0 &&
+        lines.every((x) => x.quantity != null || x.qty != null));
+    let qty = null;
+    if (s.total_quantity != null && Number.isFinite(Number(s.total_quantity))) {
+      qty = Number(s.total_quantity);
+    } else if (lines.length) {
+      qty = lines.reduce(function (sum, x) {
+        const n = Number(x.quantity != null ? x.quantity : x.qty);
+        return sum + (Number.isFinite(n) ? n : 0);
+      }, 0);
+    }
     const productionStatus =
       s.production_status === "Terproses" ? "Terproses" : "Baru";
+    const branchLabel =
+      s.branch_name ||
+      s.outlet ||
+      (s.branch && s.branch.name) ||
+      null;
+    const salesOfficial =
+      s.sales != null && String(s.sales).trim() ? String(s.sales).trim() : null;
     return {
       id: number,
       accurateId: s.accurate_id ?? null,
@@ -182,28 +198,41 @@
       item:
         lines.map((x) => x.name || x.item_code).filter(Boolean).join(" + ") ||
         "Detail barang belum dimuat",
-      qty,
-      qtyVerified: s.total_quantity != null,
-      sourceLines: lines.map((x, i) => ({
-        id: x.accurate_line_id || x.id || null,
-        itemId: x.accurate_item_id || null,
-        item_code: x.item_code || null,
-        name: x.name || null,
-        qty: x.quantity,
-        unit: x.unit || null,
-        notes: x.notes || null,
-        production_process:
-          x.production_process === "print" || x.production_process === "non_print"
-            ? x.production_process
-            : "unknown",
-        processSnapshot: null,
-      })),
+      qty: qtyVerified ? qty : null,
+      qtyVerified: Boolean(qtyVerified),
+      detailLoaded: Boolean(lines.length),
+      lineCount: s.line_count != null ? Number(s.line_count) : lines.length || null,
+      sourceLines: lines.map(function (x) {
+        return {
+          id: x.accurate_line_id || x.id || null,
+          itemId: x.accurate_item_id || null,
+          item_code: x.item_code || null,
+          name: x.name || null,
+          qty: x.quantity != null ? x.quantity : x.qty,
+          unit: x.unit || null,
+          color: x.color || null,
+          notes: x.notes || null,
+          production_process:
+            x.production_process === "print" || x.production_process === "non_print"
+              ? x.production_process
+              : "unknown",
+          processSnapshot: null,
+        };
+      }),
       status: productionStatus === "Terproses" ? "Terproses" : "PO Masuk",
       stage: productionStatus === "Terproses" ? "run" : "inbox",
       productionStatus,
-      branch: s.branch_id || "Belum terverifikasi",
-      salesName: s.sales || "Belum terverifikasi",
-      ship: s.deadline || "Belum diketahui",
+      branch: branchLabel || "Belum terverifikasi",
+      branchId: s.branch_id || null,
+      salesName: salesOfficial || "Belum terverifikasi",
+      createdByUser: s.created_by_user || null,
+      orderDate: s.order_date || null,
+      address: s.address || null,
+      paymentTerms: s.payment_terms || null,
+      expedition: s.expedition || null,
+      deliveryZone: s.delivery_zone || null,
+      poNotes: s.notes || null,
+      ship: s.deadline || s.estimated_delivery || "Belum diketahui",
       scheduleDate: "",
       machine: "",
       operator: "",
@@ -213,7 +242,11 @@
       sj: "",
       updated: "",
       approval: false,
-      inkColors: [],
+      inkColors: lines
+        .map(function (x) {
+          return x.color;
+        })
+        .filter(Boolean),
       // Slice 1A: unknown Accurate mapping → null/unknown, never invent false.
       urgent: null,
       urgentState: s.urgent_state == null ? null : String(s.urgent_state),
@@ -287,6 +320,140 @@
   function orderBySo(so) {
     return (window.orders || []).find((x) => x.id === so) || null;
   }
+
+  const detailCache = Object.create(null);
+  let enrichGeneration = 0;
+  const ENRICH_CONCURRENCY = 3; // bounded — never fire 50 detail calls unbounded
+
+  function processLabel(process) {
+    if (process === "print") return "Cetak";
+    if (process === "non_print") return "Tidak Cetak";
+    return "Unknown";
+  }
+
+  function applyDetailToOrder(number, detail) {
+    const o = orderBySo(number);
+    if (!o || !detail) return o;
+    const lines = Array.isArray(detail.line_items) ? detail.line_items : [];
+    o.sourceLines = lines.map(function (x) {
+      return {
+        id: x.accurate_line_id || x.id || null,
+        itemId: x.accurate_item_id || null,
+        item_code: x.item_code || null,
+        name: x.name || null,
+        qty: x.quantity != null ? x.quantity : x.qty,
+        unit: x.unit || null,
+        color: x.color || null,
+        notes: x.notes || null,
+        production_process:
+          x.production_process === "print" || x.production_process === "non_print"
+            ? x.production_process
+            : "unknown",
+        processSnapshot: null,
+      };
+    });
+    o.item =
+      o.sourceLines
+        .map(function (x) {
+          return x.name || x.item_code;
+        })
+        .filter(Boolean)
+        .join(" + ") || "Tidak ada baris barang";
+    if (detail.total_quantity != null && Number.isFinite(Number(detail.total_quantity))) {
+      o.qty = Number(detail.total_quantity);
+      o.qtyVerified = true;
+    } else if (o.sourceLines.length) {
+      o.qty = o.sourceLines.reduce(function (sum, x) {
+        const n = Number(x.qty);
+        return sum + (Number.isFinite(n) ? n : 0);
+      }, 0);
+      o.qtyVerified = true;
+    }
+    o.lineCount =
+      detail.line_count != null ? Number(detail.line_count) : o.sourceLines.length;
+    o.detailLoaded = true;
+    if (detail.branch_name || detail.outlet) {
+      o.branch = detail.branch_name || detail.outlet;
+    }
+    if (detail.branch_id) o.branchId = detail.branch_id;
+    if (detail.sales) o.salesName = String(detail.sales);
+    o.createdByUser = detail.created_by_user || o.createdByUser || null;
+    o.orderDate = detail.order_date || o.orderDate || null;
+    o.address = detail.address || null;
+    o.paymentTerms = detail.payment_terms || null;
+    o.expedition = detail.expedition || null;
+    o.deliveryZone = detail.delivery_zone || null;
+    o.poNotes = detail.notes || null;
+    o.ship =
+      detail.deadline ||
+      detail.estimated_delivery ||
+      o.ship ||
+      "Belum diketahui";
+    o.inkColors = o.sourceLines
+      .map(function (x) {
+        return x.color;
+      })
+      .filter(Boolean);
+    const processes = Array.from(
+      new Set(
+        o.sourceLines.map(function (x) {
+          return x.production_process;
+        }),
+      ),
+    );
+    if (processes.length === 1 && processes[0] === "print") o.processKind = "PRINT";
+    else if (processes.length === 1 && processes[0] === "non_print")
+      o.processKind = "NON_PRINT";
+    else if (processes.indexOf("print") >= 0 && processes.indexOf("non_print") >= 0)
+      o.processKind = "MIXED";
+    else o.processKind = "UNKNOWN";
+    return o;
+  }
+
+  async function fetchOrderDetail(number) {
+    if (detailCache[number]) return detailCache[number];
+    const detail = await request(
+      API + "/production/orders/" + encodeURIComponent(number),
+    );
+    detailCache[number] = detail;
+    return detail;
+  }
+
+  async function enrichInboxPage(numbers) {
+    const gen = ++enrichGeneration;
+    const queue = (numbers || []).filter(Boolean).slice();
+    async function worker() {
+      while (queue.length && gen === enrichGeneration) {
+        const so = queue.shift();
+        try {
+          const detail = await fetchOrderDetail(so);
+          if (gen !== enrichGeneration) return;
+          applyDetailToOrder(so, detail);
+          if (typeof window.render === "function") window.render();
+        } catch (_) {
+          // Leave row as "belum dimuat" — never invent fixture data.
+        }
+      }
+    }
+    const n = Math.min(ENRICH_CONCURRENCY, Math.max(1, queue.length));
+    const runners = [];
+    for (let i = 0; i < n; i += 1) runners.push(worker());
+    await Promise.all(runners);
+  }
+
+  // Prefer Accurate sales field; never invent demo salesperson names.
+  window.sampleSalesName = function (o) {
+    if (o && o.salesName && o.salesName !== "Belum terverifikasi") return o.salesName;
+    return "Belum terverifikasi";
+  };
+  window.sampleColorEntries = function (o) {
+    if (o && Array.isArray(o.inkColors) && o.inkColors.length) {
+      return o.inkColors.map(function (name, i) {
+        return { order: i + 1, name: name };
+      });
+    }
+    return [];
+  };
 
   async function lookupJob(so) {
     try {
@@ -1172,13 +1339,13 @@
     modal.innerHTML =
       '<div class="drawerback"><aside class="detaildrawer shipping-drawer" role="dialog" aria-modal="true"><div class="drawerhead"><h2>Detail Sales Order Accurate</h2><button type="button" class="btn sm" onclick="v49Close()">✕ Tutup</button></div><div class="drawerbody">Memuat detail dokumen…</div></aside></div>';
     try {
-      const detail = await request(
-        API + "/production/orders/" + encodeURIComponent(number),
-      );
+      const detail = await fetchOrderDetail(number);
+      applyDetailToOrder(number, detail);
+      if (typeof window.render === "function") window.render();
       const lines = Array.isArray(detail.line_items) ? detail.line_items : [];
       const cells = lines
-        .map(
-          (line) =>
+        .map(function (line) {
+          return (
             "<tr><td>" +
             escapeHtml(line.item_code || "—") +
             "</td><td>" +
@@ -1189,8 +1356,15 @@
               : escapeHtml(String(line.quantity))) +
             "</td><td>" +
             escapeHtml(line.unit || "—") +
-            "</td></tr>",
-        )
+            "</td><td>" +
+            escapeHtml(processLabel(line.production_process)) +
+            "</td><td>" +
+            escapeHtml(line.color || "—") +
+            "</td><td>" +
+            escapeHtml(line.notes || "—") +
+            "</td></tr>"
+          );
+        })
         .join("");
       let gateHtml =
         '<p class="v49-quiet">Job produksi V3 belum dibuat. Membuka detail tidak membuat job.</p>';
@@ -1219,24 +1393,65 @@
           escapeHtml(jobErr.message || "Job tidak dapat dibaca") +
           "</p>";
       }
+      const branchLabel =
+        detail.branch_name ||
+        detail.outlet ||
+        detail.branch_id ||
+        "Belum terverifikasi";
       modal.querySelector(".drawerbody").innerHTML =
         "<p><b>" +
-        escapeHtml(detail.po_number) +
-        "</b> · " +
+        escapeHtml(detail.number || detail.po_number || number) +
+        "</b> · Accurate ID: " +
+        escapeHtml(detail.accurate_id || "—") +
+        "</p><p>Pelanggan: <b>" +
         escapeHtml(detail.customer || "Pelanggan belum diketahui") +
-        "</p><p>Status proses V3: <b>" +
+        "</b></p><p>Tanggal PO: " +
+        escapeHtml(detail.order_date || "—") +
+        " · Estimasi kirim: " +
+        escapeHtml(detail.deadline || detail.estimated_delivery || "—") +
+        "</p><p>Alamat: " +
+        escapeHtml(detail.address || "—") +
+        "</p><p>Syarat bayar: " +
+        escapeHtml(detail.payment_terms || "—") +
+        " · Ekspedisi: " +
+        escapeHtml(detail.expedition || "—") +
+        " · Zona: " +
+        escapeHtml(detail.delivery_zone || "—") +
+        "</p><p>Sales: <b>" +
+        escapeHtml(detail.sales || "Belum diketahui") +
+        "</b> · Pembuat PO: <b>" +
+        escapeHtml(detail.created_by_user || "Belum diketahui") +
+        "</b></p><p>Cabang: <b>" +
+        escapeHtml(branchLabel) +
+        "</b> <span class=\"v49-quiet\">(id " +
+        escapeHtml(detail.branch_id || "—") +
+        ")</span></p><p>Buffer: " +
+        escapeHtml(
+          detail.buffer_stock === true
+            ? "Buffer"
+            : detail.buffer_stock === false
+              ? "Non Buffer"
+              : "Unknown",
+        ) +
+        " · Urgent: " +
+        escapeHtml(detail.urgent_state || "Unknown") +
+        "</p><p>Keterangan: " +
+        escapeHtml(detail.notes || "—") +
+        "</p><p>Total qty: <b>" +
+        escapeHtml(
+          detail.total_quantity == null ? "—" : String(detail.total_quantity),
+        ) +
+        "</b> · Jenis barang: <b>" +
+        escapeHtml(
+          detail.line_count == null ? String(lines.length) : String(detail.line_count),
+        ) +
+        "</b></p><p>Status proses V3: <b>" +
         escapeHtml(detail.production_status || "Baru") +
         "</b></p>" +
         gateHtml +
-        "<p>Sales: " +
-        escapeHtml(detail.sales || "Belum diketahui") +
-        " · Cabang: " +
-        escapeHtml(detail.branch_id || "Belum diketahui") +
-        "</p><p>Deadline: " +
-        escapeHtml(detail.deadline || "Belum diketahui") +
-        '</p><div class="v26-scroll"><table><thead><tr><th>Kode</th><th>Produk</th><th>Qty</th><th>Satuan</th></tr></thead><tbody>' +
-        (cells || '<tr><td colspan="4">Tidak ada baris</td></tr>') +
-        '</tbody></table></div><p class="v49-quiet">Accurate read-only. Transaksi hanya via panel V3 contextual.</p>';
+        '<div class="v26-scroll"><table><thead><tr><th>Kode</th><th>Produk</th><th>Qty</th><th>Satuan</th><th>Proses</th><th>Warna</th><th>Catatan</th></tr></thead><tbody>' +
+        (cells || '<tr><td colspan="7">Tidak ada baris</td></tr>') +
+        '</tbody></table></div><p class="v49-quiet">Accurate read-only. Transaksi hanya via panel V3 contextual. Inbox tidak memproses.</p>';
       const openBtn = document.getElementById("v3-open-from-detail");
       if (openBtn) {
         openBtn.onclick = function () {
@@ -1405,10 +1620,21 @@
       Object.keys(boardCache).forEach(function (so) {
         if (!orderBySo(so)) delete boardCache[so];
       });
+      // Detail cache only for current page numbers.
+      Object.keys(detailCache).forEach(function (so) {
+        if (!orderBySo(so)) delete detailCache[so];
+      });
       window.taskEntries = {};
       // Do not assign window.history — browser History API is read-only.
       lastSync = new Date().toLocaleTimeString("id-ID");
+      // Bounded background enrich — fills produk/qty from Accurate detail (not list).
+      enrichInboxPage(
+        mapped.map(function (o) {
+          return o.id;
+        }),
+      );
     } catch (err) {
+      enrichGeneration += 1;
       inboxTotal = null;
       fetchError = err && err.message ? err.message : "Tidak dapat membaca Accurate";
       publishOrders([]);
