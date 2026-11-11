@@ -5,11 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && node ./scripts/check-v3-api-routing.mjs",
+    "build": "tsc -b && vite build && node ./scripts/check-v3-api-routing.mjs && node ./scripts/check-staging-security.mjs",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check:api-routing": "node ./scripts/check-v3-api-routing.mjs"
+    "check:api-routing": "node ./scripts/check-v3-api-routing.mjs",
+    "check:staging-security": "node ./scripts/check-staging-security.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",

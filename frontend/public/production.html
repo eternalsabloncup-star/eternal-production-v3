@@ -404,7 +404,7 @@ table{border-collapse:separate;border-spacing:0}table thead th{background:#e9f2e
  #v3-app .v44-production-metric:nth-child(2n){border-right:0!important}
 }
 </style>
-</head><body><div id="root"></div><div id="modal"></div><div id="toast" class="toast hidden"></div><script>
+</head><body><script id="v3-auth-gate">(function(){var K="epv3_access_token";document.documentElement.classList.add("v3-auth-pending");var t=localStorage.getItem(K)||"";if(!String(t).trim()){location.replace("/");return;}window.__V3_AUTH__={status:"pending"};})();</script><style id="v3-auth-gate-style">html.v3-auth-pending #root,html.v3-auth-pending #modal,html.v3-auth-pending #toast{visibility:hidden!important}html.v3-auth-pending body::before{content:"Memverifikasi sesi V3…";position:fixed;inset:0;display:grid;place-items:center;background:#f3f7f7;color:#203443;font:14px/1.45 Inter,Segoe UI,sans-serif;z-index:99999}html.v3-auth-failed body::before{content:"Sesi tidak valid — mengalihkan ke login…"}html.v3-auth-ok #root,html.v3-auth-ok #modal,html.v3-auth-ok #toast{visibility:visible}</style><div id="root"></div><div id="modal"></div><div id="toast" class="toast hidden"></div><script>
 
 function monitorBuffer(a){
  const list=a.filter(o=>o.bufferStock);const q=(window.monitorBufferQuery||'').toLowerCase();const rows=list.filter(o=>[o.id,o.name,o.item,o.branch].join(' ').toLowerCase().includes(q));

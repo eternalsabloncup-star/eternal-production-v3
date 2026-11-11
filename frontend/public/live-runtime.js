@@ -26,12 +26,62 @@
   let fetchError = "Koneksi Accurate belum tersedia";
   let lastSync = null;
   let loading = false;
+  let authStatus = "pending"; // pending | ok | failed — JWT must be verified by Backend V3
   let inboxPage = 1;
   let inboxKeyword = "";
   let selectedSo = null;
   let boardCache = Object.create(null); // so -> board
   let jobCache = Object.create(null); // so -> job summary
   const inFlight = new Set();
+
+  function redirectToLogin() {
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+    } catch (_) {}
+    authStatus = "failed";
+    window.__V3_AUTH__ = { status: "failed" };
+    document.documentElement.classList.remove("v3-auth-pending", "v3-auth-ok");
+    document.documentElement.classList.add("v3-auth-failed");
+    window.location.replace("/");
+  }
+
+  function markAuthOk(me) {
+    authStatus = "ok";
+    window.__V3_AUTH__ = {
+      status: "ok",
+      username: me && me.username ? String(me.username) : null,
+      role: me && me.role ? String(me.role) : null,
+    };
+    document.documentElement.classList.remove("v3-auth-pending", "v3-auth-failed");
+    document.documentElement.classList.add("v3-auth-ok");
+  }
+
+  async function verifySession() {
+    const token = localStorage.getItem(TOKEN_KEY) || "";
+    if (!String(token).trim()) {
+      redirectToLogin();
+      return false;
+    }
+    try {
+      const response = await fetch(API + "/auth/me", {
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: authHeaders(),
+      });
+      if (!response.ok) {
+        // Invalid/expired JWT or unverifiable session → login only.
+        redirectToLogin();
+        return false;
+      }
+      const me = await response.json();
+      markAuthOk(me);
+      return true;
+    } catch (_) {
+      redirectToLogin();
+      return false;
+    }
+  }
 
   function escapeHtml(value) {
     return String(value == null ? "" : value)
@@ -67,6 +117,9 @@
   function clearGhosts() {
     window.queueDemoSave = function () {};
     window.pushDemoSave = function () {};
+    // Never present fixture/demo rows as Accurate Live.
+    window.orders = [];
+    window.taskEntries = {};
     const block = function () {
       toast("Aksi demo dinonaktifkan — gunakan panel V3 pada SO terpilih");
       return false;
@@ -81,7 +134,7 @@
         const original = window[name];
         window[name] = function () {
           if (name === "bootDemo") {
-            window.orders = window.orders || [];
+            window.orders = [];
             return;
           }
           return block();
@@ -188,7 +241,7 @@
       body: opts.body != null ? JSON.stringify(opts.body) : undefined,
     });
     if (response.status === 401) {
-      localStorage.removeItem(TOKEN_KEY);
+      redirectToLogin();
       throw new Error("Sesi V3 tidak valid — login ulang");
     }
     if (response.status === 403) {
@@ -1271,11 +1324,21 @@
 
   async function refreshInbox(page) {
     if (loading) return;
+    if (authStatus !== "ok") {
+      window.orders = [];
+      fetchError =
+        authStatus === "pending"
+          ? "Memverifikasi sesi V3…"
+          : "Login V3 diperlukan sebelum membaca Inbox Accurate";
+      if (typeof window.render === "function") window.render();
+      return;
+    }
     loading = true;
     inboxPage = page || 1;
     if (typeof window.render === "function") window.render();
     try {
       if (!localStorage.getItem(TOKEN_KEY)) {
+        redirectToLogin();
         throw new Error("Login V3 diperlukan sebelum membaca Inbox Accurate");
       }
       const q =
@@ -1391,6 +1454,18 @@
   });
 
   window.orders = [];
-  if (typeof window.render === "function") window.render();
-  refreshInbox(1);
+  window.v3AuthStatus = function () {
+    return authStatus;
+  };
+
+  (async function bootLive() {
+    clearGhosts();
+    const ok = await verifySession();
+    if (!ok) {
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    if (typeof window.render === "function") window.render();
+    await refreshInbox(1);
+  })();
 })();

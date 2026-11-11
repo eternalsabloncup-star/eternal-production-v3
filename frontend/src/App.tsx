@@ -1,5 +1,7 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { getApiBaseUrl } from "./api/client";
+
+const TOKEN_KEY = "epv3_access_token";
 
 type LoginState =
   | { kind: "idle" }
@@ -10,6 +12,35 @@ export default function App() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [state, setState] = useState<LoginState>({ kind: "idle" });
+
+  useEffect(() => {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch(`${getApiBaseUrl()}/auth/me`, {
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          cache: "no-store",
+          credentials: "same-origin",
+        });
+        if (cancelled) return;
+        if (response.ok) {
+          window.location.replace("/production.html");
+          return;
+        }
+        localStorage.removeItem(TOKEN_KEY);
+      } catch {
+        if (!cancelled) localStorage.removeItem(TOKEN_KEY);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
@@ -30,7 +61,7 @@ export default function App() {
         );
       }
       const data = (await response.json()) as { access_token: string };
-      localStorage.setItem("epv3_access_token", data.access_token);
+      localStorage.setItem(TOKEN_KEY, data.access_token);
       window.location.href = "/production.html";
     } catch (err) {
       setState({
