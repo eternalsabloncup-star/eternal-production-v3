@@ -211,7 +211,11 @@ async def record_payment_receipt(
         raise HTTPException(422, "Referensi receipt Accurate wajib")
     from app.services.accurate_evidence import require_valid_receipt
 
-    evidence = await require_valid_receipt(accurate_receipt_id)
+    evidence = await require_valid_receipt(
+        accurate_receipt_id,
+        expected_so_number=job.accurate_so_number,
+        expected_branch_id=job.branch_id,
+    )
     row = PaymentReceiptRef(
         job_id=job.id,
         accurate_receipt_id=accurate_receipt_id.strip(),
@@ -253,6 +257,21 @@ async def bypass_payment(
     session.add(row)
     job.payment_status = "bypassed"
     await _mark_terproses(session, job)
+    session.add(
+        ProductionEvent(
+            job_id=job.id,
+            event_type="payment_bypass_authorized",
+            idempotency_key=(
+                f"pay-bypass:{job.id}:{user.id}:"
+                f"{int(datetime.now(UTC).timestamp())}"
+            ),
+            actor_user_id=user.id,
+            reason=reason.strip(),
+            payload_json=(
+                f'{{"permission":"{P.PAYMENT_BYPASS}","actor_user_id":{user.id}}}'
+            ),
+        )
+    )
     await session.commit()
     await session.refresh(row)
     return row
@@ -285,6 +304,22 @@ async def revoke_payment_bypass(
         )
     )
     job.payment_status = "approved" if int(valid or 0) > 0 else "pending"
+    session.add(
+        ProductionEvent(
+            job_id=job.id,
+            event_type="payment_bypass_revoked",
+            idempotency_key=(
+                f"pay-bypass-revoke:{row.id}:"
+                f"{int(datetime.now(UTC).timestamp())}"
+            ),
+            actor_user_id=user.id,
+            reason=reason.strip(),
+            payload_json=(
+                f'{{"bypass_id":{row.id},"permission":"{P.PAYMENT_REVOKE}",'
+                f'"actor_user_id":{user.id}}}'
+            ),
+        )
+    )
     await session.commit()
     await session.refresh(row)
     return row
@@ -901,7 +936,10 @@ async def record_loading(
     from app.services.accurate_evidence import require_valid_sj
 
     await require_valid_sj(
-        accurate_sj_id=accurate_sj_id, accurate_sj_number=accurate_sj_number
+        accurate_sj_id=accurate_sj_id,
+        accurate_sj_number=accurate_sj_number,
+        expected_so_number=job.accurate_so_number,
+        expected_branch_id=job.branch_id,
     )
     packed = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
@@ -972,6 +1010,26 @@ async def record_pod(
     )
     if int(cancelled or 0) > 0:
         raise HTTPException(409, "SJ sudah dibatalkan; gunakan SJ aktif")
+    # Re-verify SJ at POD time — never rely solely on prior loading snapshot.
+    loading_row = await session.scalar(
+        select(ProductionEvent)
+        .where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.event_type == "loading",
+            ProductionEvent.accurate_sj_id == accurate_sj_id.strip(),
+        )
+        .order_by(ProductionEvent.id.desc())
+        .limit(1)
+    )
+    if loading_row is not None and (loading_row.accurate_sj_number or "").strip():
+        from app.services.accurate_evidence import require_valid_sj
+
+        await require_valid_sj(
+            accurate_sj_id=accurate_sj_id,
+            accurate_sj_number=loading_row.accurate_sj_number,
+            expected_so_number=job.accurate_so_number,
+            expected_branch_id=job.branch_id,
+        )
     loaded = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
             ProductionEvent.job_id == job.id,

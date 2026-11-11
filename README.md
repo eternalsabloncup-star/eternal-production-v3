@@ -9,8 +9,11 @@ This repository currently contains **infrastructure and architecture only** — 
 
 - Backend: Python 3.12, FastAPI, SQLAlchemy 2.x, Alembic, Pytest
 - Database: PostgreSQL 16 (`eternal_production_v3_dev`)
-- Frontend: React + Vite (status shell only)
-- CI: GitHub Actions with ephemeral PostgreSQL
+- Frontend: React + Vite (V49 live shell)
+- Accurate read gateway: `accurate-gateway/` (fixture or live Accurate Online)
+- CI: GitHub Actions with ephemeral PostgreSQL + gateway tests
+
+See [`docs/phase32-accurate-gateway.md`](docs/phase32-accurate-gateway.md) for gateway contracts.
 
 ## Quick start (local)
 

@@ -167,12 +167,18 @@ def normalize_summary(row: dict) -> dict:
     number = str(row.get("po_number") or row.get("number") or "").strip()
     if not number:
         return {}
+    customer = row.get("customer") or row.get("customer_name")
+    if isinstance(customer, dict):
+        customer = customer.get("name") or customer.get("id")
+    branch_id = row.get("branch_id")
+    if not branch_id and isinstance(row.get("branch"), dict):
+        branch_id = row["branch"].get("id")
     return {
         "accurate_id": so_id,
         "po_number": number,
-        "customer": row.get("customer") or row.get("customer_name"),
+        "customer": customer,
         "outlet": row.get("outlet"),
-        "branch_id": row.get("branch_id"),
+        "branch_id": branch_id,
         "sales": row.get("sales"),
         "order_date": row.get("order_date") or row.get("trans_date"),
         "deadline": row.get("deadline") or row.get("estimated_delivery"),
@@ -189,6 +195,8 @@ async def list_sales_orders(
         "/sales-orders", params={"page": page, "limit": limit, "keyword": keyword}
     )
     rows = payload.get("rows")
+    if not isinstance(rows, list):
+        rows = payload.get("items")
     if not isinstance(rows, list):
         raise HTTPException(502, "Gateway mengembalikan daftar SO tidak valid")
     normalized = [normalize_summary(row) for row in rows if isinstance(row, dict)]
