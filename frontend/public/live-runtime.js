@@ -29,10 +29,29 @@
   let authStatus = "pending"; // pending | ok | failed — JWT must be verified by Backend V3
   let inboxPage = 1;
   let inboxKeyword = "";
+  let inboxTotal = null; // Accurate total — never use as current-page KPI
+  let inboxPageSize = 50;
   let selectedSo = null;
   let boardCache = Object.create(null); // so -> board
   let jobCache = Object.create(null); // so -> job summary
   const inFlight = new Set();
+
+  /** Publish inbox rows to the shared global used by production.html (var orders). */
+  function publishOrders(list) {
+    const rows = Array.isArray(list) ? list : [];
+    window.orders = rows;
+    // Keep metadata for KPI vs Accurate total separation.
+    window.__V3_INBOX__ = {
+      page: inboxPage,
+      pageSize: inboxPageSize,
+      total: inboxTotal,
+      rowCount: rows.length,
+      mode: fetchError ? "error" : "live",
+      fetchError: fetchError || "",
+      shared: window.orders === rows,
+    };
+    return rows;
+  }
 
   function redirectToLogin() {
     try {
@@ -118,7 +137,7 @@
     window.queueDemoSave = function () {};
     window.pushDemoSave = function () {};
     // Never present fixture/demo rows as Accurate Live.
-    window.orders = [];
+    publishOrders([]);
     window.taskEntries = {};
     const block = function () {
       toast("Aksi demo dinonaktifkan — gunakan panel V3 pada SO terpilih");
@@ -134,7 +153,7 @@
         const original = window[name];
         window[name] = function () {
           if (name === "bootDemo") {
-            window.orders = [];
+            publishOrders([]);
             return;
           }
           return block();
@@ -1254,7 +1273,11 @@
         ? "Sumber: Gateway Accurate • Sinkron: " +
           lastSync +
           " • halaman " +
-          inboxPage
+          inboxPage +
+          " • menampilkan " +
+          (Array.isArray(window.orders) ? window.orders.length : 0) +
+          (inboxTotal != null ? " dari total Accurate " + inboxTotal : "") +
+          " (KPI halaman ≠ total Accurate)"
         : "Sumber belum terhubung: " + fetchError;
     const content = root.querySelector(".content");
     if (content && !status.parentElement) content.prepend(status);
@@ -1325,7 +1348,8 @@
   async function refreshInbox(page) {
     if (loading) return;
     if (authStatus !== "ok") {
-      window.orders = [];
+      inboxTotal = null;
+      publishOrders([]);
       fetchError =
         authStatus === "pending"
           ? "Memverifikasi sesi V3…"
@@ -1345,7 +1369,8 @@
         API +
         "/production/inbox?page=" +
         inboxPage +
-        "&limit=50" +
+        "&limit=" +
+        inboxPageSize +
         (inboxKeyword
           ? "&keyword=" + encodeURIComponent(inboxKeyword)
           : "");
@@ -1354,8 +1379,8 @@
         throw new Error("Respons sumber bukan data live yang terverifikasi");
       }
       const prevJobs = jobCache;
-      window.orders = data.rows.map(mapOrder).filter(Boolean);
-      window.orders.forEach(function (o) {
+      const mapped = data.rows.map(mapOrder).filter(Boolean);
+      mapped.forEach(function (o) {
         if (prevJobs[o.id]) {
           o.v3JobId = prevJobs[o.id].id;
           o.design_status = prevJobs[o.id].design_status;
@@ -1363,6 +1388,19 @@
           o.sample_status = prevJobs[o.id].sample_status;
         }
       });
+      // Accurate total is metadata only — never substitute as page KPI.
+      const totalRaw = data.total;
+      inboxTotal =
+        totalRaw == null || totalRaw === ""
+          ? null
+          : Number.isFinite(Number(totalRaw))
+            ? Number(totalRaw)
+            : null;
+      if (data.pageSize != null && Number(data.pageSize) > 0) {
+        inboxPageSize = Number(data.pageSize);
+      }
+      fetchError = "";
+      publishOrders(mapped);
       // Drop board cache for SO not on this page to limit cross-PO leakage memory.
       Object.keys(boardCache).forEach(function (so) {
         if (!orderBySo(so)) delete boardCache[so];
@@ -1370,12 +1408,15 @@
       window.taskEntries = {};
       // Do not assign window.history — browser History API is read-only.
       lastSync = new Date().toLocaleTimeString("id-ID");
-      fetchError = "";
     } catch (err) {
-      window.orders = [];
+      inboxTotal = null;
+      fetchError = err && err.message ? err.message : "Tidak dapat membaca Accurate";
+      publishOrders([]);
       window.taskEntries = {};
       lastSync = null;
-      fetchError = err && err.message ? err.message : "Tidak dapat membaca Accurate";
+      if (String(fetchError).indexOf("Sesi V3 tidak valid") >= 0) {
+        redirectToLogin();
+      }
     } finally {
       loading = false;
       if (typeof window.render === "function") window.render();
@@ -1453,10 +1494,11 @@
     }
   });
 
-  window.orders = [];
+  publishOrders([]);
   window.v3AuthStatus = function () {
     return authStatus;
   };
+  window.v3PublishOrders = publishOrders;
 
   (async function bootLive() {
     clearGhosts();

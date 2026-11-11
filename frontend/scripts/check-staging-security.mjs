@@ -47,6 +47,15 @@ if (!/V3_API_BASE\s*\|\|\s*["']\/api\/v1["']/.test(live)) {
 if (/127\.0\.0\.1:8000|:8000\/api/.test(live)) {
   errors.push("live-runtime must not target ERP V1 :8000");
 }
+if (!/function publishOrders\s*\(/.test(live)) {
+  errors.push("live-runtime missing publishOrders shared-state helper");
+}
+if (!/var orders=\[\]/.test(production)) {
+  errors.push("production.html must use var orders (shared with window.orders)");
+}
+if (/let orders=\[\]/.test(production)) {
+  errors.push("production.html must not use let orders (breaks window.orders sync)");
+}
 for (const hook of ["v3OpenWorkflow", "v50RefreshInbox", "v3Logout"]) {
   if (!live.includes(hook)) errors.push(`live-runtime missing ${hook}`);
 }
