@@ -1,19 +1,17 @@
 """Pytest fixtures for backend foundation tests."""
 
+from __future__ import annotations
+
 import os
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-# Force dedicated test DB credentials (override any shell/.env development values).
-os.environ["DATABASE_URL"] = os.environ.get(
-    "TEST_DATABASE_URL",
-    "postgresql+asyncpg://epv3_test:epv3_test_local_only@127.0.0.1:5432/eternal_production_v3_test",
-)
-os.environ["DATABASE_URL_SYNC"] = os.environ.get(
-    "TEST_DATABASE_URL_SYNC",
-    "postgresql+psycopg2://epv3_test:epv3_test_local_only@127.0.0.1:5432/eternal_production_v3_test",
-)
+from tests.db_url_guard import resolve_test_database_urls
+
+_async_url, _sync_url = resolve_test_database_urls()
+os.environ["DATABASE_URL"] = _async_url
+os.environ["DATABASE_URL_SYNC"] = _sync_url
 os.environ["APP_ENV"] = "test"
 os.environ["APP_DEBUG"] = "false"
 

@@ -29,9 +29,11 @@ jobs:
       APP_ENV: test
       APP_DEBUG: "false"
       API_PREFIX: /api/v1
+      # Dedicated CI test DB only — never V2 / production credentials
+      TEST_DATABASE_URL: postgresql+asyncpg://epv3_test:epv3_ci_test_only@127.0.0.1:5432/eternal_production_v3_test
+      TEST_DATABASE_URL_SYNC: postgresql+psycopg2://epv3_test:epv3_ci_test_only@127.0.0.1:5432/eternal_production_v3_test
       DATABASE_URL: postgresql+asyncpg://epv3_test:epv3_ci_test_only@127.0.0.1:5432/eternal_production_v3_test
       DATABASE_URL_SYNC: postgresql+psycopg2://epv3_test:epv3_ci_test_only@127.0.0.1:5432/eternal_production_v3_test
-      # Intentionally no V2 credentials / secrets in CI
 
     defaults:
       run:
