@@ -1,0 +1,15 @@
+---
+description: Testing and verification safety for Eternal Production V3
+globs: "{backend/tests/**/*,frontend/src/**/*.test.*,.github/workflows/**/*}"
+alwaysApply: false
+---
+
+# 20 — Testing / Safety
+
+- Run focused tests covering changed behavior before claiming completion.
+- Include PostgreSQL regression coverage for database-touching changes.
+- Verify Alembic has a single head (`alembic heads` yields exactly one revision).
+- Run `git diff --check` before finish; whitespace/conflict marker failures are FAIL.
+- Report results explicitly as PASS, FAIL, or BLOCKED with exact evidence.
+- Do not claim PASS when Docker/PostgreSQL/runtime prerequisites are unavailable.
+- Never point automated tests at ERP V2 production databases.

@@ -1,0 +1,17 @@
+---
+description: Backend and PostgreSQL rules for Eternal Production V3
+globs: backend/**/*
+alwaysApply: false
+---
+
+# 10 — Backend / PostgreSQL
+
+- PostgreSQL only. Do not introduce SQLite, MySQL, or other primary stores.
+- Use typed SQLAlchemy 2.x models with `DeclarativeBase` metadata from `app.db.base`.
+- All schema changes go through Alembic migrations. Keep a single migration head.
+- Prefer explicit transactions; commit only after successful unit-of-work completion.
+- Design write paths for idempotency where retries are expected.
+- Enforce permission checks at the API/service boundary before mutating state.
+- No direct write access to the ERP V2 database. Integration must be API/contract based.
+- Never request or use ERP V2 production credentials.
+- Keep development and test databases distinct from any V2 instance.

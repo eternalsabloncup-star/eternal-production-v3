@@ -1,0 +1,16 @@
+---
+description: Eternal Production V3 core agent guardrails
+alwaysApply: true
+---
+
+# 00 — Eternal Core
+
+- Audit before implementation when source-of-truth is unclear; do not guess business rules.
+- Treat repository code, Owner decisions, and documented contracts as source of truth.
+- No unauthorized scope changes. Implement only what the task requests.
+- No destructive Git commands (`reset --hard`, force-push, history rewrite) unless Owner explicitly orders them.
+- No fabricated screenshots, QA results, CI status, or test outcomes. Report PASS / FAIL / BLOCKED with evidence.
+- Main agent only for Eternal tasks unless Owner explicitly authorizes subagents.
+- Prefer minimal surgical changes over broad rewrites.
+- Do not access or modify ERP V2 repositories or production databases from this project.
+- Do not commit, push, open PRs, merge, or deploy unless the task explicitly allows it.
