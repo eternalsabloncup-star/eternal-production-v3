@@ -105,25 +105,84 @@
     };
   }
 
-  async function request(path) {
+  async function request(path, options) {
+    const opts = options || {};
+    const headers = Object.assign({}, authHeaders(), opts.headers || {});
+    if (opts.body != null) headers["Content-Type"] = "application/json";
     const response = await fetch(path, {
+      method: opts.method || "GET",
       credentials: "same-origin",
-      headers: authHeaders(),
+      headers: headers,
       cache: "no-store",
+      body: opts.body != null ? JSON.stringify(opts.body) : undefined,
     });
     if (response.status === 401) {
       localStorage.removeItem(TOKEN_KEY);
       throw new Error("Sesi V3 tidak valid — login ulang");
     }
     if (!response.ok) {
+      let detail = "";
+      try {
+        const errBody = await response.json();
+        detail =
+          (errBody && errBody.error && errBody.error.message) ||
+          (errBody && errBody.detail) ||
+          "";
+      } catch (_) {
+        /* ignore parse errors */
+      }
       throw new Error(
         response.status === 503
           ? "Gateway Accurate belum siap / tidak berwenang"
-          : "API V3 mengembalikan HTTP " + response.status,
+          : detail || "API V3 mengembalikan HTTP " + response.status,
       );
     }
+    if (response.status === 204) return null;
     return response.json();
   }
+
+  /** Phase 3: SO number → production job id cache (server is authority). */
+  const jobBySo = Object.create(null);
+
+  async function ensureJob(order) {
+    if (!order || !order.id) throw new Error("SO tidak valid");
+    if (jobBySo[order.id]) return jobBySo[order.id];
+    const branchId =
+      order.branch && order.branch !== "Belum terverifikasi"
+        ? String(order.branch)
+        : null;
+    if (!branchId) {
+      throw new Error("Cabang SO belum terverifikasi dari Accurate");
+    }
+    const job = await request(API + "/production/jobs", {
+      method: "POST",
+      body: {
+        accurate_so_number: order.id,
+        branch_id: branchId,
+        accurate_id: order.accurateId != null ? String(order.accurateId) : null,
+        customer_name: order.name || null,
+      },
+    });
+    jobBySo[order.id] = job;
+    order.v3JobId = job.id;
+    order.design_status = job.design_status;
+    order.payment_status = job.payment_status;
+    order.sample_status = job.sample_status;
+    order.productionStatus = job.processing_status || order.productionStatus;
+    return job;
+  }
+
+  window.v3EnsureJob = ensureJob;
+  window.v3Api = {
+    request: request,
+    ensureJob: ensureJob,
+    post: function (path, body) {
+      return request(API + path, { method: "POST", body: body });
+    },
+    get: function (path) {
+      return request(API + path);
+    },
+  };
 
   const oldRender = window.render;
   window.render = function () {
@@ -221,6 +280,34 @@
             "</td></tr>",
         )
         .join("");
+      let gateHtml =
+        '<p class="v49-quiet">Job produksi V3 belum dibuat untuk SO ini.</p>';
+      try {
+        const job = await ensureJob(
+          Object.assign({}, o, {
+            branch: detail.branch_id || o.branch,
+            accurateId: detail.accurate_id || o.accurateId,
+            name: detail.customer || o.name,
+          }),
+        );
+        gateHtml =
+          "<p>Job V3 #<b>" +
+          escape(String(job.id)) +
+          "</b> · Design: <b>" +
+          escape(job.design_status || "—") +
+          "</b> · Payment: <b>" +
+          escape(job.payment_status || "—") +
+          "</b> · Sample: <b>" +
+          escape(job.sample_status || "—") +
+          "</b> · Proses: <b>" +
+          escape(job.processing_status || "—") +
+          "</b></p>";
+      } catch (jobErr) {
+        gateHtml =
+          '<p class="v49-quiet">Job V3: ' +
+          escape(jobErr.message || "belum dapat dibuat") +
+          "</p>";
+      }
       modal.querySelector(".drawerbody").innerHTML =
         "<p><b>" +
         escape(detail.po_number) +
@@ -228,7 +315,9 @@
         escape(detail.customer || "Pelanggan belum diketahui") +
         "</p><p>Status proses V3: <b>" +
         escape(detail.production_status || "Baru") +
-        "</b></p><p>Sales: " +
+        "</b></p>" +
+        gateHtml +
+        "<p>Sales: " +
         escape(detail.sales || "Belum diketahui") +
         " · Cabang: " +
         escape(detail.branch_id || "Belum diketahui") +
@@ -236,7 +325,7 @@
         escape(detail.deadline || "Belum diketahui") +
         '</p><div class="v26-scroll"><table><thead><tr><th>Kode</th><th>Produk</th><th>Qty</th><th>Satuan</th></tr></thead><tbody>' +
         (cells || '<tr><td colspan="4">Tidak ada baris</td></tr>') +
-        '</tbody></table></div><p class="v49-quiet">Dokumen Accurate hanya dibaca. Mutasi produksi menunggu API kanonik V3.</p>';
+        '</tbody></table></div><p class="v49-quiet">Accurate tetap read-only. Mutasi produksi memakai API kanonik V3 (Phase 3 wiring bertahap).</p>';
     } catch (err) {
       modal.querySelector(".drawerbody").textContent =
         "Detail belum tersedia: " + err.message;
