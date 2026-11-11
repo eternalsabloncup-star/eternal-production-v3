@@ -117,8 +117,22 @@ async def compute_run(
         return existing
 
     # Snapshot rates at period_end (historical effective rates).
+    # daily/overtime rates may exist but qty is NEVER invented — excluded from gross
+    # until an attendance/OT timesheet source is implemented (V1 parity unverified).
     rates = await rates_on(session, period_end)
-    rate_json = json.dumps({k: str(v) for k, v in rates.items()}, sort_keys=True)
+    rate_json = json.dumps(
+        {
+            "rates": {k: str(v) for k, v in rates.items()},
+            "included_in_gross": ["one", "two", "three", "four", "screen"],
+            "excluded_unverified": ["daily", "overtime"],
+            "v1_parity": "unverified",
+            "note": (
+                "Gross uses confirmed output (+corrections −verified rejects) "
+                "and linked screener units only. Attendance/OT not silently included."
+            ),
+        },
+        sort_keys=True,
+    )
 
     from datetime import datetime, time, timezone
 

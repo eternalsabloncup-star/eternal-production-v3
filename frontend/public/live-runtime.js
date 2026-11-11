@@ -496,9 +496,10 @@
       ) +
       section(
         "Payment",
-        '<label>Accurate receipt id<input id="v3-pay-rid"/></label>' +
+        '<p class="v49-quiet" id="v3-evidence-note">Receipt/SJ membutuhkan verifikasi gateway Accurate bila enforce aktif. Bypass payment tetap berizin+audit.</p>' +
+          '<label>Accurate receipt id<input id="v3-pay-rid"/></label>' +
           '<label>Amount<input id="v3-pay-amt" type="number" min="0" step="0.01"/></label>' +
-          '<button type="button" class="btn sm" data-v3="pay-receipt">Catat receipt</button>' +
+          '<button type="button" class="btn sm" data-v3="pay-receipt">Catat receipt (verified)</button>' +
           '<label>Bypass reason<input id="v3-pay-bypass-reason"/></label>' +
           '<button type="button" class="btn sm" data-v3="pay-bypass">Bypass payment</button>' +
           (activeBypass
@@ -506,7 +507,10 @@
               escapeHtml(activeBypass.id) +
               "</button>"
             : "") +
-          historyList("Riwayat payment", payHist),
+          '<label>Invalidate receipt id<input id="v3-pay-inv-id" type="number" placeholder="receipt row id"/></label>' +
+          '<label>Invalidate reason<input id="v3-pay-inv-reason" placeholder="alasan wajib"/></label>' +
+          '<button type="button" class="btn sm" data-v3="pay-invalidate">Invalidate receipt</button>' +
+          historyList("Riwayat payment + audit", payHist),
       ) +
       section(
         "Scheduling",
@@ -607,7 +611,7 @@
       ) +
       section(
         "Payroll",
-        '<label>Rate component<select id="v3-rate-comp"><option value="one">one</option><option value="two">two</option><option value="three">three</option><option value="four">four</option><option value="screen">screen</option><option value="daily">daily</option><option value="overtime">overtime</option></select></label>' +
+        '<label>Rate component (eligible)<select id="v3-rate-comp"><option value="one">one</option><option value="two">two</option><option value="three">three</option><option value="four">four</option><option value="screen">screen</option></select></label>' +
           '<label>Amount<input id="v3-rate-amt" type="number" min="0" step="0.01" value="20"/></label>' +
           '<label>Effective from<input id="v3-rate-from" type="date"/></label>' +
           '<button type="button" class="btn sm" data-v3="rate-set">Set rate</button>' +
@@ -616,7 +620,7 @@
           '<label>Period end<input id="v3-pay-end" type="date"/></label>' +
           '<button type="button" class="btn sm" data-v3="payroll-run">Hitung periode</button>' +
           '<pre id="v3-payroll-out" class="v49-quiet"></pre>' +
-          '<p class="v49-quiet">Payroll hanya dari confirmed output server — bukan total frontend.</p>',
+          '<p class="v49-quiet">Payroll hanya dari confirmed output server. daily/overtime <b>tidak</b> dihitung (attendance/OT belum ada; V1 parity unverified).</p>',
       ) +
       "</div></div></aside></div>";
 
@@ -627,6 +631,23 @@
         if (el && !el.value) el.value = today;
       },
     );
+    request(API + "/production/jobs/evidence/capability")
+      .then(function (cap) {
+        const note = document.getElementById("v3-evidence-note");
+        if (!note) return;
+        note.textContent =
+          "Evidence: gateway " +
+          (cap.gateway_configured ? "configured" : "NOT configured") +
+          "; enforce=" +
+          String(cap.enforce) +
+          "; receipt_verify=" +
+          String(cap.receipt_verify) +
+          "; sj_verify=" +
+          String(cap.sj_verify) +
+          ". " +
+          (cap.note || "");
+      })
+      .catch(function () {});
     const closeBtn = document.getElementById("v3-close-drawer");
     if (closeBtn) closeBtn.onclick = function () {
       selectedSo = null;
@@ -729,6 +750,29 @@
           { method: "POST", body: { reason: "revoked from V3 panel" } },
         );
         toast("Bypass dicabut");
+        return;
+      }
+      if (action === "pay-invalidate") {
+        const rid = field("v3-pay-inv-id");
+        const reason = field("v3-pay-inv-reason");
+        if (!rid) throw new Error("Receipt id wajib");
+        if (!reason || reason.length < 4) {
+          throw new Error("Alasan invalidate wajib (min 4 karakter)");
+        }
+        if (
+          !window.confirm(
+            "Invalidate receipt #" +
+              rid +
+              "? Gate payment akan ditutup jika tidak ada evidence/bypass lain. Audit akan dicatat.",
+          )
+        ) {
+          return;
+        }
+        await request(
+          API + "/production/jobs/payment/receipts/" + rid + "/invalidate",
+          { method: "POST", body: { reason: reason } },
+        );
+        toast("Receipt diinvalidasi + audit event");
         return;
       }
       if (action === "asg-create") {
@@ -1231,13 +1275,12 @@
         if (!orderBySo(so)) delete boardCache[so];
       });
       window.taskEntries = {};
-      window.history = [];
+      // Do not assign window.history — browser History API is read-only.
       lastSync = new Date().toLocaleTimeString("id-ID");
       fetchError = "";
     } catch (err) {
       window.orders = [];
       window.taskEntries = {};
-      window.history = [];
       lastSync = null;
       fetchError = err && err.message ? err.message : "Tidak dapat membaca Accurate";
     } finally {
@@ -1287,20 +1330,35 @@
   );
 
   // Neutralize legacy mutation helpers that would invent success without API.
-  ["advance", "pack", "printOn", "approveSample", "cancelRemaining"].forEach(
-    function (name) {
-      if (typeof window[name] === "function") {
-        window[name] = function () {
-          toast(
-            "Gunakan panel V3 pada SO terpilih — " +
-              name +
-              " demo tidak menulis ledger server",
-          );
-          return false;
-        };
-      }
-    },
-  );
+  [
+    "advance",
+    "pack",
+    "printOn",
+    "approveSample",
+    "cancelRemaining",
+    "confirmDriverDelivery",
+    "loadSJ",
+    "receiveSJ",
+    "createSJ",
+    "v26Action",
+    "v26ShipAction",
+    "v26MoveAction",
+    "v28Action",
+    "intakeAction",
+    "v23TransferRemaining",
+    "flow31ShipAction",
+  ].forEach(function (name) {
+    if (typeof window[name] === "function") {
+      window[name] = function () {
+        toast(
+          "Handler simulasi " +
+            name +
+            " dinonaktifkan — transaksi hanya via panel V3 / API Postgres",
+        );
+        return false;
+      };
+    }
+  });
 
   window.orders = [];
   if (typeof window.render === "function") window.render();

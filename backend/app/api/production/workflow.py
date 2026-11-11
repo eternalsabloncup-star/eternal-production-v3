@@ -184,6 +184,17 @@ async def create_job(
     return _job_summary(job)
 
 
+@router.get("/evidence/capability")
+async def evidence_capability(
+    user: User = Depends(get_current_user),
+):
+    """Probe whether Accurate receipt/SJ verification is available."""
+    from app.services.accurate_evidence import evidence_capability as cap
+
+    _ = user
+    return cap()
+
+
 @router.get("/by-so/{so_number:path}")
 async def get_job_by_so(
     so_number: str,

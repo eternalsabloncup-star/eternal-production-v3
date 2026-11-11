@@ -12,7 +12,7 @@ Branch contracts from `backend/app/api/production/workflow.py` + `payroll.py` (n
 | Design decide/bypass/customer | `POST .../design/versions/{id}/decision` | **Wired** |
 | Payment receipt | `POST .../payment/receipts` | **Wired** |
 | Payment bypass / revoke | bypass + revoke endpoints | **Wired** |
-| Invalidate receipt | `POST .../payment/receipts/{id}/invalidate` | **UI incomplete** — API exists; panel uses history only |
+| Invalidate receipt | `POST .../payment/receipts/{id}/invalidate` | **Wired** — reason + confirm + audit event |
 | Schedule create / cancel / transfer | schedule endpoints | **Wired** |
 | Screener / helper prep | `POST .../prep/screener\|helper` | **Wired** |
 | Sample upload / decide | samples endpoints | **Wired** |

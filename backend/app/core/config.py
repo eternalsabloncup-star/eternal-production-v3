@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     accurate_read_gateway_token: str = Field(
         default="", alias="V3_ACCURATE_READ_GATEWAY_TOKEN"
     )
+    # When true, payment receipts + SJ loading require live gateway verification.
+    # Default false only so APP_ENV=test can skip; non-test always enforces via
+    # accurate_evidence._enforce() even if this flag is false.
+    accurate_evidence_enforce: bool = Field(
+        default=False, alias="V3_ACCURATE_EVIDENCE_ENFORCE"
+    )
 
     @property
     def cors_origin_list(self) -> list[str]:

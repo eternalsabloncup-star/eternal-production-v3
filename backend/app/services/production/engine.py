@@ -209,6 +209,9 @@ async def record_payment_receipt(
     _branch(user, job.branch_id)
     if not accurate_receipt_id.strip():
         raise HTTPException(422, "Referensi receipt Accurate wajib")
+    from app.services.accurate_evidence import require_valid_receipt
+
+    evidence = await require_valid_receipt(accurate_receipt_id)
     row = PaymentReceiptRef(
         job_id=job.id,
         accurate_receipt_id=accurate_receipt_id.strip(),
@@ -216,7 +219,10 @@ async def record_payment_receipt(
         amount=amount,
         status="valid",
         recorded_by=user.id,
-        note=note,
+        note=(note or "")
+        + (
+            f" | evidence:{evidence.get('mode')}:{evidence.get('payload_status', '')}"
+        ),
     )
     session.add(row)
     # Valid receipt opens payment gate (no manual approve without evidence).
@@ -316,6 +322,20 @@ async def invalidate_receipt(
     )
     if int(valid or 0) == 0 and int(active_bypass or 0) == 0:
         job.payment_status = "pending"
+    # Append-only audit event (never silent overwrite).
+    session.add(
+        ProductionEvent(
+            job_id=job.id,
+            event_type="payment_receipt_invalidated",
+            idempotency_key=f"pay-invalidate:{row.id}:{int(datetime.now(UTC).timestamp())}",
+            actor_user_id=user.id,
+            reason=reason.strip(),
+            payload_json=(
+                f'{{"receipt_id":{row.id},"accurate_receipt_id":'
+                f'"{row.accurate_receipt_id}"}}'
+            ),
+        )
+    )
     await session.commit()
     await session.refresh(row)
     return row
@@ -878,6 +898,11 @@ async def record_loading(
         raise HTTPException(422, "Identitas SJ Accurate wajib")
     if qty_physical <= 0:
         raise HTTPException(422, "Qty loading harus > 0")
+    from app.services.accurate_evidence import require_valid_sj
+
+    await require_valid_sj(
+        accurate_sj_id=accurate_sj_id, accurate_sj_number=accurate_sj_number
+    )
     packed = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
             ProductionEvent.job_id == job.id,

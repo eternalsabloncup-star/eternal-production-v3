@@ -106,6 +106,8 @@ async def get_run(
         "period_start": str(run.period_start),
         "period_end": str(run.period_end),
         "rate_snapshot_json": run.rate_snapshot_json,
+        "excluded_unverified_components": ["daily", "overtime"],
+        "v1_parity": "unverified",
         "lines": [
             {
                 "operator_name": ln.operator_name,
