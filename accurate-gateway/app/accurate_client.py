@@ -63,25 +63,39 @@ class AccurateClient:
                 "ACCURATE_API_TOKEN dan ACCURATE_DATABASE_ID wajib untuk mode live",
                 status_code=503,
             )
+        # Official Accurate Online: open-db.do with Bearer token + database id.
+        # Prefer GET; fall back to POST if tenant rejects GET.
         url = f"{self._settings.accurate_account_base.rstrip('/')}/oauth/open-db.do"
-        try:
-            resp = await client.get(
-                url,
-                params={"id": db_id},
-                headers={"Authorization": f"Bearer {token}"},
-            )
-        except httpx.RequestError as exc:
-            raise AccurateUpstreamError(
-                "accurate_open_db_unreachable",
-                f"open-db gagal: {exc}",
-                status_code=502,
-            ) from exc
-        if resp.status_code >= 400:
-            raise AccurateUpstreamError(
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        resp = None
+        last_exc: Exception | None = None
+        for method in ("GET", "POST"):
+            try:
+                resp = await client.request(
+                    method,
+                    url,
+                    params={"id": db_id},
+                    headers=headers,
+                )
+            except httpx.RequestError as exc:
+                last_exc = exc
+                continue
+            if resp.status_code < 400:
+                break
+            last_exc = AccurateUpstreamError(
                 "accurate_open_db_rejected",
                 f"open-db HTTP {resp.status_code}",
                 status_code=502,
             )
+            resp = None
+        if resp is None:
+            if isinstance(last_exc, AccurateUpstreamError):
+                raise last_exc
+            raise AccurateUpstreamError(
+                "accurate_open_db_unreachable",
+                f"open-db gagal: {last_exc}",
+                status_code=502,
+            ) from last_exc
         try:
             payload = resp.json()
         except ValueError as exc:
@@ -90,12 +104,28 @@ class AccurateClient:
                 "open-db response bukan JSON",
                 status_code=502,
             ) from exc
-        host = payload.get("host") or payload.get("s") or payload.get("data", {}).get("host")
+        if isinstance(payload, dict) and payload.get("s") is False:
+            raise AccurateUpstreamError(
+                "accurate_open_db_business_reject",
+                str(payload.get("d") or payload.get("message") or "open-db s=false"),
+                status_code=502,
+            )
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        host = (
+            payload.get("host")
+            or data.get("host")
+            or payload.get("hostName")
+            or data.get("hostName")
+        )
+        # Never treat boolean s=true as host.
+        if isinstance(host, bool):
+            host = None
         session = (
             payload.get("session")
             or payload.get("sessionId")
+            or data.get("session")
+            or data.get("sessionId")
             or resp.headers.get("X-Session-ID")
-            or payload.get("data", {}).get("session")
         )
         if not host or not session:
             raise AccurateUpstreamError(
