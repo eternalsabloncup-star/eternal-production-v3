@@ -4,7 +4,8 @@
 Requires:
   GATEWAY_MODE=live
   ACCURATE_API_TOKEN
-  ACCURATE_DATABASE_ID
+  ACCURATE_SIGNATURE_SECRET
+  (optional) ACCURATE_DATABASE_ID pin after api-token.do
   GATEWAY_M2M_TOKEN (for optional local gateway hop)
 
 Writes sanitized evidence only (no customer names, no tokens).
@@ -101,7 +102,9 @@ async def main() -> int:
             json.dumps(
                 {
                     "ok": False,
-                    "blocker": "ACCURATE_API_TOKEN and ACCURATE_DATABASE_ID required",
+                    "blocker": (
+                        "ACCURATE_API_TOKEN and ACCURATE_SIGNATURE_SECRET required"
+                    ),
                     "live_verified": False,
                 }
             )

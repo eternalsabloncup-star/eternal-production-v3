@@ -1,23 +1,31 @@
-"""HTTPS Accurate Online adapter — read-only, bounded retries, fail-closed.
+"""HTTPS Accurate Online adapter — read-only, API Token 1.0.3 auth.
 
-Official paths (Accurate Online API / swagger):
-  POST {account}/oauth/open-db.do  → session + host
-  GET  {host}/accurate/api/sales-order/list.do
-  GET  {host}/accurate/api/sales-order/detail.do
-  GET  {host}/accurate/api/sales-receipt/detail.do
-  GET  {host}/accurate/api/delivery-order/detail.do
+Auth (every request, freshly signed):
+  Authorization: Bearer <ACCURATE_API_TOKEN>
+  X-Api-Timestamp / X-Api-Signature (HMAC-SHA256 + Signature Secret)
 
-Credentials: ACCURATE_API_TOKEN + ACCURATE_DATABASE_ID only.
-Never reuse ERP V1 secrets or databases.
+Bootstrap:
+  POST https://account.accurate.id/api/api-token.do
+  → database id + host (d.database)
+
+Business GETs on returned host:
+  /accurate/api/sales-order/list.do|detail.do
+  /accurate/api/sales-receipt/detail.do
+  /accurate/api/delivery-order/detail.do
+
+HTTP 308: do not reuse stale signed headers — update host and re-sign.
+Never reuse ERP V1 secrets. Never log credentials.
 """
 
 from __future__ import annotations
 
 import logging
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from app.accurate_auth import auth_headers, normalize_host
 from app.config import GatewaySettings
 from app.normalize import (
     normalize_delivery_note,
@@ -30,6 +38,7 @@ logger = logging.getLogger("accurate_gateway.upstream")
 
 _MAX_ATTEMPTS = 3
 _RETRYABLE = {408, 425, 429, 500, 502, 503, 504}
+_API_TOKEN_PATH = "/api/api-token.do"
 
 
 class AccurateUpstreamError(Exception):
@@ -44,99 +53,129 @@ class AccurateClient:
     def __init__(self, settings: GatewaySettings) -> None:
         self._settings = settings
         self._host: str | None = None
-        self._session_id: str | None = None
+        self._database_id: str | None = None
 
     def configured(self) -> bool:
         return bool(
             (self._settings.accurate_api_token or "").strip()
-            and (self._settings.accurate_database_id or "").strip()
+            and (self._settings.accurate_signature_secret or "").strip()
         )
 
-    async def _ensure_session(self, client: httpx.AsyncClient) -> None:
-        if self._host and self._session_id:
-            return
+    def _signed_headers(self) -> dict[str, str]:
         token = self._settings.accurate_api_token.strip()
-        db_id = self._settings.accurate_database_id.strip()
-        if not token or not db_id:
+        secret = self._settings.accurate_signature_secret.strip()
+        if not token or not secret:
             raise AccurateUpstreamError(
                 "accurate_credentials_missing",
-                "ACCURATE_API_TOKEN dan ACCURATE_DATABASE_ID wajib untuk mode live",
+                "ACCURATE_API_TOKEN dan ACCURATE_SIGNATURE_SECRET wajib untuk mode live",
                 status_code=503,
             )
-        # Official Accurate Online: open-db.do with Bearer token + database id.
-        # Prefer GET; fall back to POST if tenant rejects GET.
-        url = f"{self._settings.accurate_account_base.rstrip('/')}/oauth/open-db.do"
-        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-        resp = None
-        last_exc: Exception | None = None
-        for method in ("GET", "POST"):
-            try:
-                resp = await client.request(
-                    method,
-                    url,
-                    params={"id": db_id},
-                    headers=headers,
+        return auth_headers(api_token=token, signature_secret=secret)
+
+    @staticmethod
+    def _extract_database(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+        data = payload.get("d") if isinstance(payload.get("d"), dict) else {}
+        database = data.get("database") if isinstance(data.get("database"), dict) else {}
+        if not database and isinstance(payload.get("database"), dict):
+            database = payload["database"]
+        host = database.get("host") or data.get("host") or payload.get("host")
+        if isinstance(host, bool):
+            host = None
+        db_id = database.get("id") or data.get("databaseId") or payload.get("databaseId")
+        host_n = normalize_host(str(host)) if host else None
+        db_s = str(db_id).strip() if db_id is not None and str(db_id).strip() else None
+        return host_n, db_s
+
+    async def _resolve_host(self, client: httpx.AsyncClient) -> None:
+        if self._host:
+            return
+        account = self._settings.accurate_account_base.rstrip("/")
+        url = f"{account}{_API_TOKEN_PATH}"
+        try:
+            resp = await client.post(url, headers=self._signed_headers())
+        except httpx.RequestError as exc:
+            raise AccurateUpstreamError(
+                "accurate_api_token_unreachable",
+                "api-token.do unreachable",
+                status_code=502,
+            ) from exc
+
+        # Manual 308 handling with re-signed headers (never auto-follow stale sig).
+        if resp.status_code in {301, 302, 307, 308}:
+            location = resp.headers.get("Location") or resp.headers.get("location")
+            if not location:
+                raise AccurateUpstreamError(
+                    "accurate_api_token_redirect_missing",
+                    f"api-token.do HTTP {resp.status_code} tanpa Location",
+                    status_code=502,
                 )
+            next_url = urljoin(url, location)
+            try:
+                resp = await client.post(next_url, headers=self._signed_headers())
             except httpx.RequestError as exc:
-                last_exc = exc
-                continue
-            if resp.status_code < 400:
-                break
-            last_exc = AccurateUpstreamError(
-                "accurate_open_db_rejected",
-                f"open-db HTTP {resp.status_code}",
+                raise AccurateUpstreamError(
+                    "accurate_api_token_unreachable",
+                    "api-token.do redirect unreachable",
+                    status_code=502,
+                ) from exc
+            # If redirect points at a business host, remember it.
+            parsed = urlparse(next_url)
+            if parsed.netloc and "account.accurate.id" not in parsed.netloc:
+                self._host = normalize_host(f"{parsed.scheme}://{parsed.netloc}")
+
+        if resp.status_code == 401:
+            raise AccurateUpstreamError(
+                "accurate_auth_rejected",
+                "api-token.do menolak token/signature",
                 status_code=502,
             )
-            resp = None
-        if resp is None:
-            if isinstance(last_exc, AccurateUpstreamError):
-                raise last_exc
+        if resp.status_code >= 400:
             raise AccurateUpstreamError(
-                "accurate_open_db_unreachable",
-                f"open-db gagal: {last_exc}",
+                "accurate_api_token_rejected",
+                f"api-token.do HTTP {resp.status_code}",
                 status_code=502,
-            ) from last_exc
+            )
         try:
             payload = resp.json()
         except ValueError as exc:
             raise AccurateUpstreamError(
-                "accurate_open_db_invalid",
-                "open-db response bukan JSON",
+                "accurate_api_token_invalid",
+                "api-token.do response bukan JSON",
                 status_code=502,
             ) from exc
-        if isinstance(payload, dict) and payload.get("s") is False:
+        if not isinstance(payload, dict):
             raise AccurateUpstreamError(
-                "accurate_open_db_business_reject",
-                str(payload.get("d") or payload.get("message") or "open-db s=false"),
+                "accurate_api_token_shape",
+                "api-token.do shape tidak dikenali",
                 status_code=502,
             )
-        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
-        host = (
-            payload.get("host")
-            or data.get("host")
-            or payload.get("hostName")
-            or data.get("hostName")
-        )
-        # Never treat boolean s=true as host.
-        if isinstance(host, bool):
-            host = None
-        session = (
-            payload.get("session")
-            or payload.get("sessionId")
-            or data.get("session")
-            or data.get("sessionId")
-            or resp.headers.get("X-Session-ID")
-        )
-        if not host or not session:
+        if payload.get("s") is False:
             raise AccurateUpstreamError(
-                "accurate_session_incomplete",
-                "open-db tidak mengembalikan host/session",
+                "accurate_api_token_business_reject",
+                "api-token.do s=false",
                 status_code=502,
             )
-        self._host = str(host).rstrip("/")
-        if not self._host.startswith("http"):
-            self._host = f"https://{self._host}"
-        self._session_id = str(session)
+        host, db_id = self._extract_database(payload)
+        if not host:
+            raise AccurateUpstreamError(
+                "accurate_host_missing",
+                "api-token.do tidak mengembalikan database.host",
+                status_code=502,
+            )
+        self._host = host
+        self._database_id = db_id
+        # Optional pin: if Owner set ACCURATE_DATABASE_ID, it must match.
+        expected = (self._settings.accurate_database_id or "").strip()
+        if expected and db_id and expected != db_id:
+            raise AccurateUpstreamError(
+                "accurate_database_mismatch",
+                "Database id dari api-token.do tidak cocok dengan konfigurasi",
+                status_code=502,
+            )
+        logger.info(
+            "accurate host resolved",
+            extra={"has_database_id": bool(db_id), "host_set": True},
+        )
 
     async def _request(
         self,
@@ -145,33 +184,64 @@ class AccurateClient:
         *,
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        token = self._settings.accurate_api_token.strip()
         last_error: AccurateUpstreamError | None = None
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+        # follow_redirects=False so 308 can be re-signed.
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=False) as client:
             for attempt in range(1, _MAX_ATTEMPTS + 1):
                 try:
-                    await self._ensure_session(client)
-                    assert self._host and self._session_id
+                    await self._resolve_host(client)
+                    assert self._host
                     url = f"{self._host}{path}"
                     resp = await client.request(
                         method,
                         url,
                         params=params,
-                        headers={
-                            "Authorization": f"Bearer {token}",
-                            "X-Session-ID": self._session_id,
-                            "Accept": "application/json",
-                        },
+                        headers=self._signed_headers(),
                     )
                 except AccurateUpstreamError:
                     raise
                 except httpx.RequestError as exc:
                     last_error = AccurateUpstreamError(
                         "accurate_unreachable",
-                        f"upstream unreachable: {exc}",
+                        "upstream unreachable",
                         status_code=502,
                     )
                     continue
+
+                if resp.status_code in {301, 302, 307, 308}:
+                    location = resp.headers.get("Location") or resp.headers.get("location")
+                    if not location:
+                        raise AccurateUpstreamError(
+                            "accurate_redirect_missing",
+                            f"HTTP {resp.status_code} tanpa Location",
+                            status_code=502,
+                        )
+                    next_url = urljoin(str(resp.request.url), location)
+                    parsed = urlparse(next_url)
+                    if parsed.scheme and parsed.netloc:
+                        self._host = normalize_host(
+                            f"{parsed.scheme}://{parsed.netloc}"
+                        )
+                    retry_url = (
+                        next_url
+                        if parsed.path and parsed.path != "/"
+                        else f"{self._host}{path}"
+                    )
+                    try:
+                        resp = await client.request(
+                            method,
+                            retry_url,
+                            params=params,
+                            headers=self._signed_headers(),
+                        )
+                    except httpx.RequestError as exc:
+                        last_error = AccurateUpstreamError(
+                            "accurate_unreachable",
+                            "upstream redirect unreachable",
+                            status_code=502,
+                        )
+                        continue
+
                 if resp.status_code in _RETRYABLE and attempt < _MAX_ATTEMPTS:
                     last_error = AccurateUpstreamError(
                         "accurate_retryable",
@@ -180,8 +250,14 @@ class AccurateClient:
                     )
                     if resp.status_code in (401, 403):
                         self._host = None
-                        self._session_id = None
+                        self._database_id = None
                     continue
+                if resp.status_code == 401:
+                    raise AccurateUpstreamError(
+                        "accurate_auth_rejected",
+                        "Accurate menolak token/signature",
+                        status_code=502,
+                    )
                 if resp.status_code == 404:
                     raise AccurateUpstreamError(
                         "accurate_not_found",
@@ -203,10 +279,9 @@ class AccurateClient:
                         status_code=502,
                     ) from exc
                 if isinstance(data, dict) and data.get("s") is False:
-                    msg = data.get("d") or data.get("message") or "Accurate s=false"
                     raise AccurateUpstreamError(
                         "accurate_business_reject",
-                        str(msg),
+                        "Accurate s=false",
                         status_code=502,
                     )
                 return data if isinstance(data, dict) else {"d": data}
@@ -225,11 +300,12 @@ class AccurateClient:
             "fields": "id,number,statusName,status,customer,customerId,branch,branchId,transDate,totalAmount",
             "sp.pageSize": max(1, min(limit, 200)),
         }
-        # Accurate filter keywords vary by tenant; pass soft filters when provided.
         if customer:
             params["filter.keywords.op"] = "CONTAIN"
             params["filter.keywords.val"] = customer
-        data = await self._request("GET", "/accurate/api/sales-order/list.do", params=params)
+        data = await self._request(
+            "GET", "/accurate/api/sales-order/list.do", params=params
+        )
         rows = data.get("d") or data.get("data") or []
         if not isinstance(rows, list):
             raise AccurateUpstreamError(
@@ -266,7 +342,6 @@ class AccurateClient:
         return normalize_sales_order(row)
 
     async def get_receipt(self, receipt_id: str) -> dict[str, Any]:
-        # Prefer id; Accurate also accepts number on some tenants.
         params: dict[str, Any]
         if str(receipt_id).isdigit():
             params = {"id": int(receipt_id)}

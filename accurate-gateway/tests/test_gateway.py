@@ -126,6 +126,7 @@ async def test_live_mode_without_credentials_fails_closed(client: AsyncClient, m
     monkeypatch.setenv("GATEWAY_MODE", "live")
     monkeypatch.setenv("GATEWAY_M2M_TOKEN", "test-m2m-token")
     monkeypatch.delenv("ACCURATE_API_TOKEN", raising=False)
+    monkeypatch.delenv("ACCURATE_SIGNATURE_SECRET", raising=False)
     monkeypatch.delenv("ACCURATE_DATABASE_ID", raising=False)
     get_settings.cache_clear()
     r = await client.get("/sales-orders/SO-LIVE-001", headers=_auth())

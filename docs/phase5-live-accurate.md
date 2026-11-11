@@ -16,11 +16,14 @@ Required for live (independent V3 machine credentials — never ERP V1):
 
 | Variable | Purpose |
 |----------|---------|
-| `ACCURATE_API_TOKEN` | Accurate Online API token |
-| `ACCURATE_DATABASE_ID` | DB id for `oauth/open-db.do` |
+| `ACCURATE_API_TOKEN` | Accurate Online API Token (Bearer) |
+| `ACCURATE_SIGNATURE_SECRET` | Signature Secret for HMAC-SHA256 (`X-Api-Signature`) |
+| `ACCURATE_DATABASE_ID` | Optional pin vs `api-token.do` → `d.database.id` |
 | `GATEWAY_MODE=live` | Disables fixture corpus |
 | `GATEWAY_M2M_TOKEN` | Gateway M2M (= `V3_ACCURATE_READ_GATEWAY_TOKEN`) |
 | `V3_ACCURATE_READ_GATEWAY_URL` | HTTPS URL of deployed gateway |
+
+Auth (API Token doc 1.0.3): every request sends `Authorization: Bearer`, `X-Api-Timestamp` (`dd/MM/yyyy HH:mm:ss` Asia/Jakarta), and Base64 `X-Api-Signature`. Host resolved via `POST /api/api-token.do`. HTTP 308 re-signs (no stale redirect).
 
 Probe (fail-closed, no fixtures):
 

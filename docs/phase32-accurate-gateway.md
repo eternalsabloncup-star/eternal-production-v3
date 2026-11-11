@@ -70,7 +70,7 @@ POD re-verifies SJ against gateway using the SJ number from the prior loading ev
 
 - Gateway M2M: `Authorization: Bearer <GATEWAY_M2M_TOKEN>` (same value as `V3_ACCURATE_READ_GATEWAY_TOKEN`).
 - V3→gateway URL must be HTTPS (or localhost HTTP only).
-- Upstream Accurate: Bearer API token + `X-Session-ID` after `open-db.do`; bounded retries (3) on transport/5xx; fail-closed.
+- Upstream Accurate (API Token 1.0.3): `Authorization: Bearer`, `X-Api-Timestamp`, `X-Api-Signature` (HMAC-SHA256 + Signature Secret); host via `POST /api/api-token.do`; HTTP 308 re-signs; bounded retries; fail-closed.
 - Read-only: gateway exposes GET only.
 
 ## E. Tests & CI

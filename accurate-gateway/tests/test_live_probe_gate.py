@@ -32,6 +32,7 @@ def test_live_probe_rejects_missing_credentials():
     env = os.environ.copy()
     env["GATEWAY_MODE"] = "live"
     env.pop("ACCURATE_API_TOKEN", None)
+    env.pop("ACCURATE_SIGNATURE_SECRET", None)
     env.pop("ACCURATE_DATABASE_ID", None)
     # Clear settings cache side effects via fresh process
     proc = subprocess.run(
@@ -44,3 +45,4 @@ def test_live_probe_rejects_missing_credentials():
     )
     assert proc.returncode == 2
     assert "ACCURATE_API_TOKEN" in proc.stdout
+    assert "ACCURATE_SIGNATURE_SECRET" in proc.stdout
