@@ -16,11 +16,18 @@ def test_settings_load_from_environment() -> None:
 
 
 def test_metadata_contains_auth_and_work_order_tables() -> None:
-    # Phase 1.5: users + work_orders + auth audit (no full workflow tables yet).
+    # Phase 2: auth/inbox tables plus production workflow ledger tables.
     assert set(Base.metadata.tables) == {
         "users",
         "work_orders",
         "auth_audit_events",
+        "production_jobs",
+        "design_versions",
+        "payment_receipt_refs",
+        "payment_bypasses",
+        "schedule_assignments",
+        "sample_versions",
+        "production_events",
     }
 
 
