@@ -29,6 +29,12 @@ def so_list_row(row: dict[str, Any]) -> dict[str, Any]:
         else None
     )
     accurate_id = str(row.get("accurate_id") or row.get("id") or "").strip() or None
+    buffer_stock = row.get("buffer_stock")
+    if buffer_stock is not None and not isinstance(buffer_stock, bool):
+        buffer_stock = None
+    urgent_state = row.get("urgent_state")
+    if urgent_state is not None:
+        urgent_state = str(urgent_state).strip() or None
     return {
         "accurate_id": accurate_id,
         "number": so_number,
@@ -43,6 +49,9 @@ def so_list_row(row: dict[str, Any]) -> dict[str, Any]:
         "total": row.get("total"),
         "order_date": row.get("order_date"),
         "sales": row.get("sales"),
+        # Nullable classifications — never coerce missing → false.
+        "buffer_stock": buffer_stock,
+        "urgent_state": urgent_state,
     }
 
 
@@ -57,6 +66,11 @@ def so_detail(row: dict[str, Any]) -> dict[str, Any]:
                 continue
             qty = float(li.get("qty") or li.get("quantity") or 0)
             total_qty += qty
+            process = li.get("production_process")
+            if process is not None:
+                process = str(process).strip().lower().replace(" ", "_")
+            if process not in {"print", "non_print", "unknown"}:
+                process = "unknown"
             lines.append(
                 {
                     "accurate_line_id": li.get("accurate_line_id") or li.get("id"),
@@ -68,6 +82,7 @@ def so_detail(row: dict[str, Any]) -> dict[str, Any]:
                     "color": li.get("color"),
                     "notes": li.get("notes"),
                     "unit_price": li.get("unit_price"),
+                    "production_process": process,
                 }
             )
     base.update(

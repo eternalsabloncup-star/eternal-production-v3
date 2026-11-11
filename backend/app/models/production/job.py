@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import Boolean, DateTime, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -18,6 +18,11 @@ class ProductionJob(Base):
     accurate_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     branch_id: Mapped[str] = mapped_column(String(64), index=True)
     customer_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Order-level Buffer / Non-Buffer — NULL = unknown (never invent false).
+    buffer_stock: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=None)
+    # Urgent workflow room: NULL unknown | normal | pending_request |
+    # approved_urgent | legacy_urgent (V1-aligned labels; no auto Accurate map).
+    urgent_state: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
     # Gate mirrors (derived also from child tables; kept for fast queries)
     design_status: Mapped[str] = mapped_column(String(32), default="pending")
     # pending|approved|bypassed|rejected

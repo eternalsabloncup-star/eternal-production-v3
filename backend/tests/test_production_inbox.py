@@ -33,12 +33,17 @@ class Gateway:
                 "po_number": None,
                 "customer": "Customer",
                 "branch_id": "branch-a",
+                "buffer_stock": None,
+                "urgent_state": None,
                 "line_items": [
                     {
+                        "accurate_line_id": "9001",
+                        "accurate_item_id": "77",
                         "item_code": "123",
                         "name": "Item",
                         "quantity": 2500,
                         "unit": "pcs",
+                        "production_process": "unknown",
                     }
                 ],
                 "total_quantity": 2500,
@@ -61,6 +66,18 @@ async def test_detail_has_exact_lines():
     so = await get_sales_order(Gateway(), "SO/TEST/001")
     assert so["total_quantity"] == 2500
     assert so["line_items"][0]["item_code"] == "123"
+    assert so["line_items"][0]["accurate_line_id"] == "9001"
+    assert so["line_items"][0]["production_process"] == "unknown"
+    assert so["buffer_stock"] is None
+    assert so["urgent_state"] is None
+
+
+@pytest.mark.asyncio
+async def test_inbox_list_keeps_unknown_classifications_null():
+    data = await list_sales_orders(Gateway(), page=1, limit=50, keyword="")
+    row = data["rows"][0]
+    assert row["buffer_stock"] is None
+    assert row["urgent_state"] is None
 
 
 @pytest.mark.asyncio

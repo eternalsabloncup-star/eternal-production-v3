@@ -21,7 +21,7 @@ from app.db.base import Base
 
 
 class JobLineQty(Base):
-    """PO physical qty ceiling per SO line (server-side validation)."""
+    """PO physical qty ceiling + classification per Accurate SO line."""
 
     __tablename__ = "job_line_qtys"
     __table_args__ = (
@@ -30,10 +30,17 @@ class JobLineQty(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     job_id: Mapped[int] = mapped_column(ForeignKey("production_jobs.id"), index=True)
+    # Accurate detailItem.id — stable line identity (stringified).
     so_line_id: Mapped[str] = mapped_column(String(120))
+    accurate_item_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     po_qty: Mapped[Decimal] = mapped_column(Numeric(18, 3))
+    # print | non_print | unknown — NULL means not synced; never invent print.
+    production_process: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
 

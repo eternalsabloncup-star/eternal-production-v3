@@ -24,6 +24,34 @@ def _status(raw: dict[str, Any]) -> str:
     return "UNKNOWN"
 
 
+def _explicit_production_process(row: dict[str, Any]) -> str:
+    """Only exact print|non_print from an explicit production_process field.
+
+    Never infer from charField*, numericField*, item flags, or name heuristics.
+    Missing/unrecognized → unknown (not false, not print).
+    """
+    raw = row.get("production_process")
+    if raw is None:
+        raw = row.get("productionProcess")
+    if raw is None:
+        return "unknown"
+    normalized = str(raw).strip().lower().replace(" ", "_").replace("-", "_")
+    if normalized in {"print", "non_print"}:
+        return normalized
+    return "unknown"
+
+
+def _line_identity(row: dict[str, Any], item: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Preserve Accurate detailItem.id (and item id when present)."""
+    line_id = row.get("id")
+    if line_id is None:
+        line_id = row.get("detailId") or row.get("salesOrderDetailId")
+    item_id = row.get("itemId") or item.get("id")
+    line_s = str(line_id).strip() if line_id is not None and str(line_id).strip() else None
+    item_s = str(item_id).strip() if item_id is not None and str(item_id).strip() else None
+    return line_s, item_s
+
+
 def _lines(raw: dict[str, Any]) -> list[dict[str, Any]]:
     detail = raw.get("detailItem") or raw.get("detailItems") or raw.get("items") or []
     if not isinstance(detail, list):
@@ -33,8 +61,13 @@ def _lines(raw: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(row, dict):
             continue
         item = row.get("item") if isinstance(row.get("item"), dict) else {}
+        line_id, item_id = _line_identity(row, item)
         out.append(
             {
+                "id": line_id,
+                "accurate_line_id": line_id,
+                "accurate_item_id": item_id,
+                "item_id": item_id,
                 "sku": str(
                     row.get("itemNo")
                     or item.get("no")
@@ -48,6 +81,8 @@ def _lines(raw: dict[str, Any]) -> list[dict[str, Any]]:
                 "qty": float(row.get("quantity") or row.get("qty") or 0),
                 "uom": str(row.get("itemUnit") or row.get("unit") or row.get("uom") or ""),
                 "unit_price": float(row.get("unitPrice") or row.get("price") or 0),
+                # Slice 0: Accurate print candidates unproven — stay unknown unless explicit.
+                "production_process": _explicit_production_process(row),
             }
         )
     return out
@@ -98,6 +133,9 @@ def normalize_sales_order_list_item(raw: dict[str, Any]) -> dict[str, Any]:
         "currency": str(raw.get("currency") or raw.get("currencyCode") or "IDR"),
         "total": float(raw.get("totalAmount") or raw.get("total") or 0),
         "order_date": raw.get("transDate") or raw.get("orderDate") or raw.get("order_date"),
+        # Slice 0: Buffer/Urgent missing in live Accurate sample — never invent false.
+        "buffer_stock": None,
+        "urgent_state": None,
     }
 
 

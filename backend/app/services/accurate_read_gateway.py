@@ -185,6 +185,12 @@ def normalize_summary(row: dict) -> dict:
     branch_id = row.get("branch_id")
     if not branch_id and isinstance(row.get("branch"), dict):
         branch_id = row["branch"].get("id")
+    buffer_stock = row.get("buffer_stock")
+    if buffer_stock is not None and not isinstance(buffer_stock, bool):
+        buffer_stock = None
+    urgent_state = row.get("urgent_state")
+    if urgent_state is not None:
+        urgent_state = str(urgent_state).strip() or None
     return {
         "accurate_id": so_id,
         "number": so_number,
@@ -199,6 +205,9 @@ def normalize_summary(row: dict) -> dict:
         "line_items": None,
         "total_quantity": None,
         "production_status": "Baru",
+        # Nullable — missing Accurate mapping stays null (not false).
+        "buffer_stock": buffer_stock,
+        "urgent_state": urgent_state,
     }
 
 
@@ -238,14 +247,21 @@ async def get_sales_order(gateway: ReadGateway, number: str) -> dict:
         {
             "line_items": [
                 {
-                    "accurate_line_id": line.get("accurate_line_id"),
-                    "accurate_item_id": line.get("accurate_item_id"),
+                    "accurate_line_id": line.get("accurate_line_id") or line.get("id"),
+                    "accurate_item_id": line.get("accurate_item_id")
+                    or line.get("item_id"),
                     "item_code": line.get("item_code"),
                     "name": line.get("name"),
                     "quantity": line.get("quantity"),
                     "unit": line.get("unit"),
                     "color": line.get("color"),
                     "notes": line.get("notes"),
+                    "production_process": (
+                        line.get("production_process")
+                        if line.get("production_process")
+                        in {"print", "non_print", "unknown"}
+                        else "unknown"
+                    ),
                 }
                 for line in lines
                 if isinstance(line, dict)
@@ -258,6 +274,8 @@ async def get_sales_order(gateway: ReadGateway, number: str) -> dict:
             "expedition": so.get("expedition"),
             "delivery_zone": so.get("delivery_zone"),
             "notes": so.get("notes"),
+            "buffer_stock": result.get("buffer_stock"),
+            "urgent_state": result.get("urgent_state"),
         }
     )
     return result

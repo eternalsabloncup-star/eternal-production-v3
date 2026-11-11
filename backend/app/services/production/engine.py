@@ -39,6 +39,31 @@ async def get_job(session: AsyncSession, job_id: int) -> ProductionJob:
     return job
 
 
+def _coerce_buffer_stock(value) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _coerce_urgent_state(value) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    if not normalized:
+        return None
+    allowed = {
+        "normal",
+        "pending_request",
+        "approved_urgent",
+        "legacy_urgent",
+    }
+    if normalized in allowed:
+        return normalized
+    return None
+
+
 async def ensure_job(
     session: AsyncSession,
     user: User,
@@ -47,9 +72,17 @@ async def ensure_job(
     branch_id: str,
     accurate_id: str | None = None,
     customer_name: str | None = None,
+    buffer_stock: bool | None = None,
+    urgent_state: str | None = None,
+    line_items: list[dict] | None = None,
 ) -> ProductionJob:
+    """Create or refresh job. Classifications stay null/unknown unless explicit."""
+    from app.services.production.prep import sync_job_lines_from_so_detail
+
     _require(user, P.JOB_CREATE)
     _branch(user, branch_id)
+    buffer_v = _coerce_buffer_stock(buffer_stock)
+    urgent_v = _coerce_urgent_state(urgent_state)
     existing = await session.scalar(
         select(ProductionJob).where(
             ProductionJob.accurate_so_number == accurate_so_number
@@ -57,16 +90,33 @@ async def ensure_job(
     )
     if existing:
         _branch(user, existing.branch_id)
+        if accurate_id and not existing.accurate_id:
+            existing.accurate_id = accurate_id
+        if customer_name and not existing.customer_name:
+            existing.customer_name = customer_name
+        # Idempotent re-sync: None arg = leave unknown; never invent false.
+        if buffer_stock is not None:
+            existing.buffer_stock = buffer_v
+        if urgent_state is not None:
+            existing.urgent_state = urgent_v
+        if line_items:
+            await sync_job_lines_from_so_detail(session, existing, line_items)
+        await session.commit()
+        await session.refresh(existing)
         return existing
     job = ProductionJob(
         accurate_so_number=accurate_so_number,
         accurate_id=accurate_id,
         branch_id=branch_id,
         customer_name=customer_name,
+        buffer_stock=buffer_v,
+        urgent_state=urgent_v,
         processing_status="Baru",
     )
     session.add(job)
     await session.flush()
+    if line_items:
+        await sync_job_lines_from_so_detail(session, job, line_items)
     # Keep inbox WO mirror in sync.
     wo = await session.scalar(
         select(WorkOrder).where(WorkOrder.accurate_so_number == accurate_so_number)
@@ -1160,8 +1210,11 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
         "job": {
             "id": job.id,
             "accurate_so_number": job.accurate_so_number,
+            "accurate_id": job.accurate_id,
             "branch_id": job.branch_id,
             "customer_name": job.customer_name,
+            "buffer_stock": job.buffer_stock,
+            "urgent_state": job.urgent_state,
             "design_status": job.design_status,
             "payment_status": job.payment_status,
             "sample_status": job.sample_status,
@@ -1248,7 +1301,13 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
             for e in prep_events
         ],
         "job_lines": [
-            {"so_line_id": ln.so_line_id, "po_qty": str(ln.po_qty)} for ln in lines
+            {
+                "so_line_id": ln.so_line_id,
+                "accurate_item_id": ln.accurate_item_id,
+                "po_qty": str(ln.po_qty),
+                "production_process": ln.production_process or "unknown",
+            }
+            for ln in lines
         ],
         "events": [
             {

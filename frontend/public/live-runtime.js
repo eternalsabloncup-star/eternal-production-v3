@@ -113,13 +113,17 @@
       qty,
       qtyVerified: s.total_quantity != null,
       sourceLines: lines.map((x, i) => ({
-        id: x.accurate_line_id || "line-" + (i + 1),
+        id: x.accurate_line_id || x.id || null,
         itemId: x.accurate_item_id || null,
         item_code: x.item_code || null,
         name: x.name || null,
         qty: x.quantity,
         unit: x.unit || null,
         notes: x.notes || null,
+        production_process:
+          x.production_process === "print" || x.production_process === "non_print"
+            ? x.production_process
+            : "unknown",
         processSnapshot: null,
       })),
       status: productionStatus === "Terproses" ? "Terproses" : "PO Masuk",
@@ -138,11 +142,13 @@
       updated: "",
       approval: false,
       inkColors: [],
-      urgent: false,
-      bufferStock: false,
-      bufferQty: 0,
+      // Slice 1A: unknown Accurate mapping → null/unknown, never invent false.
+      urgent: null,
+      urgentState: s.urgent_state == null ? null : String(s.urgent_state),
+      bufferStock: s.buffer_stock === true ? true : s.buffer_stock === false ? false : null,
+      bufferQty: null,
       scheduledQty: 0,
-      processKind: "UNVERIFIED",
+      processKind: "UNKNOWN",
       v3JobId: null,
       design_status: null,
       payment_status: null,
@@ -241,6 +247,17 @@
         ? String(order.branch)
         : null;
     if (!branchId) throw new Error("Cabang SO belum terverifikasi dari Accurate");
+    const lineItems = (order.sourceLines || [])
+      .filter((x) => x && x.id)
+      .map((x) => ({
+        accurate_line_id: String(x.id),
+        accurate_item_id: x.itemId != null ? String(x.itemId) : null,
+        quantity: x.qty,
+        production_process:
+          x.production_process === "print" || x.production_process === "non_print"
+            ? x.production_process
+            : "unknown",
+      }));
     const job = await request(API + "/production/jobs", {
       method: "POST",
       body: {
@@ -248,6 +265,9 @@
         branch_id: branchId,
         accurate_id: order.accurateId != null ? String(order.accurateId) : null,
         customer_name: order.name || null,
+        buffer_stock: order.bufferStock === true || order.bufferStock === false ? order.bufferStock : null,
+        urgent_state: order.urgentState || null,
+        line_items: lineItems.length ? lineItems : null,
       },
     });
     jobCache[order.id] = job;
@@ -256,6 +276,15 @@
     order.payment_status = job.payment_status;
     order.sample_status = job.sample_status;
     order.productionStatus = job.processing_status || order.productionStatus;
+    order.bufferStock =
+      job.buffer_stock === true ? true : job.buffer_stock === false ? false : null;
+    order.urgentState = job.urgent_state == null ? null : String(job.urgent_state);
+    order.urgent =
+      order.urgentState === "approved_urgent" || order.urgentState === "legacy_urgent"
+        ? true
+        : order.urgentState
+          ? false
+          : null;
     return job;
   }
 

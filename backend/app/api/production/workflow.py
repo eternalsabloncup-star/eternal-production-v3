@@ -18,11 +18,25 @@ from app.services.production import prep as prep_svc
 router = APIRouter(prefix="/production/jobs", tags=["production-workflow"])
 
 
+class CreateJobLineBody(BaseModel):
+    accurate_line_id: str | None = None
+    id: str | None = None
+    accurate_item_id: str | None = None
+    item_id: str | None = None
+    quantity: Decimal | None = None
+    qty: Decimal | None = None
+    production_process: str | None = None
+
+
 class CreateJobBody(BaseModel):
     accurate_so_number: str
     branch_id: str
     accurate_id: str | None = None
     customer_name: str | None = None
+    # Nullable — omit or null means unknown (never invent false).
+    buffer_stock: bool | None = None
+    urgent_state: str | None = None
+    line_items: list[CreateJobLineBody] | None = None
 
 
 class DesignUploadBody(BaseModel):
@@ -158,8 +172,11 @@ def _job_summary(job) -> dict:
     return {
         "id": job.id,
         "accurate_so_number": job.accurate_so_number,
+        "accurate_id": getattr(job, "accurate_id", None),
         "branch_id": job.branch_id,
         "customer_name": getattr(job, "customer_name", None),
+        "buffer_stock": getattr(job, "buffer_stock", None),
+        "urgent_state": getattr(job, "urgent_state", None),
         "design_status": job.design_status,
         "payment_status": job.payment_status,
         "sample_status": job.sample_status,
@@ -173,6 +190,9 @@ async def create_job(
     session: AsyncSession = Depends(get_db_session),
     user: User = Depends(get_current_user),
 ):
+    lines_payload = None
+    if body.line_items is not None:
+        lines_payload = [line.model_dump() for line in body.line_items]
     job = await engine.ensure_job(
         session,
         user,
@@ -180,6 +200,9 @@ async def create_job(
         branch_id=body.branch_id,
         accurate_id=body.accurate_id,
         customer_name=body.customer_name,
+        buffer_stock=body.buffer_stock,
+        urgent_state=body.urgent_state,
+        line_items=lines_payload,
     )
     return _job_summary(job)
 

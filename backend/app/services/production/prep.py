@@ -23,37 +23,100 @@ from app.services.production.engine import (
 )
 
 
+def _normalize_production_process(value: str | None) -> str:
+    if value is None:
+        return "unknown"
+    normalized = str(value).strip().lower().replace(" ", "_").replace("-", "_")
+    if normalized in {"print", "non_print", "unknown"}:
+        return normalized
+    return "unknown"
+
+
 async def upsert_job_line_qty(
     session: AsyncSession,
     job: ProductionJob,
     *,
     so_line_id: str,
     po_qty: Decimal,
+    accurate_item_id: str | None = None,
+    production_process: str | None = None,
 ) -> JobLineQty:
+    if not (so_line_id or "").strip():
+        raise HTTPException(422, "Accurate line id wajib")
     if po_qty <= 0:
         raise HTTPException(422, "PO line qty harus > 0")
+    process = _normalize_production_process(production_process)
     row = await session.scalar(
         select(JobLineQty).where(
             JobLineQty.job_id == job.id, JobLineQty.so_line_id == so_line_id
         )
     )
     if row is None:
-        row = JobLineQty(job_id=job.id, so_line_id=so_line_id, po_qty=po_qty)
-        session.add(row)
-    elif row.po_qty != po_qty:
-        # Do not silently raise ceiling below already prepared helper qty.
-        helper = await session.scalar(
-            select(PrepState).where(
-                PrepState.job_id == job.id,
-                PrepState.so_line_id == so_line_id,
-                PrepState.role == "helper",
-            )
+        row = JobLineQty(
+            job_id=job.id,
+            so_line_id=so_line_id.strip(),
+            po_qty=po_qty,
+            accurate_item_id=(accurate_item_id or None),
+            production_process=process,
         )
-        if helper and po_qty < helper.qty:
-            raise HTTPException(409, "PO qty tidak boleh di bawah qty helper siap")
-        row.po_qty = po_qty
+        session.add(row)
+    else:
+        if row.po_qty != po_qty:
+            # Do not silently raise ceiling below already prepared helper qty.
+            helper = await session.scalar(
+                select(PrepState).where(
+                    PrepState.job_id == job.id,
+                    PrepState.so_line_id == so_line_id,
+                    PrepState.role == "helper",
+                )
+            )
+            if helper and po_qty < helper.qty:
+                raise HTTPException(409, "PO qty tidak boleh di bawah qty helper siap")
+            row.po_qty = po_qty
+        if accurate_item_id is not None:
+            row.accurate_item_id = accurate_item_id or None
+        # Idempotent re-sync: keep explicit unknown; never invent print.
+        row.production_process = process
     await session.flush()
     return row
+
+
+async def sync_job_lines_from_so_detail(
+    session: AsyncSession,
+    job: ProductionJob,
+    line_items: list[dict],
+) -> list[JobLineQty]:
+    """Upsert lines by Accurate detailItem.id. No charField heuristic mapping."""
+    synced: list[JobLineQty] = []
+    for line in line_items:
+        if not isinstance(line, dict):
+            continue
+        line_id = str(
+            line.get("accurate_line_id") or line.get("id") or ""
+        ).strip()
+        if not line_id:
+            continue
+        qty_raw = line.get("quantity")
+        if qty_raw is None:
+            qty_raw = line.get("qty")
+        try:
+            po_qty = Decimal(str(qty_raw))
+        except Exception:
+            continue
+        if po_qty <= 0:
+            continue
+        item_id = line.get("accurate_item_id") or line.get("item_id")
+        item_id_s = str(item_id).strip() if item_id is not None else None
+        row = await upsert_job_line_qty(
+            session,
+            job,
+            so_line_id=line_id,
+            po_qty=po_qty,
+            accurate_item_id=item_id_s or None,
+            production_process=line.get("production_process"),
+        )
+        synced.append(row)
+    return synced
 
 
 async def _confirmed_pass1(session: AsyncSession, job_id: int, so_line_id: str) -> Decimal:
