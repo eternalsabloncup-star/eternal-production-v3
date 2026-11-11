@@ -46,14 +46,18 @@ async def list_sales_orders(
     mode = _mode(settings)
     needle = keyword or customer
     if mode == "fixture":
-        items = fixtures.list_sales_orders(
-            customer=needle, branch=branch, status=status, limit=limit
+        items, total = fixtures.list_sales_orders(
+            customer=needle,
+            branch=branch,
+            status=status,
+            limit=limit,
+            page=page,
         )
         rows = [so_list_row(r) for r in items]
         return {
             "rows": rows,
             "items": rows,  # dual key for older probes
-            "total": len(rows),
+            "total": total,
             "page": page,
             "pageSize": limit,
             "source": "fixture",

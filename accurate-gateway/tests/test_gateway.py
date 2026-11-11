@@ -52,12 +52,16 @@ async def test_m2m_required(client: AsyncClient):
 
 @pytest.mark.asyncio
 async def test_list_and_detail_sales_orders(client: AsyncClient):
-    listed = await client.get("/sales-orders", headers=_auth())
+    listed = await client.get("/sales-orders?limit=20&page=1", headers=_auth())
     assert listed.status_code == 200
     payload = listed.json()
     assert "rows" in payload
     assert payload["live_verified"] is False
-    assert any(r["number"] == "SO-LIVE-001" for r in payload["rows"])
+    assert payload["total"] >= 70
+    assert len(payload["rows"]) == 20
+    page2 = await client.get("/sales-orders?limit=20&page=2", headers=_auth())
+    assert page2.status_code == 200
+    assert page2.json()["rows"][0]["number"] != payload["rows"][0]["number"]
 
     detail = await client.get("/sales-orders/SO-LIVE-001", headers=_auth())
     assert detail.status_code == 200

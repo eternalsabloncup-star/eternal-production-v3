@@ -146,13 +146,44 @@ def get_sales_order(number: str) -> dict[str, Any] | None:
     return deepcopy(row) if row else None
 
 
+def _perf_sales_orders() -> dict[str, dict[str, Any]]:
+    """Deterministic 70-SO corpus for pagination / multi-user load (fixture only)."""
+    out: dict[str, dict[str, Any]] = {}
+    for i in range(1, 71):
+        number = f"SO-P4-{i:03d}"
+        out[number] = {
+            "number": number,
+            "status": "OPEN",
+            "customer": {"id": f"C-P4-{i:03d}", "name": f"Customer P4 {i:03d}"},
+            "branch": {"id": "branch-a", "name": "Jakarta A"},
+            "currency": "IDR",
+            "total": 1000 * i,
+            "line_items": [
+                {
+                    "sku": f"SKU-P4-{i:03d}",
+                    "description": f"Item P4 {i:03d}",
+                    "qty": 10 + i,
+                    "uom": "PCS",
+                    "unit_price": 1000,
+                }
+            ],
+            "links": {"receipt_ids": [], "delivery_note_ids": []},
+        }
+    return out
+
+
+# Merge static + perf corpus once.
+FIXTURE_SALES_ORDERS.update(_perf_sales_orders())
+
+
 def list_sales_orders(
     *,
     customer: str | None = None,
     branch: str | None = None,
     status: str | None = None,
     limit: int = 50,
-) -> list[dict[str, Any]]:
+    page: int = 1,
+) -> tuple[list[dict[str, Any]], int]:
     rows = [deepcopy(v) for v in FIXTURE_SALES_ORDERS.values()]
     if customer:
         needle = customer.lower()
@@ -161,6 +192,7 @@ def list_sales_orders(
             for r in rows
             if needle in str(r.get("customer", {}).get("name", "")).lower()
             or needle == str(r.get("customer", {}).get("id", "")).lower()
+            or needle in str(r.get("number", "")).lower()
         ]
     if branch:
         needle = branch.lower()
@@ -172,7 +204,12 @@ def list_sales_orders(
         ]
     if status:
         rows = [r for r in rows if str(r.get("status", "")).upper() == status.upper()]
-    return rows[: max(1, min(limit, 200))]
+    rows.sort(key=lambda r: str(r.get("number") or ""))
+    total = len(rows)
+    page = max(1, page)
+    size = max(1, min(limit, 200))
+    start = (page - 1) * size
+    return rows[start : start + size], total
 
 
 def get_receipt(receipt_id: str) -> dict[str, Any] | None:

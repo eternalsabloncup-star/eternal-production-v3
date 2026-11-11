@@ -70,8 +70,9 @@ async def inbox(
         row["production_status"] = statuses.get(row["po_number"], "Baru")
     data["rows"] = scoped
     data["gateway_total"] = gateway_total
-    # Visible count after fail-closed branch filter on this gateway page.
-    data["total"] = len(scoped)
+    # Preserve gateway server-side total for pagination; page length is len(rows).
+    data["total"] = gateway_total
+    data["page_count"] = len(scoped)
     data["filtered_by_branch"] = True
     return data
 

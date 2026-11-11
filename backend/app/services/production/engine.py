@@ -263,7 +263,7 @@ async def bypass_payment(
             event_type="payment_bypass_authorized",
             idempotency_key=(
                 f"pay-bypass:{job.id}:{user.id}:"
-                f"{int(datetime.now(UTC).timestamp())}"
+                f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
             ),
             actor_user_id=user.id,
             reason=reason.strip(),
