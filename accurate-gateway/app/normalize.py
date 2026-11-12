@@ -227,11 +227,13 @@ def _parse_urgent_state(value: str | None) -> str | None:
     return None
 
 
-def _extract_sales(raw: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Official salesperson only — never confuse with document creator.
+def _sales_names_from_entity(
+    entity: dict[str, Any],
+) -> tuple[list[str], str | None]:
+    """Collect official salesman names from one Accurate entity (header or line).
 
-    Returns (name, source_field). source_field is for audit when missing/present.
-    Accurate Online commonly nests sellers in salesmanList.
+    Uses the same salesman* keys already proven in this gateway. Never reads
+    createdUser / inputUser (creator ≠ Penjual).
     """
     for list_key in (
         "salesmanList",
@@ -239,9 +241,9 @@ def _extract_sales(raw: dict[str, Any]) -> tuple[str | None, str | None]:
         "salespersonList",
         "salesList",
     ):
-        names = _sales_from_list(raw.get(list_key))
+        names = _sales_from_list(entity.get(list_key))
         if names:
-            return ", ".join(names), list_key
+            return names, list_key
 
     nested_keys = (
         ("salesPerson", "salesPerson"),
@@ -250,7 +252,7 @@ def _extract_sales(raw: dict[str, Any]) -> tuple[str | None, str | None]:
         ("sales", "sales"),
     )
     for key, source in nested_keys:
-        nested = raw.get(key)
+        nested = entity.get(key)
         if isinstance(nested, dict):
             name = _first_str(
                 nested.get("name"),
@@ -259,7 +261,7 @@ def _extract_sales(raw: dict[str, Any]) -> tuple[str | None, str | None]:
                 nested.get("salesPersonName"),
             )
             if name:
-                return name, source
+                return [name], source
 
     for key in (
         "salesPersonName",
@@ -267,16 +269,60 @@ def _extract_sales(raw: dict[str, Any]) -> tuple[str | None, str | None]:
         "salesmanName",
         "salesName",
     ):
-        name = _first_str(raw.get(key))
+        name = _first_str(entity.get(key))
         if name:
-            return name, key
+            return [name], key
 
-    scalar = raw.get("sales")
+    scalar = entity.get("sales")
     if not isinstance(scalar, dict):
         name = _first_str(scalar)
         if name:
-            return name, "sales"
-    return None, None
+            return [name], "sales"
+    return [], None
+
+
+def _extract_sales(raw: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Official salesperson only — never confuse with document creator.
+
+    Owner UI (Step 88/89): Penjual can sit on Sales Order item detail.
+    Rule:
+      1) Collect unique names from header salesman fields (existing).
+      2) Then each detailItem line, same salesman keys, in line order.
+      3) Join unique names with \", \" — never silently keep only the first line.
+    Returns (joined_names, source_field).
+    """
+    ordered: list[str] = []
+    sources: list[str] = []
+    seen: set[str] = set()
+
+    def _add(names: list[str], source: str | None) -> None:
+        for name in names:
+            if name in seen:
+                continue
+            seen.add(name)
+            ordered.append(name)
+        if names and source and source not in sources:
+            sources.append(source)
+
+    header_names, header_source = _sales_names_from_entity(raw)
+    _add(header_names, header_source)
+
+    lines = raw.get("detailItem") or raw.get("detailItems") or raw.get("items") or []
+    if isinstance(lines, list):
+        for line in lines:
+            if not isinstance(line, dict):
+                continue
+            line_names, line_source = _sales_names_from_entity(line)
+            if not line_names:
+                continue
+            src = (
+                f"detailItem.{line_source}" if line_source else "detailItem"
+            )
+            _add(line_names, src)
+
+    if not ordered:
+        return None, None
+    return ", ".join(ordered), "+".join(sources) if sources else None
 
 
 def _sales_name(raw: dict[str, Any]) -> str | None:
