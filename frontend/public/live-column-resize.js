@@ -249,9 +249,14 @@
       handle.setAttribute("data-col-resize", key);
       handle.className = "col-resize-handle";
       handle.title = "Seret untuk ubah lebar kolom";
+      handle.setAttribute("role", "separator");
+      handle.setAttribute("aria-orientation", "vertical");
+      handle.setAttribute("aria-label", "Ubah lebar kolom " + key);
+      handle.tabIndex = 0;
       handle.addEventListener("pointerdown", function (ev) {
         ev.preventDefault();
         ev.stopPropagation();
+        handle.classList.add("is-dragging");
         var startX = ev.clientX;
         var startW =
           widths[key] ||
@@ -270,6 +275,7 @@
           if (opts.onGeometry) opts.onGeometry();
         }
         function onUp() {
+          handle.classList.remove("is-dragging");
           handle.removeEventListener("pointermove", onMove);
           handle.removeEventListener("pointerup", onUp);
           handle.removeEventListener("pointercancel", onUp);
