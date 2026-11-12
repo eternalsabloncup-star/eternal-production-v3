@@ -338,6 +338,10 @@ class AccurateClient:
                 "poNumber,poNo,customerPoNumber,"
                 "salesPersonName,salesmanName,salesName,salesPerson,salesmanList,"
                 "salesPersonList,createdUserName,inputUserName,"
+                # Step 137 — request shipment for Pengiriman when Accurate returns it
+                # on list (detail enrich remains fallback; no extra N+1 for this field).
+                "shipment,expedition,expeditionName,shippingMethodName,"
+                "deliveryMethod,courierName,"
                 "charField3,charField4,charField5,"
                 "charField3Name,charField4Name,charField5Name"
             ),

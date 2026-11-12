@@ -58,6 +58,12 @@ def so_list_row(row: dict[str, Any]) -> dict[str, Any]:
         "order_date": row.get("order_date"),
         "sales": sales,
         "sales_source": sales_source,
+        # Step 137 — Pengiriman when list/detail carries shipment.name (null if absent).
+        "expedition": (
+            str(row.get("expedition")).strip()
+            if row.get("expedition") is not None and str(row.get("expedition")).strip()
+            else None
+        ),
         # Nullable classifications — never coerce missing → false.
         "buffer_stock": buffer_stock,
         "urgent_state": urgent_state,

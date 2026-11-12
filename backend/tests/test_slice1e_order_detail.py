@@ -84,6 +84,7 @@ def test_list_summary_keeps_lines_null():
             "branch_name": "Yogyakarta",
             "sales": "Sales A",
             "sales_source": "salesmanList",
+            "expedition": "DIAMBIL",
         }
     )
     assert row["line_items"] is None
@@ -91,6 +92,22 @@ def test_list_summary_keeps_lines_null():
     assert row["branch_name"] == "Yogyakarta"
     assert row["sales"] == "Sales A"
     assert row["sales_source"] == "salesmanList"
+    # Step 137 — list Pengiriman passthrough (shipment.name already normalized upstream).
+    assert row["expedition"] == "DIAMBIL"
+
+
+def test_list_summary_expedition_absent_stays_none():
+    row = normalize_summary(
+        {
+            "accurate_id": "1b",
+            "number": "SO/1B",
+            "customer": "A",
+            "branch_id": "50",
+            "branch_name": "Yogyakarta",
+            "expedition": None,
+        }
+    )
+    assert row["expedition"] is None
 
 
 def test_missing_sales_passthrough_not_creator():

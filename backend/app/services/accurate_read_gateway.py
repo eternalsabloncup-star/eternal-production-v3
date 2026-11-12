@@ -200,6 +200,9 @@ def normalize_summary(row: dict) -> dict:
     sales_source = row.get("sales_source")
     if sales_source is not None:
         sales_source = str(sales_source).strip() or None
+    expedition = row.get("expedition")
+    if expedition is not None:
+        expedition = str(expedition).strip() or None
     return {
         "accurate_id": so_id,
         "number": so_number,
@@ -211,6 +214,8 @@ def normalize_summary(row: dict) -> dict:
         "branch_name": branch_name,
         "sales": sales,
         "sales_source": sales_source,
+        # Step 137 — Pengiriman from list shipment.name when present (null if absent).
+        "expedition": expedition,
         "order_date": row.get("order_date") or row.get("trans_date"),
         "deadline": row.get("deadline") or row.get("estimated_delivery"),
         # List summaries intentionally omit lines — detail endpoint is source of truth.

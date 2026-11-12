@@ -18,6 +18,8 @@ def test_list_fields_request_includes_owner_header_cf_slots():
     src = inspect.getsource(accurate_client.AccurateClient.list_sales_orders)
     assert "charField4" in src and "charField5" in src and "charField3" in src
     assert "salesmanList" in src
+    # Step 137 — shipment for Pengiriman on list when Accurate returns it.
+    assert "shipment" in src
     # Expedition has no Owner ordinal — do not auto-request charField1/2/6 as expedition.
     assert "charField1" not in src
     assert "charField2" not in src

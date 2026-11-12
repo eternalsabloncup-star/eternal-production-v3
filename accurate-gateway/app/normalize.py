@@ -603,6 +603,20 @@ def normalize_sales_order_list_item(raw: dict[str, Any]) -> dict[str, Any]:
         "sales": sales,
         # Audit: which Accurate field supplied sales; null ⇒ absent (not creator fallback).
         "sales_source": sales_source,
+        # Step 137 — Pengiriman on list when Accurate returns shipment/native keys.
+        # Detail enrich remains fallback when list omits shipment.
+        "expedition": _first_str(
+            raw.get("expedition"),
+            raw.get("expeditionName"),
+            raw.get("courier"),
+            raw.get("courierName"),
+            raw.get("shippingInfo"),
+            raw.get("shippingMethod"),
+            raw.get("shippingMethodName"),
+            raw.get("deliveryMethod"),
+            _expedition_from_shipment(raw),
+            _custom_field_by_label(raw, _EXPEDITION_LABELS),
+        ),
         # Nullable — unlabeled / missing stays null (never invent false).
         "buffer_stock": buffer_stock,
         "urgent_state": urgent_state,

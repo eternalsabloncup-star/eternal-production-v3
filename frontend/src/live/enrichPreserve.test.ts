@@ -28,6 +28,20 @@ function mergeOptional(
   return incoming ? incoming : existing ?? null;
 }
 
+/** Mirrors live-runtime Step 137 Pengiriman apply/preserve. */
+function mergeExpedition(
+  existing: string | null | undefined,
+  detailExpedition: string | null | undefined,
+): string | null {
+  if (detailExpedition != null && String(detailExpedition).trim()) {
+    return String(detailExpedition).trim();
+  }
+  if (existing != null && String(existing).trim()) {
+    return String(existing).trim();
+  }
+  return null;
+}
+
 type DetailLoadState = "not_loaded" | "loading" | "loaded" | "failed";
 
 function resolveQtyFromDetail(detail: {
@@ -107,6 +121,14 @@ describe("Slice 1H enrich preserve", () => {
     expect(mergeOptional("OUTLET", null)).toBe("OUTLET");
     expect(mergeOptional("JU", "")).toBe("JU");
     expect(mergeOptional(null, "OUTLET")).toBe("OUTLET");
+  });
+
+  it("Step 137 Pengiriman: list / detail / absent / never invent", () => {
+    expect(mergeExpedition(null, "DIAMBIL")).toBe("DIAMBIL");
+    expect(mergeExpedition("DIAMBIL", null)).toBe("DIAMBIL");
+    expect(mergeExpedition("LIST", "DETAIL")).toBe("DETAIL");
+    expect(mergeExpedition(null, null)).toBe(null);
+    expect(mergeExpedition("", "  ")).toBe(null);
   });
 });
 

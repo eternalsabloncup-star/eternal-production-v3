@@ -531,7 +531,15 @@
     if (detail.order_date) o.orderDate = detail.order_date;
     if (detail.address) o.address = detail.address;
     if (detail.payment_terms) o.paymentTerms = detail.payment_terms;
-    if (detail.expedition) o.expedition = detail.expedition;
+    // Step 137 — Pengiriman: apply detail expedition; preserve list shipment.name
+    // when detail omits; never invent a method when both absent.
+    if (detail.expedition != null && String(detail.expedition).trim()) {
+      o.expedition = String(detail.expedition).trim();
+    } else if (o.expedition != null && String(o.expedition).trim()) {
+      // keep list / prior verified Pengiriman
+    } else {
+      o.expedition = null;
+    }
     if (detail.delivery_zone) o.deliveryZone = detail.delivery_zone;
     if (detail.notes) o.poNotes = detail.notes;
     o.ship = detail.deadline || detail.estimated_delivery || o.ship || null;
