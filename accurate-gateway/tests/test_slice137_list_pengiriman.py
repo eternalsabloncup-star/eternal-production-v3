@@ -13,6 +13,9 @@ def test_list_fields_request_includes_shipment():
     src = inspect.getsource(accurate_client.AccurateClient.list_sales_orders)
     assert "shipment" in src
     assert "charField4" in src and "charField5" in src
+    # LIVE GATE (Step 139): Accurate list.do accepting nested shipment in fields=
+    # is not proven offline — see docs/slice137-pengiriman-list-live-gate.md.
+    assert "detail enrich remains fallback" in src
 
 
 def test_list_item_shipment_name_maps_pengiriman():
