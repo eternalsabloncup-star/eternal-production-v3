@@ -237,11 +237,18 @@
             x.production_process === "print" || x.production_process === "non_print"
               ? x.production_process
               : "unknown",
-          processSnapshot: null,
+          // Official process snapshot — never invent PRINT from blank/unknown.
+          processSnapshot:
+            x.production_process === "print"
+              ? "PRINT"
+              : x.production_process === "non_print"
+                ? "NON_PRINT"
+                : "UNKNOWN",
         };
       }),
       status: productionStatus === "Terproses" ? "Terproses" : "PO Masuk",
-      stage: productionStatus === "Terproses" ? "run" : "inbox",
+      // Keep inbox until V3 schedule assignments exist — do not invent "run" from Terproses alone.
+      stage: "inbox",
       productionStatus,
       branch: branchLabel || "Belum terverifikasi",
       branchId: s.branch_id || null,
@@ -290,7 +297,23 @@
       bufferStock: s.buffer_stock === true ? true : s.buffer_stock === false ? false : null,
       bufferQty: null,
       scheduledQty: 0,
-      processKind: "UNKNOWN",
+      productionAssignments: [],
+      processKind: (function () {
+        const processes = Array.from(
+          new Set(
+            lines.map(function (x) {
+              return x.production_process === "print" || x.production_process === "non_print"
+                ? x.production_process
+                : "unknown";
+            }),
+          ),
+        );
+        if (processes.length === 1 && processes[0] === "print") return "PRINT";
+        if (processes.length === 1 && processes[0] === "non_print") return "NON_PRINT";
+        if (processes.indexOf("print") >= 0 && processes.indexOf("non_print") >= 0)
+          return "MIXED";
+        return "UNKNOWN";
+      })(),
       v3JobId: null,
       design_status: null,
       payment_status: null,
@@ -386,7 +409,12 @@
           x.production_process === "print" || x.production_process === "non_print"
             ? x.production_process
             : "unknown",
-        processSnapshot: null,
+        processSnapshot:
+          x.production_process === "print"
+            ? "PRINT"
+            : x.production_process === "non_print"
+              ? "NON_PRINT"
+              : "UNKNOWN",
       };
     });
     o.item =
@@ -538,6 +566,34 @@
     return [];
   };
 
+  function syncOrderGatesFromJob(o, job) {
+    if (!o || !job) return;
+    o.v3JobId = job.id;
+    o.design_status = job.design_status;
+    o.payment_status = job.payment_status;
+    o.sample_status = job.sample_status;
+    o.productionStatus = job.processing_status || o.productionStatus;
+    const designOk =
+      job.design_status === "approved" || job.design_status === "bypassed";
+    const paymentOk =
+      job.payment_status === "approved" || job.payment_status === "bypassed";
+    o.approval = designOk && paymentOk;
+    // Mirror into demo gateState for shared UI helpers — values come from V3 job only.
+    if (typeof window.gateFor === "function") {
+      const g = window.gateFor(o);
+      g.design = designOk
+        ? job.design_status === "bypassed"
+          ? "BYPASSED"
+          : "APPROVED"
+        : "PENDING";
+      g.payment = paymentOk
+        ? job.payment_status === "bypassed"
+          ? "BYPASSED"
+          : "APPROVED"
+        : "PENDING";
+    }
+  }
+
   async function lookupJob(so) {
     try {
       const job = await request(
@@ -545,13 +601,7 @@
       );
       jobCache[so] = job;
       const o = orderBySo(so);
-      if (o) {
-        o.v3JobId = job.id;
-        o.design_status = job.design_status;
-        o.payment_status = job.payment_status;
-        o.sample_status = job.sample_status;
-        o.productionStatus = job.processing_status || o.productionStatus;
-      }
+      if (o) syncOrderGatesFromJob(o, job);
       return job;
     } catch (err) {
       if (String(err.message || "").includes("belum dibuat") || String(err.message || "").includes("404")) {
@@ -565,9 +615,9 @@
   async function createJob(order) {
     if (!order || !order.id) throw new Error("SO tidak valid");
     const branchId =
-      order.branch && order.branch !== "Belum terverifikasi"
-        ? String(order.branch)
-        : null;
+      (order.branchId && String(order.branchId).trim()) ||
+      (order.branch_id && String(order.branch_id).trim()) ||
+      null;
     if (!branchId) throw new Error("Cabang SO belum terverifikasi dari Accurate");
     const lineItems = (order.sourceLines || [])
       .filter((x) => x && x.id)
@@ -593,11 +643,7 @@
       },
     });
     jobCache[order.id] = job;
-    order.v3JobId = job.id;
-    order.design_status = job.design_status;
-    order.payment_status = job.payment_status;
-    order.sample_status = job.sample_status;
-    order.productionStatus = job.processing_status || order.productionStatus;
+    syncOrderGatesFromJob(order, job);
     order.bufferStock =
       job.buffer_stock === true ? true : job.buffer_stock === false ? false : null;
     order.urgentState = job.urgent_state == null ? null : String(job.urgent_state);
@@ -610,6 +656,66 @@
     return job;
   }
 
+  function applyBoardToOrder(so, board) {
+    const o = orderBySo(so);
+    if (!o || !board) return;
+    if (board.job) syncOrderGatesFromJob(o, board.job);
+    const assignments = Array.isArray(board.assignments) ? board.assignments : [];
+    // Canonical V3 assignments only — never invent demo operators for live.
+    o.productionAssignments = assignments
+      .filter(function (a) {
+        return a && a.status !== "cancelled_remaining";
+      })
+      .map(function (a) {
+        return {
+          id: String(a.id),
+          soLineId: String(a.so_line_id || ""),
+          lineId: String(a.so_line_id || ""),
+          colorIndex: Number(a.color_pass) || 1,
+          colorName: "Warna " + (Number(a.color_pass) || 1),
+          operator: String(a.operator_name || ""),
+          machine: String(a.machine_name || ""),
+          workDate: String(a.work_date || ""),
+          targetQty: Number(a.qty_planned) || 0,
+          completedQty:
+            a.qty_confirmed != null && Number.isFinite(Number(a.qty_confirmed))
+              ? Number(a.qty_confirmed)
+              : null,
+        };
+      });
+    // Effective scheduled qty = min coverage of color_pass 1 per print line (physical cups).
+    const byLine = Object.create(null);
+    o.productionAssignments.forEach(function (a) {
+      const key = a.soLineId || "_";
+      if (!byLine[key]) byLine[key] = Object.create(null);
+      const pass = a.colorIndex || 1;
+      byLine[key][pass] = (byLine[key][pass] || 0) + (Number(a.targetQty) || 0);
+    });
+    let scheduled = 0;
+    Object.keys(byLine).forEach(function (lineId) {
+      const passes = byLine[lineId];
+      const pass1 = passes[1];
+      if (pass1 != null) scheduled += pass1;
+      else {
+        const vals = Object.keys(passes).map(function (k) {
+          return passes[k];
+        });
+        if (vals.length) scheduled += Math.min.apply(null, vals);
+      }
+    });
+    o.scheduledQty = scheduled;
+    if (o.productionAssignments.length) {
+      const first = o.productionAssignments[0];
+      o.operator = first.operator;
+      o.machine = first.machine;
+      o.scheduleDate = first.workDate || o.scheduleDate;
+      if (o.stage === "inbox") {
+        o.stage = "schedule";
+        o.status = "Dijadwalkan";
+      }
+    }
+  }
+
   async function loadBoard(so, force) {
     let job = jobCache[so];
     if (!job) job = await lookupJob(so);
@@ -618,6 +724,7 @@
     const board = await request(API + "/production/jobs/" + job.id + "/board");
     boardCache[so] = board;
     jobCache[so] = board.job;
+    applyBoardToOrder(so, board);
     return board;
   }
 
@@ -1679,12 +1786,7 @@
       const prevJobs = jobCache;
       const mapped = data.rows.map(mapOrder).filter(Boolean);
       mapped.forEach(function (o) {
-        if (prevJobs[o.id]) {
-          o.v3JobId = prevJobs[o.id].id;
-          o.design_status = prevJobs[o.id].design_status;
-          o.payment_status = prevJobs[o.id].payment_status;
-          o.sample_status = prevJobs[o.id].sample_status;
-        }
+        if (prevJobs[o.id]) syncOrderGatesFromJob(o, prevJobs[o.id]);
       });
       // Accurate total is metadata only — never substitute as page KPI.
       const totalRaw = data.total;
@@ -1716,12 +1818,16 @@
           return o.id;
         }),
       );
+      // Slice 1H: canonical Tugas Tim from V3 jobs (optional ensure_job for page SOs).
+      refreshOfficialTasks(mapped).catch(function () {});
     } catch (err) {
       enrichGeneration += 1;
       inboxTotal = null;
       fetchError = err && err.message ? err.message : "Tidak dapat membaca Accurate";
       publishOrders([]);
       window.taskEntries = {};
+      window.__V3_OFFICIAL_TASKS__ = [];
+      window.__V3_OFFICIAL_TASK_SOURCE__ = null;
       lastSync = null;
       if (String(fetchError).indexOf("Sesi V3 tidak valid") >= 0) {
         redirectToLogin();
@@ -1732,7 +1838,125 @@
     }
   }
 
+  function officialStateToUi(state) {
+    if (state === "done") return "Selesai";
+    if (state === "actionable") return "Siap";
+    return "Menunggu";
+  }
+
+  function mapOfficialTaskRows(tasks) {
+    const ordersById = Object.create(null);
+    (window.orders || []).forEach(function (o) {
+      if (o && o.id) ordersById[o.id] = o;
+    });
+    return (tasks || []).map(function (task) {
+      const order =
+        ordersById[task.accurate_so_number] || {
+          id: task.accurate_so_number,
+          name: task.customer_name || task.accurate_so_number,
+          branch: task.branch_id || "",
+          item: "",
+          ship: "",
+          design_status: task.design_status,
+          payment_status: task.payment_status,
+        };
+      if (task.design_status != null) order.design_status = task.design_status;
+      if (task.payment_status != null) order.payment_status = task.payment_status;
+      if (task.job_id != null) order.v3JobId = task.job_id;
+      const status = officialStateToUi(task.state);
+      return {
+        o: order,
+        t: {
+          id: task.kind,
+          role: task.role,
+          label: task.label,
+          verb: task.verb,
+          group: task.group || task.kind,
+        },
+        e: {
+          status: status,
+          note: task.reason || "",
+          updated: "V3 official",
+          qty: 0,
+          file: "",
+        },
+        status: status,
+        lineItem: order.item || "",
+        official: task,
+      };
+    });
+  }
+
+  async function refreshOfficialTasks(pageOrders) {
+    const rows = Array.isArray(pageOrders) ? pageOrders : window.orders || [];
+    const jobs = rows
+      .filter(function (o) {
+        return o && o.id && o.branchId;
+      })
+      .map(function (o) {
+        return {
+          accurate_so_number: o.id,
+          branch_id: String(o.branchId),
+          accurate_id: o.accurateId != null ? String(o.accurateId) : null,
+          customer_name: o.name || null,
+          buffer_stock:
+            o.bufferStock === true || o.bufferStock === false ? o.bufferStock : null,
+          urgent_state: o.urgentState || null,
+          line_items: (o.sourceLines || [])
+            .filter(function (x) {
+              return x && x.id;
+            })
+            .map(function (x) {
+              return {
+                accurate_line_id: String(x.id),
+                accurate_item_id: x.itemId != null ? String(x.itemId) : null,
+                quantity: x.qty,
+                production_process:
+                  x.production_process === "print" ||
+                  x.production_process === "non_print"
+                    ? x.production_process
+                    : "unknown",
+              };
+            }),
+        };
+      });
+    const soNumbers = jobs.map(function (j) {
+      return j.accurate_so_number;
+    });
+    let body;
+    try {
+      body = await request(API + "/production/jobs/tasks", {
+        method: "POST",
+        body: {
+          so_numbers: soNumbers.length ? soNumbers : null,
+          sync_ensure: jobs.length > 0,
+          jobs: jobs.length ? jobs : null,
+        },
+      });
+    } catch (err) {
+      // Read-only fallback if create permission missing.
+      const q =
+        API +
+        "/production/jobs/tasks" +
+        (soNumbers.length
+          ? "?so=" + encodeURIComponent(soNumbers.join(","))
+          : "");
+      body = await request(q);
+    }
+    window.__V3_OFFICIAL_TASK_SOURCE__ = body && body.source;
+    window.__V3_OFFICIAL_TASKS__ = mapOfficialTaskRows((body && body.tasks) || []);
+    (body && body.jobs ? body.jobs : []).forEach(function (job) {
+      if (!job) return;
+      jobCache[job.accurate_so_number] = job;
+      const o = orderBySo(job.accurate_so_number);
+      if (o) syncOrderGatesFromJob(o, job);
+    });
+    if (typeof window.render === "function") window.render();
+    return body;
+  }
+
   window.v50RefreshInbox = refreshInbox;
+  window.v3RefreshOfficialTasks = refreshOfficialTasks;
   window.v3Logout = function () {
     localStorage.removeItem(TOKEN_KEY);
     window.location.href = "/";

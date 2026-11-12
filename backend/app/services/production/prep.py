@@ -163,7 +163,7 @@ async def set_preparation(
     else:
         raise HTTPException(422, "Role persiapan tidak valid")
     _branch(user, job.branch_id)
-    await gates_open_for_schedule(job)
+    await gates_open_for_schedule(job, session)
     if qty < 0:
         raise HTTPException(422, "Qty persiapan tidak valid")
     if not evidence_ref.strip():

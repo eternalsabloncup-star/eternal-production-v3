@@ -218,6 +218,69 @@ async def evidence_capability(
     return cap()
 
 
+class TeamTaskSyncLine(BaseModel):
+    accurate_line_id: str | None = None
+    id: str | None = None
+    accurate_item_id: str | None = None
+    item_id: str | None = None
+    quantity: Decimal | None = None
+    qty: Decimal | None = None
+    production_process: str | None = None
+
+
+class TeamTaskSyncJob(BaseModel):
+    accurate_so_number: str
+    branch_id: str
+    accurate_id: str | None = None
+    customer_name: str | None = None
+    buffer_stock: bool | None = None
+    urgent_state: str | None = None
+    line_items: list[TeamTaskSyncLine] | None = None
+
+
+class TeamTasksQueryBody(BaseModel):
+    """Optional body for POST /tasks — filter + idempotent ensure_job sync."""
+
+    so_numbers: list[str] | None = None
+    sync_ensure: bool = False
+    jobs: list[TeamTaskSyncJob] | None = None
+
+
+@router.get("/tasks")
+async def list_team_tasks(
+    so: str | None = None,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_permissions(P.JOB_READ)),
+):
+    """Official Tugas Tim read-model from V3 jobs (no demo synthesis)."""
+    so_numbers = [s.strip() for s in (so or "").split(",") if s and s.strip()] or None
+    return await engine.list_team_tasks(session, user, so_numbers=so_numbers)
+
+
+@router.post("/tasks")
+async def list_team_tasks_with_sync(
+    body: TeamTasksQueryBody,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    """Same read-model; optional idempotent ensure_job for current-page SOs."""
+    payloads = None
+    if body.jobs:
+        payloads = []
+        for job in body.jobs:
+            row = job.model_dump()
+            if row.get("line_items") is not None:
+                row["line_items"] = [dict(x) for x in row["line_items"]]
+            payloads.append(row)
+    return await engine.list_team_tasks(
+        session,
+        user,
+        so_numbers=body.so_numbers,
+        sync_ensure=body.sync_ensure,
+        sync_payloads=payloads,
+    )
+
+
 @router.get("/by-so/{so_number:path}")
 async def get_job_by_so(
     so_number: str,

@@ -147,8 +147,34 @@ async def _mark_terproses(session: AsyncSession, job: ProductionJob) -> None:
             wo.processing_status = "Terproses"
 
 
-async def gates_open_for_schedule(job: ProductionJob) -> None:
-    if job.design_status not in {"approved", "bypassed"}:
+async def job_needs_design_gate(
+    session: AsyncSession | None, job: ProductionJob
+) -> bool:
+    """Design gate applies to print (or unclassified) jobs — not non-print-only."""
+    if session is None:
+        return True
+    from app.models.production.prep import JobLineQty
+
+    lines = (
+        await session.scalars(
+            select(JobLineQty).where(JobLineQty.job_id == job.id)
+        )
+    ).all()
+    if not lines:
+        # Fail closed: unknown lines still require design before schedule/prep.
+        return True
+    has_print = any((ln.production_process or "") == "print" for ln in lines)
+    has_non_print = any((ln.production_process or "") == "non_print" for ln in lines)
+    if has_non_print and not has_print:
+        return False
+    return True
+
+
+async def gates_open_for_schedule(
+    job: ProductionJob, session: AsyncSession | None = None
+) -> None:
+    needs_design = await job_needs_design_gate(session, job)
+    if needs_design and job.design_status not in {"approved", "bypassed"}:
         raise HTTPException(409, "Design belum disetujui/bypass")
     if job.payment_status not in {"approved", "bypassed"}:
         raise HTTPException(409, "Payment belum disetujui/bypass")
@@ -446,7 +472,7 @@ async def create_assignment(
 ) -> ScheduleAssignment:
     _require(user, P.SCHEDULE_MANAGE)
     _branch(user, job.branch_id)
-    await gates_open_for_schedule(job)
+    await gates_open_for_schedule(job, session)
     if qty_planned <= 0:
         raise HTTPException(422, "Qty rencana harus > 0")
     seq = await session.scalar(
@@ -1330,4 +1356,425 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
             }
             for e in events
         ],
+    }
+
+
+# ---- Team tasks read-model (Slice 1H) ----
+
+_TASK_META = {
+    "design_upload": {
+        "role": "Designer",
+        "label": "Upload Design",
+        "verb": "Upload desain",
+        "group": "design_upload",
+    },
+    "design_approve": {
+        "role": "Designer",
+        "label": "Approval Design",
+        "verb": "Sahkan desain",
+        "group": "design_approve",
+    },
+    "schedule": {
+        "role": "Kepala Produksi",
+        "label": "Penjadwalan",
+        "verb": "Atur jadwal",
+        "group": "schedule",
+    },
+    "screen": {
+        "role": "Screener",
+        "label": "Screen",
+        "verb": "Input screen",
+        "group": "screen",
+    },
+    "prepare": {
+        "role": "Helper",
+        "label": "Prepare Cup",
+        "verb": "Input cup siap",
+        "group": "prepare",
+    },
+    "sample": {
+        "role": "Operator",
+        "label": "Upload Sampel Cetak",
+        "verb": "Upload sampel",
+        "group": "sample",
+    },
+    "sample_approve": {
+        "role": "Operator",
+        "label": "Approval Sampel Cetak",
+        "verb": "Approve sampel",
+        "group": "sample_approve",
+    },
+    "print": {
+        "role": "Operator",
+        "label": "Konfirmasi Qty Cetak",
+        "verb": "Konfirmasi cetak",
+        "group": "print",
+    },
+    "packing": {
+        "role": "Helper",
+        "label": "Packing",
+        "verb": "Input packing",
+        "group": "packing",
+    },
+    "stockprep": {
+        "role": "Helper",
+        "label": "Persiapan Barang Non-Cetak",
+        "verb": "Siapkan barang",
+        "group": "stockprep",
+    },
+    "stockpack": {
+        "role": "Helper",
+        "label": "Packing Barang Non-Cetak",
+        "verb": "Konfirmasi packing",
+        "group": "stockpack",
+    },
+}
+
+
+def _task_row(
+    job: ProductionJob,
+    kind: str,
+    state: str,
+    *,
+    reason: str | None = None,
+    so_line_id: str | None = None,
+) -> dict:
+    meta = _TASK_META[kind]
+    business_id = f"{job.accurate_so_number}::{kind}"
+    if so_line_id:
+        business_id = f"{business_id}::{so_line_id}"
+    return {
+        "id": business_id,
+        "kind": kind,
+        "group": meta["group"],
+        "role": meta["role"],
+        "label": meta["label"],
+        "verb": meta["verb"],
+        "state": state,  # pending | blocked | actionable | done
+        "visible": True,
+        "reason": reason,
+        "job_id": job.id,
+        "accurate_so_number": job.accurate_so_number,
+        "branch_id": job.branch_id,
+        "customer_name": job.customer_name,
+        "so_line_id": so_line_id,
+        "design_status": job.design_status,
+        "payment_status": job.payment_status,
+        "processing_status": job.processing_status,
+    }
+
+
+def derive_team_tasks_for_job(
+    job: ProductionJob,
+    *,
+    lines: list,
+    designs: list,
+    assignments: list,
+    prep_states: list,
+    samples: list,
+    events: list,
+) -> list[dict]:
+    """Pure derivation of official Tugas Tim from existing V3 tables.
+
+    Never invents payment approval from PO/processing status.
+    Never auto-approves design on upload.
+    Non-print-only jobs never receive screen/sample/print tasks.
+    """
+    has_print = any((getattr(ln, "production_process", None) or "") == "print" for ln in lines)
+    has_non_print = any(
+        (getattr(ln, "production_process", None) or "") == "non_print" for ln in lines
+    )
+    payment_ok = job.payment_status in {"approved", "bypassed"}
+    design_ok = job.design_status in {"approved", "bypassed"}
+    pending_design = [d for d in designs if getattr(d, "status", None) == "pending"]
+    uploaded_design = [
+        d
+        for d in designs
+        if getattr(d, "status", None) in {"pending", "approved", "superseded"}
+    ]
+    # Prefer explicit active rows; exclude cancelled/void.
+    active_assignments = [
+        a
+        for a in assignments
+        if str(getattr(a, "status", "active") or "active")
+        not in {"cancelled", "canceled", "void"}
+    ]
+    has_schedule = len(active_assignments) > 0
+    screener_done = any(
+        getattr(p, "role", None) == "screener" and Decimal(getattr(p, "qty", 0) or 0) > 0
+        for p in prep_states
+    )
+    helper_done = any(
+        getattr(p, "role", None) == "helper" and Decimal(getattr(p, "qty", 0) or 0) > 0
+        for p in prep_states
+    )
+    pending_sample = [s for s in samples if getattr(s, "status", None) == "pending"]
+    approved_sample = [
+        s for s in samples if getattr(s, "status", None) in {"approved", "bypassed"}
+    ]
+    sample_uploaded = bool(samples)
+    print_qty = sum(
+        (
+            Decimal(getattr(e, "qty_physical", 0) or 0)
+            for e in events
+            if getattr(e, "event_type", None) == "output_confirmed"
+        ),
+        Decimal("0"),
+    )
+    pack_qty = sum(
+        (
+            Decimal(getattr(e, "qty_physical", 0) or 0)
+            for e in events
+            if getattr(e, "event_type", None) == "packing_recorded"
+        ),
+        Decimal("0"),
+    )
+
+    tasks: list[dict] = []
+
+    if has_print:
+        # Upload Design — available without payment; idempotent presence.
+        if design_ok or uploaded_design:
+            tasks.append(_task_row(job, "design_upload", "done"))
+        else:
+            tasks.append(_task_row(job, "design_upload", "actionable"))
+
+        # Approval Design — never auto-approve on upload.
+        if design_ok:
+            tasks.append(_task_row(job, "design_approve", "done"))
+        elif pending_design:
+            tasks.append(_task_row(job, "design_approve", "actionable"))
+        else:
+            tasks.append(
+                _task_row(
+                    job,
+                    "design_approve",
+                    "blocked",
+                    reason="Menunggu file desain pending",
+                )
+            )
+
+        # Penjadwalan — visible only when payment approved/bypassed.
+        if payment_ok:
+            if has_schedule:
+                tasks.append(_task_row(job, "schedule", "done"))
+            elif design_ok:
+                tasks.append(_task_row(job, "schedule", "actionable"))
+            else:
+                tasks.append(
+                    _task_row(
+                        job,
+                        "schedule",
+                        "blocked",
+                        reason="Design belum disetujui/bypass",
+                    )
+                )
+        # else: not visible
+
+        # Screen + Prepare Cup — only after valid schedule; parallel.
+        if has_schedule:
+            tasks.append(
+                _task_row(job, "screen", "done" if screener_done else "actionable")
+            )
+            tasks.append(
+                _task_row(job, "prepare", "done" if helper_done else "actionable")
+            )
+
+        # Downstream print chain — only after prep evidence.
+        if has_schedule and screener_done and helper_done:
+            if approved_sample:
+                tasks.append(_task_row(job, "sample", "done"))
+                tasks.append(_task_row(job, "sample_approve", "done"))
+            elif pending_sample or sample_uploaded:
+                tasks.append(_task_row(job, "sample", "done"))
+                tasks.append(
+                    _task_row(
+                        job,
+                        "sample_approve",
+                        "actionable" if pending_sample else "blocked",
+                        reason=None
+                        if pending_sample
+                        else "Menunggu sampel pending untuk approval",
+                    )
+                )
+            else:
+                tasks.append(_task_row(job, "sample", "actionable"))
+
+            if approved_sample:
+                if print_qty > 0:
+                    tasks.append(_task_row(job, "print", "done"))
+                else:
+                    tasks.append(_task_row(job, "print", "actionable"))
+                if print_qty > 0:
+                    if pack_qty > 0:
+                        tasks.append(_task_row(job, "packing", "done"))
+                    else:
+                        tasks.append(_task_row(job, "packing", "actionable"))
+
+    if has_non_print:
+        # Non-cetak: no fake screen/sample/print. Payment opens visibility.
+        if payment_ok:
+            # Use prep helper qty as stockprep evidence when non-print lines exist.
+            non_print_prep = any(
+                getattr(p, "role", None) == "helper"
+                and Decimal(getattr(p, "qty", 0) or 0) > 0
+                for p in prep_states
+            )
+            if non_print_prep:
+                tasks.append(_task_row(job, "stockprep", "done"))
+                if pack_qty > 0:
+                    tasks.append(_task_row(job, "stockpack", "done"))
+                else:
+                    tasks.append(_task_row(job, "stockpack", "actionable"))
+            else:
+                # Non-print-only: design not required. Mixed: stockprep after payment.
+                if has_print and not design_ok:
+                    tasks.append(
+                        _task_row(
+                            job,
+                            "stockprep",
+                            "pending",
+                            reason="Print gate design masih terbuka (mixed SO)",
+                        )
+                    )
+                else:
+                    tasks.append(_task_row(job, "stockprep", "actionable"))
+        else:
+            tasks.append(
+                _task_row(
+                    job,
+                    "stockprep",
+                    "pending",
+                    reason="Menunggu payment approved/bypassed",
+                )
+            )
+
+    # Unknown-only / no classified lines: surface upload only if we treat as print-unknown.
+    if not has_print and not has_non_print:
+        # Fail closed: show design upload as pending classification — not actionable print chain.
+        tasks.append(
+            _task_row(
+                job,
+                "design_upload",
+                "pending",
+                reason="production_process belum terklasifikasi (print/non_print)",
+            )
+        )
+
+    return tasks
+
+
+async def list_team_tasks(
+    session: AsyncSession,
+    user: User,
+    *,
+    so_numbers: list[str] | None = None,
+    sync_ensure: bool = False,
+    sync_payloads: list[dict] | None = None,
+) -> dict:
+    """Official Tugas Tim list derived from V3 jobs (+ optional idempotent ensure_job)."""
+    _require(user, P.JOB_READ)
+    synced: list[str] = []
+    if sync_ensure and sync_payloads:
+        _require(user, P.JOB_CREATE)
+        for payload in sync_payloads:
+            so = str(payload.get("accurate_so_number") or "").strip()
+            branch_id = str(payload.get("branch_id") or "").strip()
+            if not so or not branch_id:
+                continue
+            if branch_id not in list(user.branch_ids or []):
+                continue
+            await ensure_job(
+                session,
+                user,
+                accurate_so_number=so,
+                branch_id=branch_id,
+                accurate_id=payload.get("accurate_id"),
+                customer_name=payload.get("customer_name"),
+                buffer_stock=payload.get("buffer_stock"),
+                urgent_state=payload.get("urgent_state"),
+                line_items=payload.get("line_items"),
+            )
+            synced.append(so)
+
+    from app.models.production.prep import JobLineQty, PrepState
+
+    q = select(ProductionJob)
+    if so_numbers:
+        cleaned = [s.strip() for s in so_numbers if s and str(s).strip()]
+        if cleaned:
+            q = q.where(ProductionJob.accurate_so_number.in_(cleaned))
+    jobs = (await session.scalars(q.order_by(ProductionJob.id.asc()))).all()
+    allowed_branches = set(user.branch_ids or [])
+    jobs = [j for j in jobs if j.branch_id in allowed_branches]
+
+    tasks: list[dict] = []
+    job_summaries: list[dict] = []
+    for job in jobs:
+        lines = (
+            await session.scalars(
+                select(JobLineQty).where(JobLineQty.job_id == job.id)
+            )
+        ).all()
+        designs = (
+            await session.scalars(
+                select(DesignVersion)
+                .where(DesignVersion.job_id == job.id)
+                .order_by(DesignVersion.version_no.desc())
+            )
+        ).all()
+        assignments = (
+            await session.scalars(
+                select(ScheduleAssignment).where(ScheduleAssignment.job_id == job.id)
+            )
+        ).all()
+        prep_states = (
+            await session.scalars(
+                select(PrepState).where(PrepState.job_id == job.id)
+            )
+        ).all()
+        samples = (
+            await session.scalars(
+                select(SampleVersion).where(SampleVersion.job_id == job.id)
+            )
+        ).all()
+        events = (
+            await session.scalars(
+                select(ProductionEvent).where(ProductionEvent.job_id == job.id)
+            )
+        ).all()
+        derived = derive_team_tasks_for_job(
+            job,
+            lines=list(lines),
+            designs=list(designs),
+            assignments=list(assignments),
+            prep_states=list(prep_states),
+            samples=list(samples),
+            events=list(events),
+        )
+        tasks.extend(derived)
+        job_summaries.append(
+            {
+                "id": job.id,
+                "accurate_so_number": job.accurate_so_number,
+                "branch_id": job.branch_id,
+                "customer_name": job.customer_name,
+                "design_status": job.design_status,
+                "payment_status": job.payment_status,
+                "processing_status": job.processing_status,
+                "has_print": any(
+                    (ln.production_process or "") == "print" for ln in lines
+                ),
+                "has_non_print": any(
+                    (ln.production_process or "") == "non_print" for ln in lines
+                ),
+            }
+        )
+
+    return {
+        "source": "v3_official",
+        "tasks": tasks,
+        "jobs": job_summaries,
+        "synced_so_numbers": synced,
+        "count": len(tasks),
     }

@@ -479,6 +479,8 @@ function makeScheduleId(){return 'asg-'+Date.now().toString(36)+'-'+(++scheduleS
 function formatScheduleISO(s){const m=String(s||'').match(/^(\d{1,2}) Nov (\d{4})$/);return m?`${m[2]}-11-${m[1].padStart(2,'0')}`:'2026-11-09'}
 function ensureScheduleAssignments(o){
  if(Array.isArray(o.productionAssignments))return o.productionAssignments;
+ // Live: never invent demo operator assignments from stage/Terproses.
+ if(isLiveInbox()){o.productionAssignments=[];return o.productionAssignments}
  // Legacy V18 per-colour operators are a one-row-per-colour seed, NOT a loss of historical output provenance.
  const colors=sampleColorEntries(o),old=Array.isArray(o.colorAssignments)?o.colorAssignments:[];
  const planned=o.stage!=='inbox';
@@ -561,7 +563,12 @@ function updateScheduleDraft(id,key,value){if(!scheduleDraft)return;const row=sc
 function addScheduleRow(){if(!scheduleDraft)return;const o=orders.find(x=>x.id===scheduleDraft.id);scheduleDraft.rows.push({id:makeScheduleId(),colorIndex:scheduleDraft.focusColor||1,colorName:sampleColorEntries(o)[0].name,operator:'',machine:'',workDate:formatScheduleISO(o.scheduleDate),targetQty:'',completedQty:null,legacy:false});renderScheduleEditor();}
 function removeScheduleRow(id){if(!scheduleDraft)return;const o=orders.find(x=>x.id===scheduleDraft.id),row=scheduleDraft.rows.find(x=>x.id===id);if(row?.legacy&&Number(o.done)>0){toast('Penugasan lama tidak dapat dihapus ketika output PO sudah tercatat');return}scheduleDraft.rows=scheduleDraft.rows.filter(x=>x.id!==id);renderScheduleEditor()}
 function validateScheduleDraft(d,o){
- if(!o.approval)return 'Approval administrasi belum valid.';
+ if(!bothOfficialGatesOk(o)){
+  const dGate=designGateLabel(o),pGate=paymentGateLabel(o);
+  if(!gateOk(dGate)&&!gateOk(pGate))return 'Design Gate dan Payment Gate belum satisfied — jadwal tidak dapat disimpan.';
+  if(!gateOk(dGate))return 'Design Gate belum satisfied — konfirmasi jadwal diblokir.';
+  return 'Payment Gate belum satisfied — konfirmasi jadwal diblokir.';
+ }
  if(d.rows.length===0)return 'Tambahkan sedikitnya satu operator.';
  const seen=new Set();
  for(let i=0;i<d.rows.length;i++){
@@ -686,8 +693,11 @@ function accurateItem(id){return ACCURATE_ITEMS_DEMO.find(x=>x.id===id)}
 function itemMode(id){return accurateItem(id)?.mode||'NON_PRINT'}
 function itemPhysical(id){return !!accurateItem(id)?.physical}
 function samplePrimaryItem(o){const n=String(o.item||'');const size=Number(n.match(/(12|14|16|22)oz/i)?.[1]||16);const material=/\bPP\b/i.test(n)?'PP':'PET';const key=material+'-'+size;return ACCURATE_ITEMS_DEMO.find(x=>x.sku===key)?.id||'acc-item-02'}
+function isLiveInbox(){return !!(window.__V3_INBOX__&&window.__V3_INBOX__.mode==='live')}
 function orderSourceLines(o){
  if(Array.isArray(o.sourceLines)&&o.sourceLines.length)return o.sourceLines;
+ // Live Accurate: empty lines mean detail belum dimuat — jangan invent katalog demo.
+ if(isLiveInbox()){if(!Array.isArray(o.sourceLines))o.sourceLines=[];return o.sourceLines}
  const first=samplePrimaryItem(o);
  const lines=[{id:'line-01',itemId:first,qty:o.qty,processSnapshot:null}];
  // Two purposely mixed demonstration POs. The secondary lid qty never changes printed cup quantity.
@@ -697,13 +707,37 @@ function orderSourceLines(o){
  o.sourceLines=lines;return lines;
 }
 function productionStarted(o){return Number(o.done)>0||['run','qc','packing','ready','delivered'].includes(o.stage)}
-function effectiveLineMode(o,line){return line.processSnapshot||itemMode(line.itemId)}
-function lineIsPhysical(o,line){return itemPhysical(line.itemId)}
+function effectiveLineMode(o,line){
+ if(!line)return 'UNKNOWN';
+ if(line.processSnapshot==='PRINT'||line.processSnapshot==='NON_PRINT'||line.processSnapshot==='SERVICE'||line.processSnapshot==='UNKNOWN')return line.processSnapshot;
+ if(line.production_process==='print')return 'PRINT';
+ if(line.production_process==='non_print')return 'NON_PRINT';
+ if(line.production_process==='unknown')return 'UNKNOWN';
+ if(isLiveInbox())return 'UNKNOWN';
+ return itemMode(line.itemId);
+}
+function lineIsPhysical(o,line){if(isLiveInbox())return effectiveLineMode(o,line)!=='SERVICE';return itemPhysical(line.itemId)}
 function printLines(o){return orderSourceLines(o).filter(l=>effectiveLineMode(o,l)==='PRINT')}
+function unknownLines(o){return orderSourceLines(o).filter(l=>effectiveLineMode(o,l)==='UNKNOWN')}
 function stockLines(o){return orderSourceLines(o).filter(l=>effectiveLineMode(o,l)==='NON_PRINT'&&lineIsPhysical(o,l))}
 function serviceLines(o){return orderSourceLines(o).filter(l=>effectiveLineMode(o,l)==='SERVICE')}
 function hasPrintLine(o){return printLines(o).length>0}
+function hasUnknownLine(o){return unknownLines(o).length>0}
 function hasStockLine(o){return stockLines(o).length>0}
+function printPhysicalQty(o){return printLines(o).reduce((s,l)=>{const n=Number(l.qty);return s+(Number.isFinite(n)?Math.max(0,n):0)},0)}
+function unknownPhysicalQty(o){return unknownLines(o).reduce((s,l)=>{const n=Number(l.qty);return s+(Number.isFinite(n)?Math.max(0,n):0)},0)}
+function designGateLabel(o){const s=String(o?.design_status||'').toLowerCase();if(s==='approved')return'APPROVED';if(s==='bypassed')return'BYPASSED';if(o?.design_status!=null)return'PENDING';return gateFor(o).design}
+function paymentGateLabel(o){const s=String(o?.payment_status||'').toLowerCase();if(s==='approved')return'APPROVED';if(s==='bypassed')return'BYPASSED';if(o?.payment_status!=null)return'PENDING';return gateFor(o).payment}
+function gateOk(label){return label==='APPROVED'||label==='BYPASSED'}
+function bothOfficialGatesOk(o){return gateOk(designGateLabel(o))&&gateOk(paymentGateLabel(o))}
+function scheduleMonitorStatus(o,process,hasAssignment){
+ if(process==='UNKNOWN')return'Proses Belum Terverifikasi';
+ const qty=printPhysicalQty(o),done=Math.max(0,Math.trunc(Number(o.done)||0)),scheduled=Math.max(0,Math.trunc(Number(o.scheduledQty)||0));
+ if(hasAssignment||scheduled>0){if(qty>0&&done>=qty)return'Selesai';if(done>0)return'Sedang Produksi';return'Sudah Dijadwalkan'}
+ if(!gateOk(designGateLabel(o)))return'Belum ACC Design';
+ if(!gateOk(paymentGateLabel(o)))return'Belum ACC Payment';
+ return'Siap Dijadwalkan';
+}
 function stockQty(o){return stockLines(o).reduce((n,l)=>n+Number(l.qty||0),0)}
 function processLabel(mode){return ITEM_PROCESS_TYPES[mode]||'Belum diatur'}
 function stockLineTitle(o){return stockLines(o).map(l=>accurateItem(l.itemId)?.name||'Barang').join(' + ')}
@@ -721,7 +755,23 @@ const TASK_DEFS=[
  {id:'loading',role:'Helper',label:'Loading',verb:'Konfirmasi loading',prev:'packing'},
  {id:'driver',role:'Driver',label:'Pengiriman',verb:'Detail kirim',prev:'loading'}
 ];
+// Slice 1H live cards: Upload Design vs Approval Design are separate (never auto-approve on upload).
+const OFFICIAL_TASK_CARD_DEFS=[
+ {id:'design_upload',role:'Designer',label:'Upload Design',verb:'Upload desain'},
+ {id:'design_approve',role:'Designer',label:'Approval Design',verb:'Sahkan desain'},
+ {id:'schedule',role:'Kepala Produksi',label:'Penjadwalan',verb:'Atur jadwal'},
+ {id:'screen',role:'Screener',label:'Screen',verb:'Input screen'},
+ {id:'prepare',role:'Helper',label:'Prepare Cup',verb:'Input cup siap'},
+ {id:'sample',role:'Operator',label:'Upload Sampel Cetak',verb:'Upload sampel'},
+ {id:'sample_approve',role:'Operator',label:'Approval Sampel Cetak',verb:'Approve sampel'},
+ {id:'print',role:'Operator',label:'Konfirmasi Qty Cetak',verb:'Konfirmasi cetak'},
+ {id:'packing',role:'Helper',label:'Packing',verb:'Input packing'},
+ {id:'stockprep',role:'Helper',label:'Persiapan Barang Non-Cetak',verb:'Siapkan barang'},
+ {id:'stockpack',role:'Helper',label:'Packing Barang Non-Cetak',verb:'Konfirmasi packing'}
+];
 const NONPRINT_TASK_DEFS=[{id:'stockprep',role:'Helper',label:'Persiapan Barang Non-Cetak',verb:'Siapkan barang',prev:null},{id:'stockpack',role:'Helper',label:'Packing Barang Non-Cetak',verb:'Konfirmasi packing',prev:'stockprep'}];
+function taskCardDefs(){return isLiveInbox()?OFFICIAL_TASK_CARD_DEFS:TASK_DEFS.filter(t=>t.id!=='payment')}
+function isOfficialTasksLive(){return isLiveInbox()&&Array.isArray(window.__V3_OFFICIAL_TASKS__)&&window.__V3_OFFICIAL_TASK_SOURCE__==='v3_official'}
 var taskEntries={},taskFilterRole='Semua Peran',taskFilterStatus='Semua Status',taskSearch='',taskPage=1,taskPageSize=20,taskQuick='all',taskStage='all',taskProgressTab='pending';
 function taskKey(orderId,taskId){return orderId+'|'+taskId}
 function taskEntry(o,t){const key=taskKey(o.id,t.id);if(!taskEntries[key]){
@@ -829,24 +879,25 @@ function taskFilterSelectAll(v){const menu=document.getElementById('task-filter-
 function taskApplyColFilter(key){const menu=document.getElementById('task-filter-menu');if(!menu)return;const boxes=[...menu.querySelectorAll('input[data-task-value]')],chosen=boxes.filter(x=>x.checked).map(x=>x.value),text=menu.querySelector('[data-task-text]')?.value.trim()||'';if(chosen.length===boxes.length&&!text)delete taskColFilters[key];else taskColFilters[key]={values:chosen.length===boxes.length?null:chosen,text};taskPage=1;closeTaskColumnFilter();render()}
 function taskClearColFilter(key){delete taskColFilters[key];taskPage=1;closeTaskColumnFilter();render()}
 function taskOpenColFilter(key,button){closeTaskColumnFilter();const col=TASK_COLUMN_MAP[key];if(!col||key==='action')return;const f=taskColFilters[key]||{};const values=[...new Set(filterTaskSheet(taskFilterBaseRows(),key).map(x=>taskValue(x,key)))].sort((a,b)=>a.localeCompare(b,'id-ID',{numeric:true}));const menu=document.createElement('div');menu.id='task-filter-menu';menu.className='sheet-filter-menu';menu.setAttribute('role','dialog');menu.setAttribute('aria-label','Filter '+col.label);menu.innerHTML=`<div class="filter-title"><b>Filter · ${escape(col.label)}</b><button class="filter-close" onclick="closeTaskColumnFilter()" aria-label="Tutup filter">×</button></div><div class="filter-sort"><button onclick="taskSortColumn('${key}','asc')">↑ Urut A–Z / terkecil</button><button onclick="taskSortColumn('${key}','desc')">↓ Urut Z–A / terbesar</button></div><div class="filter-move"><button onclick="taskMoveColumn('${key}',-1)">← Geser kiri</button><button onclick="taskMoveColumn('${key}',1)">Geser kanan →</button></div><div class="filter-inputs"><label>Teks mengandung<input data-task-text type="search" placeholder="Cari teks kolom..." value="${escape(f.text||'')}"></label><label>Cari nilai pilihan<input type="search" placeholder="Cari pilihan..." oninput="taskFilterSearchOptions(this.value)"></label></div><div class="filter-select-all"><label><input type="checkbox" onchange="taskFilterSelectAll(this.checked)"> Pilih semua yang terlihat</label><small>${values.length} nilai</small></div><div class="filter-values">${values.map(v=>`<label data-task-option="${escape(v)}" class="filter-option"><input type="checkbox" data-task-value value="${escape(v)}" ${f.values==null||f.values.includes(v)?'checked':''}><span>${escape(v||'(kosong)')}</span></label>`).join('')||'<span class="task-muted">Tidak ada nilai</span>'}</div><div class="filter-actions"><button class="btn sm" onclick="taskClearColFilter('${key}')">Hapus filter</button><button class="btn sm primary" onclick="taskApplyColFilter('${key}')">Terapkan</button></div>`;document.body.appendChild(menu);const rect=button.getBoundingClientRect();menu.style.left=Math.max(8,Math.min(rect.left,innerWidth-315))+'px';menu.style.top=(rect.bottom+menu.offsetHeight+8>innerHeight?Math.max(8,rect.top-menu.offsetHeight-5):rect.bottom+5)+'px';menu.querySelector('[placeholder="Cari pilihan..."]')?.focus()}
-function taskCell(x,key){if(key==='so')return `<b class="so">${escape(x.o.id)}</b>`;if(key==='customer')return escape(x.o.name);if(key==='branch')return escape(x.o.branch);if(key==='role')return escape(x.t.role);if(key==='task')return `<b>${escape(x.t.label)}</b>`;if(key==='target')return escape(x.o.ship);if(key==='status')return `<span class="task-flag ${x.status==='Siap'?'ready':x.status==='Selesai'?'done':'block'}">${escape(x.status)}</span>`;if(key==='result')return `<span class="task-muted">${escape(taskValue(x,'result'))}</span>`;return `<button class="actionlink" onclick="openTask('${x.o.id}','${x.t.id}')"><span class="infoicon">i</span> ${escape(x.t.verb)}</button>`}
+function taskCell(x,key){if(key==='so')return `<b class="so">${escape(x.o.id)}</b>`;if(key==='customer')return escape(x.o.name);if(key==='branch')return escape(x.o.branch);if(key==='role')return escape(x.t.role);if(key==='task')return `<b>${escape(x.t.label)}</b>`;if(key==='target')return escape(x.o.ship);if(key==='status')return `<span class="task-flag ${x.status==='Siap'?'ready':x.status==='Selesai'?'done':'block'}">${escape(x.status)}</span>`;if(key==='result')return `<span class="task-muted">${escape(taskValue(x,'result')||x.e?.note||'—')}</span>`;return `<button class="actionlink" onclick="openTask('${x.o.id}','${x.t.id}')"><span class="infoicon">i</span> ${escape(isLiveInbox()?'Panel V3':x.t.verb)}</button>`}
 function taskExportCsv(){const rows=taskList(),cols=taskColumnOrder.filter(k=>k!=='action');const lines=[cols.map(k=>TASK_COLUMN_MAP[k].label),...rows.map(x=>cols.map(k=>taskValue(x,k)))];const csv='\ufeff'+lines.map(r=>r.map(v=>'"'+String(v??'').replaceAll('"','""')+'"').join(';')).join('\r\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='renea-tugas-tim-uji.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),500)}
 function taskView(){const all=allTasks(),rows=taskList(),ready=all.filter(x=>x.status==='Siap').length,waiting=all.filter(x=>x.status==='Menunggu').length,done=all.filter(x=>x.status==='Selesai').length;
  const pages=Math.max(1,Math.ceil(rows.length/taskPageSize));taskPage=Math.min(pages,Math.max(1,taskPage));const page=rows.slice((taskPage-1)*taskPageSize,taskPage*taskPageSize);
- const sel=TASK_DEFS.find(t=>t.id===taskStage),label=sel?sel.label:'Semua Tugas';
- const cards=TASK_DEFS.filter(t=>t.id!=='payment').map((t,i)=>{const items=all.filter(x=>taskGroupId(x.t)===t.id),r=items.filter(x=>x.status==='Siap').length,d=items.filter(x=>x.status==='Selesai').length;
- return `<button type="button" class="${taskStage===t.id?'active':''}" onclick="setTaskStage('${t.id}')" aria-pressed="${taskStage===t.id}" title="Tampilkan tugas ${escape(t.label)}"><span class="tw-step">${String(i+1).padStart(2,'0')} / ${String(TASK_DEFS.length-1).padStart(2,'0')}</span><span class="tw-label">${escape(t.label)}</span><span class="tw-total-wrap"><span class="tw-total">${items.length} job</span><span class="tw-small">${items.length-d} belum · ${d} selesai</span></span></button>`}).join('');
+ const cardDefs=taskCardDefs();
+ const sel=cardDefs.find(t=>t.id===taskStage)||TASK_DEFS.find(t=>t.id===taskStage),label=sel?sel.label:'Semua Tugas';
+ const cards=cardDefs.map((t,i)=>{const items=all.filter(x=>taskGroupId(x.t)===t.id||x.t.id===t.id),r=items.filter(x=>x.status==='Siap').length,d=items.filter(x=>x.status==='Selesai').length;
+ return `<button type="button" class="${taskStage===t.id?'active':''}" onclick="setTaskStage('${t.id}')" aria-pressed="${taskStage===t.id}" title="Tampilkan tugas ${escape(t.label)}"><span class="tw-step">${String(i+1).padStart(2,'0')} / ${String(cardDefs.length).padStart(2,'0')}</span><span class="tw-label">${escape(t.label)}</span><span class="tw-total-wrap"><span class="tw-total">${items.length} job</span><span class="tw-small">${items.length-d} belum · ${d} selesai</span></span></button>`}).join('')||`<div class="flat-notice">Tidak ada kartu tugas — ${isOfficialTasksLive()?'belum ada job V3 dengan tugas resmi pada halaman ini.':'mode demo.'}</div>`;
  const columns=taskColumnOrder.map(k=>TASK_COLUMN_MAP[k]);
  const headers=columns.map(c=>`<th data-column="${c.key}" draggable="${c.key!=='action'}" ondragstart="taskDragStart(event,'${c.key}')" ondragover="taskDragOver(event,'${c.key}')" ondrop="taskDrop(event,'${c.key}')" ondragend="taskDragKey=null"><div class="sheet-th"><span class="sheet-drag">${c.key==='action'?'':'⠿'}</span><span class="sheet-th-label">${escape(c.label)}</span>${c.key==='action'?'':`<button type="button" class="sheet-filter-trigger ${taskColFilters[c.key]?'filtered':''}" aria-label="Filter kolom ${escape(c.label)}" onclick="event.stopPropagation();taskOpenColFilter('${c.key}',this)">${taskSort.key===c.key?(taskSort.dir==='asc'?'↑':'↓'):taskColFilters[c.key]?'●':'▾'}</button>`}</div></th>`).join('');
- return heading('Tugas Tim Produksi','Tugas muncul hanya ketika prasyarat terpenuhi · tidak membuat pekerjaan kosong')+
- `<div class="task-layout"><div class="v42-workflow-note"><b>Alur V3:</b> PO Masuk → Upload & Approval Design → Approval Payment (Accurate / bypass) → Penjadwalan → Screen + Prepare Cup → Upload Sampel → <b>Approval Sampel Cetak oleh Operator</b> → Qty Cetak → Packing → Loading → Pengiriman <button class="btn sm" onclick="setTaskStage('sampleapprove')">Approval Sampel · ${all.filter(x=>x.t.id==='sampleapprove'&&x.status!=='Selesai').length} PO</button></div><div class="task-overview-bar"><div class="task-overview-title">DAFTAR TUGAS <span class="task-overview-help">Pilih tahap · geser kartu ke samping →</span></div><div class="task-overview-actions"><button class="btn sm task-reset-all ${taskStage==='all'&&!dashboardFocus?'active':''}" onclick="resetTaskFilters()">Daftar Semua Tugas · ${all.length}</button></div></div><aside class="task-rail"><div class="task-workflow" aria-label="Filter tahapan tugas">${cards}</div></aside><section class="task-main">`+
+ return heading('Tugas Tim Produksi',isOfficialTasksLive()?'Sumber resmi V3 jobs · Upload Design terpisah dari Approval Design · Payment hanya dari receipt Accurate / bypass':'Tugas muncul hanya ketika prasyarat terpenuhi · tidak membuat pekerjaan kosong')+
+ `<div class="task-layout"><div class="v42-workflow-note"><b>Alur V3:</b> PO Masuk → <b>Upload Design</b> → <b>Approval Design</b> → Approval Payment (Accurate / bypass) → Penjadwalan → Screen + Prepare Cup → Upload Sampel → <b>Approval Sampel Cetak</b> → Qty Cetak → Packing → Loading → Pengiriman ${isOfficialTasksLive()?`<button class="btn sm" onclick="window.v3RefreshOfficialTasks&&window.v3RefreshOfficialTasks()">↻ Sinkron Tugas V3</button>`:`<button class="btn sm" onclick="setTaskStage('sampleapprove')">Approval Sampel · ${all.filter(x=>(x.t.id==='sampleapprove'||x.t.id==='sample_approve')&&x.status!=='Selesai').length} PO</button>`}</div><div class="task-overview-bar"><div class="task-overview-title">DAFTAR TUGAS <span class="task-overview-help">Pilih tahap · geser kartu ke samping →</span></div><div class="task-overview-actions"><button class="btn sm task-reset-all ${taskStage==='all'&&!dashboardFocus?'active':''}" onclick="resetTaskFilters()">Daftar Semua Tugas · ${all.length}</button></div></div><aside class="task-rail"><div class="task-workflow" aria-label="Filter tahapan tugas">${cards}</div></aside><section class="task-main">`+
 
   `<div class="task-stage-line"><div class="stage-title">${dashboardFocus?escape({'urgent':'Daftar URGENT','buffer':'Daftar BUFFER STOCK','run':'Dalam Cetak','qcp':'QC/Packing','ready':'Siap Kirim'}[dashboardFocus]||label):escape(label)} <span class="task-muted">· ${rows.length} ${taskProgressTab==='pending'?'belum dikerjakan':taskProgressTab==='done'?'sudah dikerjakan':'pekerjaan'} sesuai filter</span></div></div>`+
 
  `<div class="task-toolbar"><input id="task-search" class="fieldcontrol" type="search" placeholder="Cari SO, pelanggan, pekerjaan..." value="${escape(taskSearch)}" oninput="setTaskSearch(this.value)"><div class="task-progress-tabs" role="group" aria-label="Pilih progres tugas"><button type="button" class="${taskProgressTab==='pending'?'active':''}" aria-pressed="${taskProgressTab==='pending'}" onclick="setTaskProgressTab('pending')">Belum Dikerjakan <strong>${all.filter(x=>(taskStage==='all'||taskGroupId(x.t)===taskStage)&&x.status!=='Selesai').length}</strong></button><button type="button" class="${taskProgressTab==='done'?'active':''}" aria-pressed="${taskProgressTab==='done'}" onclick="setTaskProgressTab('done')">Sudah Dikerjakan <strong>${all.filter(x=>(taskStage==='all'||taskGroupId(x.t)===taskStage)&&x.status==='Selesai').length}</strong></button><button type="button" class="${taskProgressTab==='all'?'active':''}" aria-pressed="${taskProgressTab==='all'}" onclick="setTaskProgressTab('all')">Semua <strong>${all.filter(x=>taskStage==='all'||taskGroupId(x.t)===taskStage).length}</strong></button></div><select class="fieldcontrol" onchange="setTaskRole(this.value)">${['Semua Peran','Designer','Kepala Produksi','Screener','Helper','Operator','Driver'].map(v=>`<option ${taskFilterRole===v?'selected':''}>${v}</option>`).join('')}</select><select class="fieldcontrol" onchange="setTaskStatus(this.value)">${['Semua Status','Siap','Menunggu','Selesai'].map(v=>`<option ${taskFilterStatus===v?'selected':''}>${v}</option>`).join('')}</select><select class="fieldcontrol" onchange="taskPageSize=Number(this.value);taskPage=1;render()">${[15,20,25,50].map(n=>`<option value="${n}" ${taskPageSize===n?'selected':''}>${n} baris</option>`).join('')}</select><button class="btn sm" onclick="resetTaskFilters()">⟲ Bersihkan Filter</button><button class="btn sm" onclick="taskResetColumns()">↔ Reset Kolom</button><button class="btn sm" onclick="taskExportCsv()">↓ CSV</button><span class="task-count">${rows.length?((taskPage-1)*taskPageSize+1):0}–${Math.min(taskPage*taskPageSize,rows.length)} dari ${rows.length}</span></div>`+
  `<div class="sheet-guidance">⠿ Seret header untuk memindahkan kolom · klik <b>▾</b> di tiap header untuk filter checkbox Excel, urutkan, dan cari nilai · <b>ⓘ Detail</b> membuka tugas.</div>`+
  `<div class="sheetwrap" role="region" aria-label="Sheet tugas tim" tabindex="0"><table class="sheet excel-sheet task-sheet"><thead><tr>${headers}</tr></thead><tbody>${page.map(x=>`<tr>${columns.map(c=>`<td data-column="${c.key}">${taskCell(x,c.key)}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${columns.length}" class="sheetempty">${taskProgressTab==='done'?'Belum ada pekerjaan selesai pada pilihan ini.':taskProgressTab==='pending'?'Tidak ada pekerjaan yang belum selesai pada pilihan ini.':'Tidak ada tugas sesuai filter. Gunakan Bersihkan Filter.'}</td></tr>`}</tbody></table></div>`+
- `<div class="sheetfoot"><span>Menampilkan ${rows.length?((taskPage-1)*taskPageSize+1):0}–${Math.min(taskPage*taskPageSize,rows.length)} dari ${rows.length} tugas · Data simulasi 3 PO</span><div class="pager"><button class="btn sm" ${taskPage===1?'disabled':''} onclick="setTaskPage(${taskPage-1})">‹ Sebelumnya</button><span>${taskPage} / ${pages}</span><button class="btn sm" ${taskPage>=pages?'disabled':''} onclick="setTaskPage(${taskPage+1})">Berikutnya ›</button></div></div></section></div>`;
+ `<div class="sheetfoot"><span>Menampilkan ${rows.length?((taskPage-1)*taskPageSize+1):0}–${Math.min(taskPage*taskPageSize,rows.length)} dari ${rows.length} tugas · ${isOfficialTasksLive()?'Sumber V3 official (bukan simulasi)':isLiveInbox()?'Accurate Live — menunggu sync tugas V3':'Data simulasi 3 PO'}</span><div class="pager"><button class="btn sm" ${taskPage===1?'disabled':''} onclick="setTaskPage(${taskPage-1})">‹ Sebelumnya</button><span>${taskPage} / ${pages}</span><button class="btn sm" ${taskPage>=pages?'disabled':''} onclick="setTaskPage(${taskPage+1})">Berikutnya ›</button></div></div></section></div>`;
 }
 function taskField(t,o,e){switch(t.id){
  case 'design':return `<div class="field"><label>Upload desain / referensi</label><input id="task-file" type="file" accept=".pdf,.ai,.eps,.svg,.png,.jpg,.jpeg,.cdr"></div><div class="field"><label><input id="task-design-approved" type="checkbox" ${gateFor(o).design==='APPROVED'?'checked':''}> Konfirmasi desain telah disetujui (demo)</label></div><p class="task-muted">Upload dan approval pada satu panel. Di sistem nyata persetujuan hanya sah melalui identitas, permission, dan audit yang terverifikasi. File offline hanya menyimpan nama.</p>`;
@@ -993,11 +1044,12 @@ function changeSheetPage(n){sheetPage=Math.max(1,n);render()}
 function exportSheet(){const rows=sheetFiltered(sourceRows());const cols=sheetVisibleList().filter(k=>k!=='action').map(k=>COLUMN_MAP[k]);const table=[cols.map(c=>c.label),...rows.map(o=>cols.map(c=>c.value(o)))];const csv='\ufeff'+table.map(row=>row.map(c=>'"'+String(c??'').replaceAll('"','""')+'"').join(';')).join('\r\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),u=URL.createObjectURL(blob),link=document.createElement('a');link.href=u;link.download='eternal-produksi-sheet-simulasi.csv';link.click();setTimeout(()=>URL.revokeObjectURL(u),500);toast('CSV mengikuti urutan dan filter kolom yang aktif')}
 // Spreadsheet-like column preferences are local to this browser / prototype only.
 function productionQty(o){
- const qty=Math.max(0,Math.trunc(Number(o.qty)||0));
- const scheduled=Math.max(0,Math.trunc(Number(o.scheduledQty)||0));
- const done=Math.max(0,Math.trunc(Number(o.done)||0));
+ // Live: Total Qty SO monitoring = qty fisik item Cetak saja (unknown terpisah).
+ const qty=isLiveInbox()?printPhysicalQty(o):Math.max(0,Math.trunc(Number(o.qty)||0));
+ const scheduled=Math.min(qty,Math.max(0,Math.trunc(Number(o.scheduledQty)||0)));
+ const done=Math.min(qty,Math.max(0,Math.trunc(Number(o.done)||0)));
  const packed=Math.max(0,Math.trunc(Number(o.packed)||0));
- return {qty,scheduled,done,packed,unassigned:Math.max(0,qty-scheduled),remainingScheduled:Math.max(0,scheduled-done),remainingTotal:Math.max(0,qty-done),invalid:scheduled>qty||done>qty||done>scheduled||packed>done};
+ return {qty,scheduled,done,packed,unassigned:Math.max(0,qty-scheduled),remainingScheduled:Math.max(0,scheduled-done),remainingTotal:Math.max(0,qty-done),invalid:scheduled>qty||done>qty||done>scheduled||packed>done,unknownQty:isLiveInbox()?unknownPhysicalQty(o):0};
 }
 function scheduleLead(o){
  const m=String(o.ship||'').match(/(\d{1,2}) Nov 2026/);if(!m)return 'Belum ada target';
@@ -1006,10 +1058,14 @@ function scheduleLead(o){
  return n<0?'Terlambat '+Math.abs(n)+' hari':n===0?'Hari ini':n===1?'Besok':n+' hari lagi';
 }
 function scheduleOverview(rows){
- const sum={qty:0,scheduled:0,done:0,remainingTotal:0,unassigned:0,remainingScheduled:0,invalid:0,deadline:0};
- rows.forEach(o=>{const q=productionQty(o);for(const key of ['qty','scheduled','done','remainingTotal','unassigned','remainingScheduled'])sum[key]+=q[key];if(q.invalid)sum.invalid++;if(scheduleLead(o)==='Hari ini'||scheduleLead(o)==='Besok'||scheduleLead(o).startsWith('Terlambat'))sum.deadline++});
- const cells=[['Total Qty SO',sum.qty],['Qty Terjadwal',sum.scheduled],['Sudah Dicetak',sum.done],['Belum Dicetak',sum.remainingTotal],['Sisa Terjadwal',sum.remainingScheduled],['Belum Dijadwalkan',sum.unassigned]];
- return `<section class="v44-production-strip" role="region" aria-label="Kontrol kuantitas produksi"><div class="v44-production-strip-items">${cells.map(c=>`<div class="v44-production-metric"><span>${c[0]}:</span><strong>${fmt(c[1])} <small>pcs</small></strong></div>`).join('')}</div>${sum.invalid?`<div class="v44-production-alert" role="status">⚠ ${sum.invalid} PO perlu cek selisih alokasi dan output</div>`:''}</section>`;
+ // KPI always from unique PO identities in scope — never sum expanded colour/assignment rows.
+ const unique=[];const seen=new Set();
+ (rows||[]).forEach(o=>{const id=o&&o.id;if(!id||seen.has(id))return;seen.add(id);unique.push(o)});
+ const sum={qty:0,scheduled:0,done:0,remainingTotal:0,unassigned:0,remainingScheduled:0,unknownQty:0,invalid:0,deadline:0};
+ unique.forEach(o=>{const q=productionQty(o);for(const key of ['qty','scheduled','done','remainingTotal','unassigned','remainingScheduled','unknownQty'])sum[key]+=q[key]||0;if(q.invalid)sum.invalid++;if(scheduleLead(o)==='Hari ini'||scheduleLead(o)==='Besok'||scheduleLead(o).startsWith('Terlambat'))sum.deadline++});
+ const cells=[['Total Qty Cetak',sum.qty],['Qty Terjadwal',sum.scheduled],['Sudah Dicetak',sum.done],['Belum Dicetak',sum.remainingTotal],['Sisa Terjadwal',sum.remainingScheduled],['Belum Dijadwalkan',sum.unassigned]];
+ if(sum.unknownQty)cells.push(['Qty Proses Belum Terverifikasi',sum.unknownQty]);
+ return `<section class="v44-production-strip" role="region" aria-label="Kontrol kuantitas produksi"><div class="v44-production-strip-items">${cells.map(c=>`<div class="v44-production-metric"><span>${c[0]}:</span><strong>${fmt(c[1])} <small>pcs</small></strong></div>`).join('')}</div>${sum.invalid?`<div class="v44-production-alert" role="status">⚠ ${sum.invalid} PO perlu cek selisih alokasi dan output</div>`:''}${isLiveInbox()?'<div class="v44-production-alert" role="status">Monitoring halaman ini · bukan KPI global Accurate. Item Cetak tampil sebelum ACC; simpan jadwal tetap membutuhkan Design + Payment gate.</div>':''}</section>`;
 }
 
 function officialSalesCell(o){const s=o&&o.salesName!=null?String(o.salesName).trim():'';return s&&s!=='Belum terverifikasi'?s:'Belum terverifikasi'}
@@ -1058,7 +1114,23 @@ let SHEET_COLUMNS=[
  {key:'scheduleDate',label:'Jadwal',kind:'date',value:o=>o.stage==='inbox'?'Belum dijadwalkan':o.scheduleDate,cell:o=>o.stage==='inbox'?'<span class="mutedcell">Belum dijadwalkan</span>':escape(o.scheduleDate||'—')},
  {key:'operator',label:'Operator / Ukuran Screen',kind:'text',value:o=>o.operator?`${o.operator} / ${o.machine}`:'Belum ditentukan',cell:o=>o.operator?`<b>${escape(o.operator)}</b><div class="mutedcell" style="font-size:10px">${escape(o.machine)}</div>`:'<span class="mutedcell">Belum ditentukan</span>'},
  {key:'progress',label:'Progres',kind:'number',value:o=>o.qty?Math.round(o.done/o.qty*100):0,cell:o=>{const p=o.qty?Math.round(o.done/o.qty*100):0;return `<span class="mini-prog"><i style="width:${Math.min(100,p)}%"></i></span><span class="mutedcell">${p}%</span>`}},
- {key:'status',label:'Status',kind:'text',value:o=>o.status,cell:o=>tag(o.status)},
+ {key:'status',label:'Status',kind:'text',value:o=>{
+  if(section==='schedule'&&(o.scheduleMonitorStatus||o.colorWorkItem||isLiveInbox())){
+   const process=o.scheduleProcess||(o.processVerify==='unknown'?'UNKNOWN':'PRINT');
+   const hasAsg=!!(o.assignmentId||(Array.isArray(o.productionAssignments)&&o.productionAssignments.length));
+   return o.scheduleMonitorStatus||scheduleMonitorStatus(o,process,hasAsg);
+  }
+  return o.status;
+ },cell:o=>{
+  if(section==='schedule'&&(o.scheduleMonitorStatus||o.colorWorkItem||isLiveInbox())){
+   const process=o.scheduleProcess||(o.processVerify==='unknown'?'UNKNOWN':'PRINT');
+   const hasAsg=!!(o.assignmentId||(Array.isArray(o.productionAssignments)&&o.productionAssignments.length));
+   const st=o.scheduleMonitorStatus||scheduleMonitorStatus(o,process,hasAsg);
+   const d=designGateLabel(o),p=paymentGateLabel(o);
+   return `<div class="po-multiline"><b>${escape(st)}</b><span class="mutedcell">Design: ${escape(d)} · Payment: ${escape(p)}</span>${o.processVerifyReason?`<span class="mutedcell">${escape(o.processVerifyReason)}</span>`:''}</div>`;
+  }
+  return tag(o.status);
+ }},
  {key:'receipt',label:'Pembayaran',kind:'text',value:o=>o.receipt,cell:o=>tag(o.receipt)},
  {key:'sj',label:'SJ Accurate',kind:'text',value:o=>o.sj||'Belum ada SJ',cell:o=>escape(o.sj||'—')},
  {key:'action',label:'Aksi V3',kind:'action',value:o=>'',cell:o=>o.colorWorkItem?`<div class="row-actions"><button class="actionlink" onclick="openScheduleEditor('${o.id}',${o.colorIndex})">Atur Operator</button><button class="btn sm v3-open-wf" onclick="v3OpenWorkflow('${o.id}')">Panel V3</button></div>`:`<div class="row-actions"><button class="btn sm v3-open-wf" onclick="v3OpenWorkflow('${o.id}')">Panel V3</button><button class="actionlink" aria-label="Detail Jadwal ${escape(o.id)}" onclick="showScheduleDetail('${o.id}')"><span class="infoicon">i</span> Jadwal</button></div>`}
@@ -1998,19 +2070,55 @@ function flow31LineSource(o,lineId){return (o.sourceLines||[]).find(l=>l.id===li
 function flow31TaskId(t,line){return `${t}@${line}`}
 function flow31Parse(id){const p=String(id).split('@');return {kind:p[0],lineId:p.slice(1).join('@')}}
 function flow31Tasks(o){if(o.deleted)return [];
- const tasks=[];for(const l of o.sourceLines||[]){const print=l.processSnapshot==='PRINT';const types=print?['design','schedule','screen','prepare','sample','sampleapprove','print','packing']:['stockprep','stockpack'];for(const kind of types){const proto=[...TASK_DEFS,...NONPRINT_TASK_DEFS].find(x=>x.id===kind);tasks.push({...proto,id:flow31TaskId(kind,l.id),kind,group:kind==='stockprep'?'prepare':kind==='stockpack'?'packing':kind,lineId:l.id, label:flow31TaskNames[kind]+' · '+(accurateItem(l.itemId)?.name||l.itemId)})}}
- if(o.sourceLines?.length)tasks.push({...TASK_DEFS.find(x=>x.id==='driver'),id:flow31TaskId('driver','SO'),kind:'driver',group:'driver',lineId:'SO',label:'Pengiriman · '+o.name});return tasks}
+ const tasks=[];for(const l of o.sourceLines||[]){
+  const mode=effectiveLineMode(o,l);
+  if(mode==='UNKNOWN')continue; // verification queue is Jadwal/Inbox — not fake print/non-print tasks
+  const print=mode==='PRINT';
+  let types;
+  if(print){
+   // Official: Upload Design without payment; downstream only after schedule evidence.
+   const hasSchedule=isLiveInbox()
+    ?(Array.isArray(o.productionAssignments)&&o.productionAssignments.some(a=>String(a.soLineId||a.lineId||'')===String(l.id)))
+    :!!(flow31Line(o,l.id)?.schedule?.length);
+   types=hasSchedule
+    ?['design','schedule','screen','prepare','sample','sampleapprove','print','packing']
+    :['design','schedule'];
+  }else{
+   types=gateOk(paymentGateLabel(o))?['stockprep','stockpack']:[]; // non-print: no fake screen/sample/print
+  }
+  for(const kind of types){const proto=[...TASK_DEFS,...NONPRINT_TASK_DEFS].find(x=>x.id===kind);if(!proto)continue;tasks.push({...proto,id:flow31TaskId(kind,l.id),kind,group:kind==='stockprep'?'prepare':kind==='stockpack'?'packing':kind,lineId:l.id, label:flow31TaskNames[kind]+' · '+(l.name||accurateItem(l.itemId)?.name||l.itemId||o.item)})}
+ }
+ if((o.sourceLines||[]).length&&!isLiveInbox())tasks.push({...TASK_DEFS.find(x=>x.id==='driver'),id:flow31TaskId('driver','SO'),kind:'driver',group:'driver',lineId:'SO',label:'Pengiriman · '+o.name});return tasks}
 function flow31Proof(o,lineId){const l=flow31Line(o,lineId);const src=flow31LineSource(o,lineId);return {l,src}}
 function flow31DoneQty(o,lineId){const {l,src}=flow31Proof(o,lineId);if(!l||!src)return 0;
  const colors=o.inkColors?.length||1;const lots=[...new Set(l.schedule.map(a=>a.lotId||'LOT-01'))];
  return Math.min(src.qty,lots.reduce((sum,lot)=>sum+Math.min(...Array.from({length:colors},(_,i)=>l.output.filter(x=>x.colorIndex===i+1&&x.lotId===lot).reduce((s,x)=>s+x.qty,0))),0))}
 function flow31TaskState(o,t){if(!o||o.deleted)return 'Menunggu';const kind=t.kind||flow31Parse(t.id).kind;const lineId=t.lineId||flow31Parse(t.id).lineId;const f=flow31(o);const l=f?.lines[lineId];const src=flow31LineSource(o,lineId);
  if(kind==='driver')return f.sj.length&&f.sj.every(s=>s.received===s.qty)&&flow31ReadyToShip(o)===0?'Selesai':(flow31ReadyToShip(o)>0||f.sj.some(s=>s.active&&s.received<s.qty))&&intakeApproved(o)?'Siap':'Menunggu';
- if(!l||!src)return 'Menunggu';if(o.stage==='inbox'||!intakeApproved(o))return 'Menunggu';
+ // Design upload remains available without payment / before release from inbox.
+ if(kind==='design'){
+  if(isLiveInbox()){
+   if(gateOk(designGateLabel(o)))return'Selesai';
+   return'Siap';
+  }
+  if(!l)return'Menunggu';
+  return l.designFile||gateFor(o).design==='BYPASSED'?'Selesai':'Siap';
+ }
+ // Penjadwalan: visible/actionable when payment gate satisfied; confirm still needs design (enforced on save).
+ if(kind==='schedule'){
+  if(isLiveInbox()){
+   const hasAsg=Array.isArray(o.productionAssignments)&&o.productionAssignments.some(a=>String(a.soLineId||a.lineId||'')===String(lineId));
+   if(hasAsg)return'Selesai';
+   return gateOk(paymentGateLabel(o))?'Siap':'Menunggu';
+  }
+  if(!l||!src)return'Menunggu';
+  return l.schedule.length?'Selesai':l.designFile||gateFor(o).design==='BYPASSED'?'Siap':'Menunggu';
+ }
+ if(!l||!src)return 'Menunggu';
+ if(!isLiveInbox()&&(o.stage==='inbox'||!intakeApproved(o)))return 'Menunggu';
+ if(isLiveInbox()&&!bothOfficialGatesOk(o)&&!['design','schedule'].includes(kind))return 'Menunggu';
  if(kind==='stockprep')return l.stockPrepared>=src.qty?'Selesai':'Siap';
  if(kind==='stockpack')return l.stockPacked>=src.qty?'Selesai':l.stockPrepared>l.stockPacked?'Siap':'Menunggu';
- if(kind==='design')return l.designFile||gateFor(o).design==='BYPASSED'?'Selesai':'Siap';
- if(kind==='schedule')return l.schedule.length?'Selesai':l.designFile||gateFor(o).design==='BYPASSED'?'Siap':'Menunggu';
  if(kind==='screen')return l.screen!==null?'Selesai':l.schedule.length?'Siap':'Menunggu';
  if(kind==='prepare')return l.prepared!==null?'Selesai':l.schedule.length?'Siap':'Menunggu';
  if(kind==='sample')return l.sampleFile?'Selesai':l.screen!==null&&l.prepared!==null?'Siap':'Menunggu';
@@ -2031,12 +2139,20 @@ function flow31Sync(o){const f=flow31(o);if(!f)return;const p=o.sourceLines.filt
 function flow31ReadyLine(o,lineId){const f=flow31(o),src=flow31LineSource(o,lineId),l=f?.lines[lineId];if(!src||!l)return 0;const packed=src.processSnapshot==='PRINT'?l.packed:l.stockPacked;return Math.max(0,packed-f.sj.filter(s=>s.lineId===lineId).reduce((n,s)=>n+s.qty,0))}
 function flow31ReadyToShip(o){return o.sourceLines.reduce((sum,l)=>sum+flow31ReadyLine(o,l.id),0)}
 // The same task list feeds cards, spreadsheet rows and all detail actions.
-allTasks=function(){return active().flatMap(o=>flow31Tasks(o).map(t=>({o,t,e:flow31Entry(o,t),status:flow31TaskState(o,t),lineItem:t.lineId==='SO'?o.name:accurateItem(flow31LineSource(o,t.lineId)?.itemId)?.name||o.item}))) };
-taskGroupId=function(t){return t.group||flow31Parse(t.id).kind};
-taskEntry=function(o,t){return flow31Entry(o,t)};
-taskStatus=function(o,t){return flow31TaskState(o,t)};
+const flow31AllTasks=function(){return active().flatMap(o=>flow31Tasks(o).map(t=>({o,t,e:flow31Entry(o,t),status:flow31TaskState(o,t),lineItem:t.lineId==='SO'?o.name:accurateItem(flow31LineSource(o,t.lineId)?.itemId)?.name||o.item}))) };
+allTasks=function(){
+ // Slice 1H: live uses canonical /production/jobs/tasks — never flow31 demo synthesis.
+ if(isOfficialTasksLive())return window.__V3_OFFICIAL_TASKS__.slice();
+ if(isLiveInbox())return []; // empty until official sync lands (no demo inflation)
+ return flow31AllTasks();
+};
+taskGroupId=function(t){if(isOfficialTasksLive())return t.group||t.id;return t.group||flow31Parse(t.id).kind};
+taskEntry=function(o,t){if(isOfficialTasksLive()||isLiveInbox())return {status:'Menunggu',note:'',updated:'V3',qty:0,file:''};return flow31Entry(o,t)};
+taskStatus=function(o,t){if(isOfficialTasksLive()){const row=(window.__V3_OFFICIAL_TASKS__||[]).find(x=>x.o.id===o.id&&x.t.id===t.id);return row?row.status:'Menunggu'}if(isLiveInbox())return 'Menunggu';return flow31TaskState(o,t)};
 // one detail renderer per task kind; no secondary saveTask() mutation.
-openTask=function(id,type){const o=orders.find(x=>x.id===id&&!x.deleted);if(!o)return;const q=flow31Parse(type),kind=q.kind,lineId=q.lineId,l=flow31Line(o,lineId),src=flow31LineSource(o,lineId),title=flow31TaskNames[kind]||kind;const current=flow31TaskState(o,{kind,lineId});const blocked=current==='Menunggu';let fields='';const readonly=`<p class="flow31-notice">${blocked?'Tugas belum memenuhi gate. Selesaikan tahap sebelumnya.':'Tugas mengikuti bukti dari ledger produksi V1; tidak bisa melewati tahap dengan mengganti status manual.'}</p>`;
+openTask=function(id,type){const o=orders.find(x=>x.id===id&&!x.deleted);if(!o)return;
+ if(isLiveInbox()){if(typeof window.v3OpenWorkflow==='function'){window.v3OpenWorkflow(id);return}toast('Panel V3 belum siap');return}
+ const q=flow31Parse(type),kind=q.kind,lineId=q.lineId,l=flow31Line(o,lineId),src=flow31LineSource(o,lineId),title=flow31TaskNames[kind]||kind;const current=flow31TaskState(o,{kind,lineId});const blocked=current==='Menunggu';let fields='';const readonly=`<p class="flow31-notice">${blocked?'Tugas belum memenuhi gate. Selesaikan tahap sebelumnya.':'Tugas mengikuti bukti dari ledger produksi V1; tidak bisa melewati tahap dengan mengganti status manual.'}</p>`;
  if(kind==='design'||kind==='sample')fields=`<label>File ${kind==='design'?'desain':'sampel'} (nama file demo)<input type="file" id="flow31-file" accept=".pdf,.png,.jpg,.jpeg,.svg,.ai,.cdr"></label><small>File demo hanya menyimpan nama, bukan isi file.</small>`;
  if(kind==='schedule')fields=`<div class="flow31-scroll"><table class="flow31-grid"><thead><tr><th>Operator</th><th>Warna ke</th><th>Ukuran Screen</th><th>Tanggal</th><th>Lot</th><th>Qty Target</th><th>Selesai</th></tr></thead><tbody>${l.schedule.map(a=>`<tr><td>${escape(a.operator)}</td><td>${a.colorIndex}</td><td>${a.screenSize}</td><td>${a.date}</td><td>${escape(a.lotId||'LOT-01')}</td><td>${fmt(a.qty)}</td><td>${fmt(l.output.filter(x=>x.assignmentId===a.id).reduce((s,x)=>s+x.qty,0))}</td></tr>`).join('')||'<tr><td colspan="7">Belum ada operator dijadwalkan</td></tr>'}</tbody></table></div><div class="flow31-gridform"><label>Nama Operator<input id="flow31-operator" placeholder="Bima"></label><label>Warna<select id="flow31-color">${(o.inkColors||[{order:1,name:'Warna 1'}]).map(c=>`<option value="${c.order}">${c.order} — ${escape(c.name)}</option>`).join('')}</select></label><label>Ukuran Screen<select id="flow31-size"><option>Kecil</option><option>Besar</option></select></label><label>Tanggal<input id="flow31-date" type="date" value="2026-11-10"></label><label>Lot<input id="flow31-lot" value="LOT-01" placeholder="LOT-01"></label><label>Target Qty<input id="flow31-qty" type="number" min="1" placeholder="Qty"></label></div><p>Tambah operator sebanyak diperlukan; setiap warna/lot memiliki alokasi tersendiri. Tidak menggunakan jadwal mesin.</p>`;
  if(kind==='screen')fields='<label>Jumlah screen disiapkan<input id="flow31-qty" type="number" min="1" value="1"></label>';
@@ -2079,16 +2195,63 @@ showShippingDetail=function(id){flow31OpenShip(id)};
 saveShippingPlan=function(id){toast('Pengaturan pengiriman hanya melalui detail per SJ, bukan form PO kedua.');go('shippingSchedule')};
 // for existing schedule sheet: reflect canonical assignment per line (printing only).
 const flow31OldScheduleColorRows=scheduleColorRows;
-scheduleColorRows=function(rows){return rows.flatMap(o=>{const f=flow31(o);if(!f)return flow31OldScheduleColorRows([o]);const printLines=o.sourceLines.filter(l=>l.processSnapshot==='PRINT');if(!printLines.length)return[];return printLines.flatMap(line=>{const l=f.lines[line.id],colors=o.inkColors?.length||1;return Array.from({length:colors},(_,ci)=>{const forColor=l.schedule.filter(a=>a.colorIndex===ci+1);return (forColor.length?forColor:[{id:'',qty:0,operator:'',screenSize:'',date:'',colorIndex:ci+1}]).map(a=>({...o,colorWorkItem:true,colorIndex:ci+1,colorName:o.inkColors?.[ci]?.name||'Warna '+(ci+1),operator:a.operator,machine:a.screenSize,assignmentId:a.id,assignmentQty:a.qty,assignmentCompleted:l.output.filter(e=>e.assignmentId===a.id).reduce((s,e)=>s+e.qty,0),assignmentDate:a.date||'',colorRowKey:o.id+'#'+line.id+'#'+ci+'#'+a.id}))}).flat()})})};
+function liveScheduleMonitorRows(o){
+ const out=[];
+ const asgs=Array.isArray(o.productionAssignments)?o.productionAssignments:[];
+ for(const line of printLines(o)){
+  const lineId=String(line.id||'');
+  const matching=asgs.filter(a=>String(a.soLineId||a.lineId||'')===lineId);
+  const lineName=line.name||o.item||'Item cetak';
+  const lineQty=Number.isFinite(Number(line.qty))?Math.max(0,Number(line.qty)):0;
+  if(matching.length){
+   matching.forEach((a,i)=>{
+    const st=scheduleMonitorStatus(o,'PRINT',true);
+    out.push({...o,colorWorkItem:true,scheduleLineId:lineId,scheduleProcess:'PRINT',item:lineName,lineQty,
+     colorIndex:Number(a.colorIndex)||i+1,colorName:a.colorName||line.color||('Warna '+(Number(a.colorIndex)||i+1)),
+     operator:a.operator||'',machine:a.machine||'',assignmentId:a.id||'',assignmentQty:Number(a.targetQty)||0,
+     assignmentCompleted:a.completedQty,assignmentDate:a.workDate||'',scheduleMonitorStatus:st,
+     colorRowKey:o.id+'#'+lineId+'#A'+(a.id||i)});
+   });
+  }else{
+   const st=scheduleMonitorStatus(o,'PRINT',false);
+   out.push({...o,colorWorkItem:true,scheduleLineId:lineId,scheduleProcess:'PRINT',item:lineName,lineQty,
+    colorIndex:1,colorName:line.color||'Belum tercatat',operator:'',machine:'',assignmentId:'',assignmentQty:0,
+    assignmentCompleted:null,assignmentDate:'',scheduleMonitorStatus:st,
+    colorRowKey:o.id+'#'+lineId+'#empty'});
+  }
+ }
+ for(const line of unknownLines(o)){
+  out.push({...o,colorWorkItem:true,scheduleLineId:String(line.id||''),scheduleProcess:'UNKNOWN',processVerify:'unknown',
+   item:line.name||o.item||'Item',lineQty:Number.isFinite(Number(line.qty))?Math.max(0,Number(line.qty)):0,
+   colorIndex:0,colorName:line.color||'—',operator:'',machine:'',assignmentId:'',assignmentQty:0,
+   assignmentCompleted:null,assignmentDate:'',scheduleMonitorStatus:'Proses Belum Terverifikasi',
+   processVerifyReason:'Klasifikasi proses Accurate belum terbukti — bukan antrean operator cetak',
+   colorRowKey:o.id+'#UNK#'+String(line.id||'')});
+ }
+ return out;
+}
+scheduleColorRows=function(rows){
+ if(isLiveInbox())return rows.flatMap(o=>liveScheduleMonitorRows(o));
+ return rows.flatMap(o=>{const f=flow31(o);if(!f)return flow31OldScheduleColorRows([o]);const print=o.sourceLines.filter(l=>effectiveLineMode(o,l)==='PRINT');if(!print.length)return[];return print.flatMap(line=>{const l=f.lines[line.id];if(!l)return[];const colors=o.inkColors?.length||1;return Array.from({length:colors},(_,ci)=>{const forColor=l.schedule.filter(a=>a.colorIndex===ci+1);return (forColor.length?forColor:[{id:'',qty:0,operator:'',screenSize:'',date:'',colorIndex:ci+1}]).map(a=>({...o,colorWorkItem:true,colorIndex:ci+1,colorName:o.inkColors?.[ci]?.name||'Warna '+(ci+1),operator:a.operator,machine:a.screenSize,assignmentId:a.id,assignmentQty:a.qty,assignmentCompleted:l.output.filter(e=>e.assignmentId===a.id).reduce((s,e)=>s+e.qty,0),assignmentDate:a.date||'',scheduleMonitorStatus:scheduleMonitorStatus(o,'PRINT',!!a.id),colorRowKey:o.id+'#'+line.id+'#'+ci+'#'+a.id}))}).flat()})});
+};
 const flow31OldProdQty=productionQty;
-productionQty=function(o){const f=flow31(o);if(!f)return flow31OldProdQty(o);const print=o.sourceLines.filter(l=>l.processSnapshot==='PRINT');const qty=print.reduce((s,l)=>s+l.qty,0),scheduled=print.reduce((s,line)=>s+f.lines[line.id].schedule.filter(a=>a.colorIndex===1).reduce((n,a)=>n+a.qty,0),0),done=print.reduce((s,l)=>s+flow31DoneQty(o,l.id),0),packed=print.reduce((s,l)=>s+f.lines[l.id].packed,0);return {qty,scheduled,done,packed,remainingTotal:Math.max(0,qty-done),remainingScheduled:Math.max(0,scheduled-done),unassigned:Math.max(0,qty-scheduled),invalid:done>qty||packed>done}};
+productionQty=function(o){
+ if(isLiveInbox())return flow31OldProdQty(o);
+ const f=flow31(o);if(!f)return flow31OldProdQty(o);const print=(o.sourceLines||[]).filter(l=>effectiveLineMode(o,l)==='PRINT');const qty=print.reduce((s,l)=>s+(Number(l.qty)||0),0),scheduled=print.reduce((s,line)=>s+(f.lines[line.id]?.schedule.filter(a=>a.colorIndex===1).reduce((n,a)=>n+a.qty,0)||0),0),done=print.reduce((s,l)=>s+flow31DoneQty(o,l.id),0),packed=print.reduce((s,l)=>s+(f.lines[l.id]?.packed||0),0);return {qty,scheduled,done,packed,remainingTotal:Math.max(0,qty-done),remainingScheduled:Math.max(0,scheduled-done),unassigned:Math.max(0,qty-scheduled),invalid:done>qty||packed>done,unknownQty:unknownPhysicalQty(o)};
+};
 // Never let old shortcuts create a second source of output or stage changes.
 advance=function(id,stage){toast('Perpindahan tahap manual dinonaktifkan. Gunakan Tugas Tim sesuai bukti pekerjaan.');go('tasks')};
 inputOutput=function(id){toast('Gunakan Tugas Tim → Konfirmasi Qty Cetak untuk hasil operator per assignment.');go('tasks')};
 inputPacking=function(id){toast('Gunakan Tugas Tim → Packing untuk bukti per produk.');go('tasks')};
 saveTask=function(id,type){return flow31Save(id,type)};
-openScheduleEditor=function(id){const o=orders.find(x=>x.id===id);if(!o){return}const l=o.sourceLines?.find(l=>l.processSnapshot==='PRINT');if(!l){toast('PO non-cetak tidak memerlukan jadwal operator');go('tasks');return}openTask(id,flow31TaskId('schedule',l.id))};
-showScheduleDetail=function(id){const o=orders.find(x=>x.id===id);if(!o)return;const l=o.sourceLines?.find(l=>l.processSnapshot==='PRINT');if(l)return openTask(id,flow31TaskId('schedule',l.id));go('tasks')};
+openScheduleEditor=function(id){const o=orders.find(x=>x.id===id);if(!o){return}const l=(o.sourceLines||[]).find(line=>effectiveLineMode(o,line)==='PRINT');if(!l){toast(hasUnknownLine(o)?'Ada line proses belum terverifikasi — selesaikan klasifikasi sebelum jadwal operator':'PO non-cetak tidak memerlukan jadwal operator');return}
+ if(isLiveInbox()){
+  if(!bothOfficialGatesOk(o))toast('Monitoring boleh tanpa ACC; simpan jadwal tetap membutuhkan Design Gate + Payment Gate');
+  if(typeof window.v3OpenWorkflow==='function'){window.v3OpenWorkflow(id);return}
+  toast('Panel V3 belum siap — tidak menyimpan jadwal simulasi pada mode Live');return;
+ }
+ openTask(id,flow31TaskId('schedule',l.id))};
+showScheduleDetail=function(id){const o=orders.find(x=>x.id===id);if(!o)return;const l=(o.sourceLines||[]).find(line=>effectiveLineMode(o,line)==='PRINT');if(l){if(isLiveInbox()&&typeof window.v3OpenWorkflow==='function'){window.v3OpenWorkflow(id);return}return openTask(id,flow31TaskId('schedule',l.id))}if(hasUnknownLine(o)){toast('Line proses belum terverifikasi — belum masuk antrean operator cetak');return}go('tasks')};
 // Delivery read model: separate SJ per PO, no active documents generated by a schedule.
 shippingScheduleView=function(){const rows=active().flatMap(o=>flow31(o).sj.filter(s=>s.active).map(s=>({o,s})));return heading('Jadwal Pengiriman','SJ Accurate merupakan sumber otoritatif. Di sini hanya dibuat referensi SJ simulasi; Loading dan POD tidak digabung dengan qty produksi.',`<button class="btn primary sm" onclick="flow31OpenShip()">+ Tambah SJ Demo</button>`)+`<div class="flow31-scroll"><table class="sheet excel-sheet flow31-grid"><thead><tr>${['No SJ','No SO','Pelanggan','Produk','Qty SJ','Loaded','Diterima','Kurir','Tanggal','Status','Detail'].map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${rows.map(({o,s})=>`<tr><td>${escape(s.ref)}</td><td>${escape(o.id)}</td><td>${escape(o.name)}</td><td>${escape(accurateItem(flow31LineSource(o,s.lineId)?.itemId)?.name||'—')}</td><td>${fmt(s.qty)}</td><td>${fmt(s.loaded)}</td><td>${fmt(s.received)}</td><td>${escape(s.driver||'—')}</td><td>${escape(s.date)}</td><td>${escape(s.status)}</td><td><button class="btn sm" onclick="flow31OpenShip('${escape(o.id)}','${escape(s.ref)}')">ⓘ Pengiriman</button></td></tr>`).join('')||'<tr><td colspan="11">Belum ada SJ aktif. Buat referensi SJ demo setelah packing siap.</td></tr>'}</tbody></table></div>`};
 function flow31OpenShip(oid='',ref=''){const o=orders.find(x=>x.id===oid)||active().find(x=>flow31ReadyToShip(x)>0)||active()[0];if(!o)return;const f=flow31(o),s=f.sj.find(x=>x.ref===ref),qtyRemain=flow31ReadyToShip(o);$('modal').innerHTML=`<div class="drawerback" onclick="if(event.target===this)closeScheduleDetail()"><aside class="detaildrawer shipping-drawer" role="dialog" aria-modal="true" onclick="event.stopPropagation()"><div class="drawerhead"><div><div class="eyebrow">PENGIRIMAN · DATA DEMO</div><h2>${s?'Detail SJ '+escape(s.ref):'Tambah Referensi SJ'}</h2><small>${escape(o.id)} · ${escape(o.name)}</small></div><button class="btn sm" onclick="closeScheduleDetail()">✕ Tutup</button></div><div class="drawerbody"><div class="flow31-metrics"><span>Siap Kirim (sisa): <b>${fmt(qtyRemain)} pcs</b></span>${s?`<span>Qty SJ: <b>${fmt(s.qty)}</b></span><span>Loaded: <b>${fmt(s.loaded)}</b></span><span>Diterima: <b>${fmt(s.received)}</b></span>`:''}</div><div class="flow31-form">${s?`<label>Qty Loading tambahan<input id="flow31-load" type="number" min="1" max="${s.qty-s.loaded}"></label><label>Qty diterima tambahan<input id="flow31-receive" type="number" min="1" max="${s.loaded-s.received}"></label><label>Nama penerima<input id="flow31-receiver" placeholder="Nama penerima"></label><label>Foto penerimaan (referensi)<input id="flow31-proof" type="file" accept="image/*"></label><label>TTD penerima (referensi nama) <input id="flow31-sign" placeholder="Nama / referensi TTD"></label>`:`<label>PO<select id="flow31-order">${active().map(x=>`<option value="${escape(x.id)}" ${x.id===o.id?'selected':''}>${escape(x.id)} — ${escape(x.name)}</option>`).join('')}</select></label><label>Baris Produk<select id="flow31-shipline">${o.sourceLines.map(l=>`<option value="${escape(l.id)}">${escape(accurateItem(l.itemId)?.name||l.itemId)} · siap ${fmt(flow31ReadyLine(o,l.id))} pcs</option>`).join('')}</select></label><label>Nomor SJ Dummy<input id="flow31-sj" placeholder="SJ/10/11/2026/001"></label><label>Qty SJ<input id="flow31-sjqty" type="number" min="1"></label><label>Tanggal Kirim<input id="flow31-shipdate" type="date" value="2026-11-10"></label><label>Kurir<input id="flow31-driver" placeholder="Nama kurir"></label>`}</div><div class="flow31-notice">Pengiriman membutuhkan SJ aktif, packing cukup, Loading terkonfirmasi, nama penerima, foto, dan TTD. Bukti hanya referensi lokal.</div></div><div class="drawerfoot"><button class="btn" onclick="closeScheduleDetail()">Tutup</button>${s?`<button class="btn" onclick="flow31ShipAction('${escape(o.id)}','${escape(s.ref)}','load')">Konfirmasi Loading</button><button class="btn primary" onclick="flow31ShipAction('${escape(o.id)}','${escape(s.ref)}','receive')">Konfirmasi POD</button><button class="btn danger" onclick="flow31ShipAction('${escape(o.id)}','${escape(s.ref)}','archive')">Arsip SJ</button>`:`<button class="btn primary" onclick="flow31ShipAction('${escape(o.id)}','','create')">Simpan SJ Demo</button>`}</div></aside></div>`}
