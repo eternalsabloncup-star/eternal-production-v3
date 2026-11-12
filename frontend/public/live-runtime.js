@@ -417,33 +417,44 @@
       o.salesName = String(detail.sales).trim();
       o.salesSource = detail.sales_source || o.salesSource || "detail";
       o.salesMissingReason = null;
-    } else {
-      // Never fall back to creator / branch / login user.
+    } else if (
+      !o.salesName ||
+      o.salesName === "Belum terverifikasi"
+    ) {
+      // Never fall back to creator / branch / login; never wipe a verified list sales.
       o.salesName = "Belum terverifikasi";
-      o.salesSource = detail.sales_source || null;
+      o.salesSource = detail.sales_source || o.salesSource || null;
       o.salesMissingReason = "accurate_sales_field_absent";
     }
-    o.createdByUser = detail.created_by_user || o.createdByUser || null;
-    o.orderDate = detail.order_date || o.orderDate || null;
-    o.address = detail.address || null;
-    o.paymentTerms = detail.payment_terms || null;
-    o.expedition = detail.expedition || null;
-    o.deliveryZone = detail.delivery_zone || null;
-    o.poNotes = detail.notes || null;
+    if (detail.created_by_user) o.createdByUser = detail.created_by_user;
+    if (detail.order_date) o.orderDate = detail.order_date;
+    if (detail.address) o.address = detail.address;
+    if (detail.payment_terms) o.paymentTerms = detail.payment_terms;
+    if (detail.expedition) o.expedition = detail.expedition;
+    if (detail.delivery_zone) o.deliveryZone = detail.delivery_zone;
+    if (detail.notes) o.poNotes = detail.notes;
     o.ship = detail.deadline || detail.estimated_delivery || o.ship || null;
-    o.orderPriority =
+    if (
       detail.urgent_state === "approved_urgent" ||
       detail.urgent_state === "legacy_urgent"
-        ? "Urgent"
-        : detail.urgent_state === "normal"
-          ? "Normal"
-          : "Belum terverifikasi";
-    o.bufferLabel =
-      detail.buffer_stock === true
-        ? "Buffer"
-        : detail.buffer_stock === false
-          ? "Non-Buffer"
-          : "Belum terverifikasi";
+    ) {
+      o.orderPriority = "Urgent";
+      o.urgentState = String(detail.urgent_state);
+    } else if (detail.urgent_state === "normal") {
+      o.orderPriority = "Normal";
+      o.urgentState = "normal";
+    } else if (!o.orderPriority) {
+      o.orderPriority = "Belum terverifikasi";
+    }
+    if (detail.buffer_stock === true) {
+      o.bufferLabel = "Buffer";
+      o.bufferStock = true;
+    } else if (detail.buffer_stock === false) {
+      o.bufferLabel = "Non-Buffer";
+      o.bufferStock = false;
+    } else if (!o.bufferLabel) {
+      o.bufferLabel = "Belum terverifikasi";
+    }
     o.itemCodes = o.sourceLines
       .map(function (x) {
         return x.item_code;

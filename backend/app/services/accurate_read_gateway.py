@@ -310,8 +310,12 @@ async def get_sales_order(gateway: ReadGateway, number: str) -> dict:
             "sales_source": so.get("sales_source")
             if so.get("sales_source") is not None
             else result.get("sales_source"),
-            "buffer_stock": result.get("buffer_stock"),
-            "urgent_state": result.get("urgent_state"),
+            "buffer_stock": so.get("buffer_stock")
+            if so.get("buffer_stock") is not None
+            else result.get("buffer_stock"),
+            "urgent_state": so.get("urgent_state")
+            if so.get("urgent_state") is not None
+            else result.get("urgent_state"),
         }
     )
     return result

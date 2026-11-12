@@ -56,6 +56,12 @@ def _sales_from_list(block: Any) -> list[str]:
     names: list[str] = []
     for entry in block:
         if isinstance(entry, dict):
+            nested = (
+                entry.get("salesman")
+                or entry.get("salesPerson")
+                or entry.get("salesperson")
+                or entry.get("sales")
+            )
             name = _first_str(
                 entry.get("name"),
                 entry.get("salesmanName"),
@@ -63,6 +69,11 @@ def _sales_from_list(block: Any) -> list[str]:
                 entry.get("salespersonName"),
                 entry.get("fullName"),
                 entry.get("nama"),
+                nested if isinstance(nested, dict) else None,
+                nested.get("name") if isinstance(nested, dict) else None,
+                nested.get("fullName") if isinstance(nested, dict) else None,
+                nested.get("salesmanName") if isinstance(nested, dict) else None,
+                nested.get("salesPersonName") if isinstance(nested, dict) else None,
             )
         else:
             name = _first_str(entry)
@@ -70,6 +81,147 @@ def _sales_from_list(block: Any) -> list[str]:
             names.append(name)
     # Preserve order, drop duplicates.
     return list(dict.fromkeys(names))
+
+
+def _label_matches(label: str | None, aliases: tuple[str, ...]) -> bool:
+    if not label:
+        return False
+    norm = " ".join(str(label).strip().lower().replace("_", " ").replace("-", " ").split())
+    if not norm:
+        return False
+    for alias in aliases:
+        a = " ".join(alias.lower().split())
+        if norm == a or a in norm or norm in a:
+            return True
+    return False
+
+
+def _custom_field_by_label(raw: dict[str, Any], aliases: tuple[str, ...]) -> str | None:
+    """Map Accurate charField*/customField* only when a companion label proves the meaning.
+
+    Unlabeled charField noise must never invent Buffer/Urgent/Cetak/Ekspedisi.
+    """
+    for i in range(1, 21):
+        label = _first_str(
+            raw.get(f"charField{i}Name"),
+            raw.get(f"charField{i}Label"),
+            raw.get(f"charField{i}Title"),
+            raw.get(f"customField{i}Name"),
+            raw.get(f"customField{i}Label"),
+            raw.get(f"dataClassification{i}Name"),
+        )
+        if not _label_matches(label, aliases):
+            continue
+        value = _first_str(
+            raw.get(f"charField{i}"),
+            raw.get(f"customField{i}"),
+            raw.get(f"dataClassification{i}"),
+        )
+        if value:
+            return value
+    # Optional Accurate-style list of labeled custom fields.
+    for key in ("customFieldList", "charFieldList", "dataClassificationList"):
+        block = raw.get(key)
+        if not isinstance(block, list):
+            continue
+        for entry in block:
+            if not isinstance(entry, dict):
+                continue
+            label = _first_str(
+                entry.get("name"),
+                entry.get("label"),
+                entry.get("title"),
+                entry.get("fieldName"),
+            )
+            if not _label_matches(label, aliases):
+                continue
+            value = _first_str(
+                entry.get("value"),
+                entry.get("val"),
+                entry.get("text"),
+                entry.get("nameValue"),
+            )
+            if value:
+                return value
+    return None
+
+
+_EXPEDITION_LABELS = (
+    "ekspedisi",
+    "expedition",
+    "kurir",
+    "courier",
+    "shipping",
+    "metode kirim",
+    "cara kirim",
+)
+_ZONE_LABELS = (
+    "zona",
+    "zone",
+    "zona pengiriman",
+    "delivery zone",
+    "wilayah kirim",
+)
+_BUFFER_LABELS = (
+    "buffer",
+    "buffer stock",
+    "buffer/non-buffer",
+    "buffer / non-buffer",
+    "non-buffer",
+)
+_ORDER_STATUS_LABELS = (
+    "status pesanan",
+    "order priority",
+    "prioritas",
+    "urgent",
+    "status urgent",
+)
+_PROCESS_LABELS = (
+    "proses",
+    "proses barang",
+    "production process",
+    "cetak",
+    "jenis proses",
+)
+_COLOR_LABELS = (
+    "warna",
+    "warna barang",
+    "color",
+    "ink",
+    "warna tinta",
+)
+
+
+def _parse_buffer_stock(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    norm = str(value).strip().lower().replace("_", " ").replace("-", " ")
+    norm = " ".join(norm.split())
+    if norm in {"buffer", "ya", "yes", "true", "1", "buffer stock"}:
+        return True
+    if norm in {
+        "non buffer",
+        "nonbuffer",
+        "tidak",
+        "no",
+        "false",
+        "0",
+        "bukan buffer",
+    }:
+        return False
+    return None
+
+
+def _parse_urgent_state(value: str | None) -> str | None:
+    if value is None:
+        return None
+    norm = str(value).strip().lower().replace("_", " ").replace("-", " ")
+    norm = " ".join(norm.split())
+    if norm in {"normal", "reguler", "regular", "standar"}:
+        return "normal"
+    if norm in {"urgent", "approved urgent", "legacy urgent", "ya", "yes", "true"}:
+        return "approved_urgent"
+    return None
 
 
 def _extract_sales(raw: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -173,15 +325,16 @@ def _qty(row: dict[str, Any]) -> float:
 
 
 def _explicit_production_process(row: dict[str, Any]) -> str:
-    """Only exact print|non_print from an explicit production_process field.
+    """print|non_print from explicit process field or labeled custom field only.
 
-    Never infer from charField*, numericField*, item flags, or name heuristics.
-    Never treat blank as print (legacy V1 fallback is intentionally not copied).
-    Missing/unrecognized → unknown.
+    Never infer from unlabeled charField*, item master flags, or product-name heuristics.
+    Never treat blank as print. Missing/unrecognized → unknown.
     """
     raw = row.get("production_process")
     if raw is None:
         raw = row.get("productionProcess")
+    if raw is None:
+        raw = _custom_field_by_label(row, _PROCESS_LABELS)
     if raw is None:
         return "unknown"
     normalized = str(raw).strip().lower().replace(" ", "_").replace("-", "_")
@@ -190,7 +343,7 @@ def _explicit_production_process(row: dict[str, Any]) -> str:
     # Display labels from verified Eternal classification only — not name heuristics.
     if normalized in {"cetak"}:
         return "print"
-    if normalized in {"tidak_cetak", "noncetak", "non-cetak"}:
+    if normalized in {"tidak_cetak", "noncetak", "non_cetak", "tidakcetak"}:
         return "non_print"
     return "unknown"
 
@@ -202,6 +355,8 @@ def _line_color(row: dict[str, Any], item: dict[str, Any]) -> str | None:
         row.get("detailColor"),
         item.get("color"),
         item.get("warna"),
+        _custom_field_by_label(row, _COLOR_LABELS),
+        _custom_field_by_label(item, _COLOR_LABELS) if isinstance(item, dict) else None,
     )
 
 
@@ -313,6 +468,9 @@ def normalize_sales_order_list_item(raw: dict[str, Any]) -> dict[str, Any]:
     so_number = str(raw.get("number") or raw.get("no") or "")
     customer_po = _customer_po_number(raw)
     sales, sales_source = _extract_sales(raw)
+    # Buffer/Urgent only when labeled custom field (or later detail) proves meaning.
+    buffer_stock = _parse_buffer_stock(_custom_field_by_label(raw, _BUFFER_LABELS))
+    urgent_state = _parse_urgent_state(_custom_field_by_label(raw, _ORDER_STATUS_LABELS))
     return {
         "id": _document_id(raw),
         "accurate_id": _document_id(raw),
@@ -328,9 +486,9 @@ def normalize_sales_order_list_item(raw: dict[str, Any]) -> dict[str, Any]:
         "sales": sales,
         # Audit: which Accurate field supplied sales; null ⇒ absent (not creator fallback).
         "sales_source": sales_source,
-        # Slice 0: Buffer/Urgent missing in live Accurate sample — never invent false.
-        "buffer_stock": None,
-        "urgent_state": None,
+        # Nullable — unlabeled / missing stays null (never invent false).
+        "buffer_stock": buffer_stock,
+        "urgent_state": urgent_state,
     }
 
 
@@ -370,7 +528,12 @@ def normalize_sales_order(raw: dict[str, Any]) -> dict[str, Any]:
         raw.get("expedition"),
         raw.get("expeditionName"),
         raw.get("courier"),
+        raw.get("courierName"),
         raw.get("shippingInfo"),
+        raw.get("shippingMethod"),
+        raw.get("shippingMethodName"),
+        raw.get("deliveryMethod"),
+        _custom_field_by_label(raw, _EXPEDITION_LABELS),
     )
     base["estimated_delivery"] = (
         raw.get("estimatedDeliveryDate")
@@ -382,7 +545,16 @@ def normalize_sales_order(raw: dict[str, Any]) -> dict[str, Any]:
         raw.get("deliveryZone"),
         raw.get("zone"),
         raw.get("deliveryZoneName"),
+        raw.get("shipZone"),
+        _custom_field_by_label(raw, _ZONE_LABELS),
     )
+    # Re-resolve Buffer/Urgent on full detail (list often omits custom fields).
+    buffer_stock = _parse_buffer_stock(_custom_field_by_label(raw, _BUFFER_LABELS))
+    urgent_state = _parse_urgent_state(_custom_field_by_label(raw, _ORDER_STATUS_LABELS))
+    if buffer_stock is not None:
+        base["buffer_stock"] = buffer_stock
+    if urgent_state is not None:
+        base["urgent_state"] = urgent_state
     base["notes"] = _first_str(
         raw.get("description"),
         raw.get("notes"),
