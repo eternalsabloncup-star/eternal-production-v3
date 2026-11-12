@@ -10,8 +10,6 @@
     const style = document.createElement("style");
     style.id = "v3-live-style";
     style.textContent =
-      ".v3-inbox-tools{display:flex;flex-wrap:wrap;gap:8px;align-items:end;margin:0 0 10px;padding:8px 10px;background:#fff;border:1px solid #dfe7e9;border-radius:8px}" +
-      ".v3-inbox-tools label{font-size:11px;display:flex;flex-direction:column;gap:4px}" +
       ".v3-actions-grid{display:grid;gap:12px}" +
       ".v3-section{border:1px solid #dce6e8;border-radius:8px;padding:10px;background:#fafcfc}" +
       ".v3-section h3{margin:0 0 8px;font-size:13px}" +
@@ -2163,37 +2161,17 @@
     const content = root.querySelector(".content");
     if (content && !status.parentElement) content.prepend(status);
 
-    // Step 158: no separate "Cari SO" card — in-table search + compact Accurate page pager only.
-    let toolbar = document.getElementById("v3-inbox-tools");
-    if (!toolbar && content) {
-      toolbar = document.createElement("div");
-      toolbar.id = "v3-inbox-tools";
-      toolbar.className = "v3-inbox-tools v3-inbox-pager";
-      toolbar.innerHTML =
-        '<span class="v3-inbox-pager-label">Halaman Accurate</span>' +
-        '<button type="button" class="btn sm" id="v3-inbox-prev">Prev</button>' +
-        '<button type="button" class="btn sm" id="v3-inbox-next">Next</button>' +
-        '<button type="button" class="btn sm" id="v3-inbox-refresh">Refresh</button>';
-      content.prepend(toolbar);
-      document.getElementById("v3-inbox-prev").onclick = function () {
-        if (inboxPage > 1) refreshInbox(inboxPage - 1);
-      };
-      document.getElementById("v3-inbox-next").onclick = function () {
-        refreshInbox(inboxPage + 1);
-      };
-      document.getElementById("v3-inbox-refresh").onclick = function () {
-        refreshInbox(inboxPage);
-      };
-    } else if (toolbar) {
-      toolbar.querySelectorAll("label").forEach(function (el) {
+    // Step 163: remove global Accurate pager (Halaman Accurate / Prev / Next / Refresh)
+    // on every V3 page. Keep refreshInbox() API for programmatic sync — no UI chrome.
+    const legacyPager = document.getElementById("v3-inbox-tools");
+    if (legacyPager) legacyPager.remove();
+    root
+      .querySelectorAll(
+        "#v3-inbox-prev, #v3-inbox-next, #v3-inbox-refresh, .v3-inbox-pager, .v3-inbox-pager-label",
+      )
+      .forEach(function (el) {
         el.remove();
       });
-      const searchBtn = document.getElementById("v3-inbox-search");
-      if (searchBtn) searchBtn.remove();
-      const q = document.getElementById("v3-inbox-q");
-      if (q) q.remove();
-      toolbar.classList.add("v3-inbox-pager");
-    }
 
     root.querySelectorAll(".demo").forEach((x) => x.remove());
     root.querySelectorAll(".v36-sectionhead small").forEach((x) => {
