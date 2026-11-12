@@ -330,11 +330,16 @@ class AccurateClient:
         params: dict[str, Any] = {
             # List is summary-only (no detailItem). Extra identity fields when Accurate returns them.
             "fields": (
+                # Summary-only (no detailItem). Include Owner-approved header CF
+                # slots (Slice 1N CF3/4/5) so list can surface zone/status/buffer
+                # when Accurate returns them — never invent if absent.
                 "id,number,statusName,status,customer,customerId,customerName,"
                 "branch,branchId,branchName,transDate,totalAmount,"
                 "poNumber,poNo,customerPoNumber,"
                 "salesPersonName,salesmanName,salesName,salesPerson,salesmanList,"
-                "salesPersonList,createdUserName,inputUserName"
+                "salesPersonList,createdUserName,inputUserName,"
+                "charField3,charField4,charField5,"
+                "charField3Name,charField4Name,charField5Name"
             ),
             "sp.pageSize": page_size,
             "sp.page": page_n,
