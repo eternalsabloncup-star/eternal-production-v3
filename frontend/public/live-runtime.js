@@ -2124,8 +2124,21 @@
 
   window.v49Close = function () {
     const modal = document.getElementById("modal");
-    if (modal) modal.innerHTML = "";
-    selectedSo = null;
+    const back = modal && modal.querySelector(".drawerback");
+    const reduce =
+      window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const finish = () => {
+      if (modal) modal.innerHTML = "";
+      selectedSo = null;
+    };
+    if (back && !reduce) {
+      back.classList.add("v165-closing");
+      clearTimeout(back._v165c);
+      back._v165c = setTimeout(finish, 160);
+      return;
+    }
+    finish();
   };
 
   const oldRender = window.render;

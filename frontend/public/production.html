@@ -593,6 +593,202 @@ table{border-collapse:separate;border-spacing:0}table thead th{background:#e9f2e
  #v3-app .v44-production-metric:nth-child(2n){border-right:0!important}
 }
 </style>
+
+<style id="v165-living-ui">
+/* Step 165 — living UI: hierarchy, feedback, states, drawer motion. Eternal Green identity. */
+:root{
+  --v165-green:#087b55;
+  --v165-green-deep:#055b42;
+  --v165-green-soft:#f3faf6;
+  --v165-ink:#1a3340;
+  --v165-muted:#5f7580;
+  --v165-line:#d7e3e1;
+  --v165-warn:#9a5b12;
+  --v165-danger:#a43d3d;
+  --v165-info:#1f5f86;
+  --v165-drawer-ms:150ms;
+}
+/* KPI hierarchy: kill uniform solid-green cards */
+#v3-app .v36-kpis.v159-kpi-row{gap:8px!important}
+#v3-app .v36-kpis.v159-kpi-row>div{
+  background:#fff!important;
+  border:1px solid var(--v165-line)!important;
+  border-radius:8px!important;
+  color:var(--v165-ink)!important;
+  box-shadow:none!important;
+  min-height:58px!important;
+  padding:9px 12px!important;
+}
+#v3-app .v36-kpis.v159-kpi-row>div.kpi-primary{
+  border:1px solid #b7d7c8!important;
+  border-left:4px solid var(--v165-green)!important;
+  background:linear-gradient(180deg,#eef8f2 0%,#ffffff 78%)!important;
+}
+#v3-app .v36-kpis.v159-kpi-row>div.kpi-secondary{
+  background:#fff!important;
+  border-color:#dde6e3!important;
+}
+#v3-app .v36-kpis.v159-kpi-row>div.kpi-secondary strong{font-weight:750!important}
+#v3-app .v36-kpis.v159-kpi-row>div :is(span,small){
+  color:var(--v165-muted)!important;
+  font-size:11px!important;
+  font-weight:650!important;
+  opacity:1!important;
+}
+#v3-app .v36-kpis.v159-kpi-row>div strong{
+  color:#064c36!important;
+  font-size:22px!important;
+  font-variant-numeric:tabular-nums;
+  letter-spacing:-.4px;
+}
+#v3-app .v36-kpis.v159-kpi-row>div.kpi-secondary strong{
+  color:#1d4a3d!important;
+  font-size:18px!important;
+}
+/* Schedule KPI: primary vs secondary without solid green flood */
+#v3-app .v44-production-strip.v160-kpi-row{
+  background:#fff!important;
+  border:1px solid var(--v165-line)!important;
+  border-bottom:0!important;
+}
+#v3-app .v44-production-strip.v160-kpi-row .v44-production-metric:nth-child(-n+2){
+  background:var(--v165-green-soft);
+  box-shadow:inset 0 -2px 0 var(--v165-green);
+}
+#v3-app .v44-production-strip.v160-kpi-row .v44-production-metric:nth-child(-n+2) span{
+  color:#0b4f3d!important;font-weight:800!important;
+}
+#v3-app .v44-production-strip.v160-kpi-row .v44-production-metric:nth-child(n+3) span{
+  color:#5d736b!important;
+  font-weight:650!important;
+}
+#v3-app .v44-production-strip.v160-kpi-row .v44-production-metric:nth-child(n+3) strong{
+  color:#2a5446!important;
+  font-size:15px!important;
+}
+#v3-app .v44-production-strip.v160-kpi-row .v44-production-metric:nth-child(-n+2) strong{
+  color:#055b42!important;
+}
+/* Nav / toolbar */
+#v3-app .navbtn{transition:background-color var(--v165-drawer-ms) ease,border-color var(--v165-drawer-ms) ease,color var(--v165-drawer-ms) ease}
+#v3-app .navbtn:hover{background:#f0f7f3}
+#v3-app .navbtn.active{
+  background:#e8f5ee!important;
+  border-color:#c5e4d3!important;
+  box-shadow:inset 3px 0 0 var(--v165-green)!important;
+  color:#065539!important;
+  font-weight:750;
+}
+#v3-app .navbtn:focus-visible{outline:3px solid #7ecdb0;outline-offset:1px}
+#v3-app .v3-quickbar{border-color:var(--v165-line);box-shadow:none}
+#v3-app .v3-quick:hover{border-color:#8fcbb0;background:#f4fbf7}
+/* Table interaction */
+#v3-app .sheet.excel-sheet tbody tr{transition:background-color 120ms ease}
+#v3-app .sheet.excel-sheet tbody tr:hover{background:#eef8f3!important}
+#v3-app .sheet.excel-sheet tbody tr.focused,
+#v3-app .sheet.excel-sheet tbody tr.selected,
+#v3-app .sheet.excel-sheet tbody tr[aria-selected="true"]{
+  background:#e2f4ea!important;
+  box-shadow:inset 3px 0 0 var(--v165-green);
+}
+#v3-app .sheet.excel-sheet tbody tr:hover td[data-column="id"],
+#v3-app .sheet.excel-sheet tbody tr:hover td[data-column="customer"],
+#v3-app .sheet.excel-sheet tbody tr.focused td[data-column="id"],
+#v3-app .sheet.excel-sheet tbody tr.focused td[data-column="customer"],
+#v3-app .sheet.excel-sheet tbody tr.selected td[data-column="id"],
+#v3-app .sheet.excel-sheet tbody tr.selected td[data-column="customer"]{
+  background:inherit!important;
+}
+/* Active filter / sort affordance */
+#v3-app .sheet-filter-trigger.filtered,
+#v3-app .v43-trigger.active{
+  background:#b7e6cb!important;
+  border-color:#2f7a55!important;
+  color:#044530!important;
+  box-shadow:inset 0 0 0 1px #6bb08c;
+}
+#v3-app .v162-sort-btn[aria-pressed="true"],
+#v3-app th[aria-sort]:not([aria-sort="none"]) .sheet-filter-trigger{
+  outline:2px solid #6bb08c;
+  outline-offset:1px;
+}
+/* Status chips — official labels only (visual; no rule change) */
+.tag,.sheetpill,.task-flag,.flagtag,.v165-status{
+  border-radius:4px!important;
+  font-weight:750!important;
+  letter-spacing:.1px;
+}
+.tag{background:#eef2f4;color:#4d6270;border:1px solid #d7e0e4}
+.tag.green,.v165-status--done{background:#e5f5ec!important;color:#0d6b49!important;border-color:#b7dcc8!important}
+.tag.amber,.v165-status--process,.v165-status--pending{background:#fff4df!important;color:#8a5914!important;border-color:#ecd4a4!important}
+.tag.red{background:#fceceb!important;color:#9d3b3b!important;border-color:#ecc0c0!important}
+.tag.unverified,.v165-status--unverified{
+  background:#f7f4ee!important;color:var(--v165-warn)!important;border:1px dashed #d4b98a!important
+}
+.v165-status--normal{background:#eef2f4!important;color:#4d6270!important;border:1px solid #d7e0e4!important}
+.v165-status--urgent,.flagtag:not(.buffer){background:#fff0e8!important;color:#9a3d16!important;border:1px solid #efc2a8!important}
+.task-flag.ready{background:#e2f3e9!important;color:#0e764e!important;border:1px solid #b5dcc7}
+.task-flag.done{background:#e7eef7!important;color:#285879!important;border:1px solid #c3d3e6}
+.task-flag.block{background:#fff1d9!important;color:#91581b!important;border:1px solid #ebcfa0}
+/* States */
+.v165-state,.sheetempty,.v36-empty,.v49-no-data{
+  text-align:center;padding:28px 18px;color:var(--v165-muted);font-size:12px;line-height:1.5;
+}
+.v165-state{border:1px dashed var(--v165-line);border-radius:8px;background:#fafcfc;margin:8px 0}
+.v165-state b{display:block;color:var(--v165-ink);font-size:13px;margin-bottom:4px}
+#v3-app td.sheetempty,#v3-app td.v165-state,#v3-app td.v36-empty{
+  padding:42px 18px!important;white-space:normal!important;background:#f7faf9!important;
+  border-bottom:0!important;
+}
+#v3-app td.v165-state--filter-empty{
+  background:#f4f7f8!important;
+  box-shadow:inset 0 0 0 1px #d0dcd8;
+}
+.v165-state--loading{border-style:solid;background:linear-gradient(90deg,#f4f8f7 25%,#eaf3ef 37%,#f4f8f7 63%);background-size:400% 100%;animation:v165-shimmer 1.2s ease infinite}
+.v165-state--empty{background:#f7faf9}
+.v165-state--filter-empty{background:#f8fafb;border-color:#c9d7d4}
+.v165-state--error{background:#fff6f5;border-color:#e7b6b4;color:#8f3a3a}
+.v165-state--unauthorized{background:#fff8ef;border-color:#e6c89a;color:#8a5a16}
+.v165-state--unverified{background:#fbf8f1;border-color:#dfc79a;color:var(--v165-warn)}
+.v165-skel{display:grid;gap:8px;padding:12px}
+.v165-skel i{display:block;height:12px;border-radius:4px;background:linear-gradient(90deg,#e8efec 25%,#f4f8f7 37%,#e8efec 63%);background-size:400% 100%;animation:v165-shimmer 1.15s ease infinite}
+@keyframes v165-shimmer{0%{background-position:100% 0}100%{background-position:0 0}}
+html.v3-auth-pending body::before{content:"Memverifikasi sesi V3…";background:var(--v165-green-soft)!important;color:var(--v165-ink)!important}
+html.v3-auth-failed body::before{content:"Sesi tidak valid — mengalihkan ke login…";background:#fff6f5!important;color:#8f3a3a!important}
+/* Toast feedback */
+#toast.toast{
+  border-left:4px solid #5aa888;
+  background:#1c3e37;
+  box-shadow:0 10px 28px rgba(16,42,32,.22);
+  transition:opacity var(--v165-drawer-ms) ease,transform var(--v165-drawer-ms) ease;
+}
+#toast.toast.success{border-left-color:#2f9a68;background:#163c31}
+#toast.toast.error{border-left-color:#d26a64;background:#3a2322}
+#toast.toast.info{border-left-color:#5aa0c4;background:#1c3340}
+#toast.toast.hidden{opacity:0;transform:translateY(6px);pointer-events:none}
+button:disabled{opacity:.48;cursor:not-allowed}
+button:disabled[title]{opacity:.5}
+/* Drawer motion 120–180ms */
+.drawerback{
+  animation:v165-fade-in var(--v165-drawer-ms) ease;
+}
+.drawerback .drawer,
+.drawerback .detaildrawer{
+  animation:v165-drawer-in var(--v165-drawer-ms) ease;
+  will-change:transform,opacity;
+}
+.drawerback.v165-closing{animation:v165-fade-out var(--v165-drawer-ms) ease forwards}
+.drawerback.v165-closing .drawer,
+.drawerback.v165-closing .detaildrawer{animation:v165-drawer-out var(--v165-drawer-ms) ease forwards}
+@keyframes v165-fade-in{from{opacity:0}to{opacity:1}}
+@keyframes v165-fade-out{from{opacity:1}to{opacity:0}}
+@keyframes v165-drawer-in{from{transform:translateX(18px);opacity:.92}to{transform:translateX(0);opacity:1}}
+@keyframes v165-drawer-out{from{transform:translateX(0);opacity:1}to{transform:translateX(22px);opacity:.9}}
+@media (prefers-reduced-motion:reduce){
+  .drawerback,.drawerback .drawer,.drawerback .detaildrawer,#toast.toast,#v3-app .sheet.excel-sheet tbody tr,#v3-app .navbtn{animation:none!important;transition:none!important}
+  .v165-state--loading,.v165-skel i{animation:none!important}
+}
+</style>
 </head><body><script src="/live-column-resize.js"></script><script src="/live-qty-integrity.js"></script><script id="v3-auth-gate">(function(){var K="epv3_access_token";document.documentElement.classList.add("v3-auth-pending");var preview=/(?:^|[?&])epv3_preview=fixture(?:&|$)/.test(location.search||"");if(preview){try{localStorage.setItem(K,"preview-fixture-token")}catch(e){}window.__V3_PREVIEW_FIXTURE__=true;window.__V3_AUTH__={status:"pending",preview:true};return;}var t=localStorage.getItem(K)||"";if(!String(t).trim()){location.replace("/");return;}window.__V3_AUTH__={status:"pending"};})();</script><style id="v3-auth-gate-style">html.v3-auth-pending #root,html.v3-auth-pending #modal,html.v3-auth-pending #toast{visibility:hidden!important}html.v3-auth-pending body::before{content:"Memverifikasi sesi V3…";position:fixed;inset:0;display:grid;place-items:center;background:#f3f7f7;color:#203443;font:14px/1.45 Inter,Segoe UI,sans-serif;z-index:99999}html.v3-auth-failed body::before{content:"Sesi tidak valid — mengalihkan ke login…"}html.v3-auth-ok #root,html.v3-auth-ok #modal,html.v3-auth-ok #toast{visibility:visible}</style><div id="root"></div><div id="modal"></div><div id="toast" class="toast hidden"></div><script>
 
 function monitorBuffer(a){
@@ -775,7 +971,7 @@ function closeScheduleEditor(){scheduleDraft=null;closeScheduleDetail()}
 
 const gateState={};let intakeRole='Admin',intakeSearch='';
 var orders=[],history=[],section='inbox',selected=null,branch='Semua Cabang',modalAction=null,logFilter='Semua',sheetSearch='',sheetStatus='Semua Status',sheetPage=1,sheetSize=15,sheetView='Semua',drawerId=null,workflowSelected='po',shipDay='all',dashboardFocus=null,urgentEnabled=true,bufferEnabled=true,bufferDefaultPct=10;
-const $=id=>document.getElementById(id);const fmt=n=>Number(n).toLocaleString('id-ID');const escape=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));function toast(t){let x=$('toast');x.textContent=t;x.classList.remove('hidden');setTimeout(()=>x.classList.add('hidden'),2700)};function record(type,detail,id){history.unshift({at:new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),type,detail,id});queueDemoSave()};function active(){return orders.filter(o=>!o.deleted&&(branch==='Semua Cabang'||o.branch===branch))};function current(){return orders.find(o=>o.id===selected)};function tag(t){let c=/Baru|Lunas|Siap|Selesai|Synced|Approved/.test(t)?'green':/Hapus|Konflik|Bermasalah|Belum/.test(t)?'red':/Produksi|QC|Verifikasi|Dijadwalkan|Packing|DP/.test(t)?'amber':'';return `<span class="tag ${c}">${escape(t)}</span>`};function nav(id,label,count){return `<button class="navbtn ${section===id?'active':''}" onclick="go('${id}')"><span>${label}</span>${count!==undefined?`<span>${count}</span>`:''}</button>`};function go(id){if(id==='mapping')id='settings';if(id==='workorder'||id==='qc')id='tasks';if(id==='delivery')id='shippingSchedule';section=id;dashboardFocus=null;if(id==='tasks'){taskStage='all';taskFilterRole='Semua Peran';taskFilterStatus='Semua Status';taskSearch='';taskQuick='all';taskColFilters={};taskSort={key:null,dir:null};taskPage=1;} sheetPage=1;sheetSearch='';sheetStatus='Semua Status';sheetColFilters={};sheetSort={key:null,dir:null};render()};function choose(id){selected=id;render()};function heading(title,desc,extra=''){return `<div class="heading"><div><div class="eyebrow">OPERATIONS / ${escape(section.toUpperCase())}</div><h1>${title}</h1><div class="sub">${desc}</div></div><div class="row">${extra}</div></div>`};function logtype(v){return v.includes('HAPUS')?'red':v.includes('ERROR')?'amber':'green'}
+const $=id=>document.getElementById(id);const fmt=n=>Number(n).toLocaleString('id-ID');const escape=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));function toast(t,kind){const x=$('toast');if(!x)return;const msg=String(t??'');let k=kind;if(!k){if(/gagal|error|ditolak|diblokir|invalid|unauthorized|403|401|wajib|belum memenuhi|menunggu prasyarat|tidak dapat|ditolak/i.test(msg))k='error';else if(/berhasil|tersimpan|dibuat|dicabut|di-refresh|aktif|konfirmasi|disimpan|tercatat/i.test(msg))k='success';else k='info';}x.textContent=msg;x.className='toast '+k;x.classList.remove('hidden');clearTimeout(x._v165t);x._v165t=setTimeout(()=>x.classList.add('hidden'),2800)};function record(type,detail,id){history.unshift({at:new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),type,detail,id});queueDemoSave()};function active(){return orders.filter(o=>!o.deleted&&(branch==='Semua Cabang'||o.branch===branch))};function current(){return orders.find(o=>o.id===selected)};function tag(t){const s=String(t??'');let tone='';let role='';if(/Belum\s*Terverifikasi|UNKNOWN/i.test(s)){tone='unverified';role='v165-status--unverified';}else if(/Urgent/i.test(s)){tone='';role='v165-status--urgent';}else if(/Normal/i.test(s)){tone='';role='v165-status--normal';}else if(/Selesai|Lunas|Siap|Synced|Approved|Baru/i.test(s)){tone='green';role=/Selesai/i.test(s)?'v165-status--done':'';}else if(/Hapus|Konflik|Bermasalah/i.test(s)){tone='red';}else if(/Pending|Menunggu|Belum|Sedang|Produksi|QC|Verifikasi|Dijadwalkan|Packing|DP/i.test(s)){tone='amber';role=/(Pending|Menunggu|Belum)/i.test(s)?'v165-status--pending':'v165-status--process';}return `<span class="tag ${tone}${role?' '+role:''}">${escape(s)}</span>`;}function nav(id,label,count){return `<button class="navbtn ${section===id?'active':''}" onclick="go('${id}')"><span>${label}</span>${count!==undefined?`<span>${count}</span>`:''}</button>`};function go(id){if(id==='mapping')id='settings';if(id==='workorder'||id==='qc')id='tasks';if(id==='delivery')id='shippingSchedule';section=id;dashboardFocus=null;if(id==='tasks'){taskStage='all';taskFilterRole='Semua Peran';taskFilterStatus='Semua Status';taskSearch='';taskQuick='all';taskColFilters={};taskSort={key:null,dir:null};taskPage=1;} sheetPage=1;sheetSearch='';sheetStatus='Semua Status';sheetColFilters={};sheetSort={key:null,dir:null};render()};function choose(id){selected=id;render()};function heading(title,desc,extra=''){return `<div class="heading"><div><div class="eyebrow">OPERATIONS / ${escape(section.toUpperCase())}</div><h1>${title}</h1><div class="sub">${desc}</div></div><div class="row">${extra}</div></div>`};function logtype(v){return v.includes('HAPUS')?'red':v.includes('ERROR')?'amber':'green'}
 const WF_STEPS=[
  ['po','PO Masuk','Referensi SO Accurate'],['payment','Approval Payment','Gate penerimaan'],['design','Approval Design','Gate desain'],['schedule','Penjadwalan','Mesin & operator'],['prep','Persiapan Cup','Screen & helper'],['sample','Sample Cetak Operator','Sampel awal'],['confirm','Konfirmasi Cetak','Output tercatat'],['qc','QC & Packing','Pemeriksaan akhir'],['delivery','Pengiriman','Rujukan SJ Accurate']];
 function wfEligible(o,key){if(key==='po')return true;if(key==='payment')return !o.approval||o.receipt!=='Lunas';if(key==='design')return !o.approval;if(key==='schedule')return ['inbox','schedule'].includes(o.stage);if(key==='prep')return ['schedule','run'].includes(o.stage);if(key==='sample')return o.stage==='run';if(key==='confirm')return ['run','qc'].includes(o.stage);if(key==='qc')return ['qc','packing','ready'].includes(o.stage);if(key==='delivery')return !!o.sj||['ready','delivered'].includes(o.stage);return false}
@@ -1070,7 +1266,7 @@ function taskView(){const all=allTasks(),rows=taskList(),ready=all.filter(x=>x.s
 
  `<div class="task-toolbar"><input id="task-search" class="fieldcontrol" type="search" placeholder="Cari SO, pelanggan, pekerjaan..." value="${escape(taskSearch)}" oninput="setTaskSearch(this.value)"><div class="task-progress-tabs" role="group" aria-label="Pilih progres tugas"><button type="button" class="${taskProgressTab==='pending'?'active':''}" aria-pressed="${taskProgressTab==='pending'}" onclick="setTaskProgressTab('pending')">Belum Dikerjakan <strong>${all.filter(x=>(taskStage==='all'||taskGroupId(x.t)===taskStage)&&x.status!=='Selesai').length}</strong></button><button type="button" class="${taskProgressTab==='done'?'active':''}" aria-pressed="${taskProgressTab==='done'}" onclick="setTaskProgressTab('done')">Sudah Dikerjakan <strong>${all.filter(x=>(taskStage==='all'||taskGroupId(x.t)===taskStage)&&x.status==='Selesai').length}</strong></button><button type="button" class="${taskProgressTab==='all'?'active':''}" aria-pressed="${taskProgressTab==='all'}" onclick="setTaskProgressTab('all')">Semua <strong>${all.filter(x=>taskStage==='all'||taskGroupId(x.t)===taskStage).length}</strong></button></div><select class="fieldcontrol" onchange="setTaskRole(this.value)">${['Semua Peran','Designer','Kepala Produksi','Screener','Helper','Operator','Driver'].map(v=>`<option ${taskFilterRole===v?'selected':''}>${v}</option>`).join('')}</select><select class="fieldcontrol" onchange="setTaskStatus(this.value)">${['Semua Status','Siap','Menunggu','Selesai'].map(v=>`<option ${taskFilterStatus===v?'selected':''}>${v}</option>`).join('')}</select><select class="fieldcontrol" onchange="taskPageSize=Number(this.value);taskPage=1;render()">${[15,20,25,50].map(n=>`<option value="${n}" ${taskPageSize===n?'selected':''}>${n} baris</option>`).join('')}</select><button class="btn sm" onclick="resetTaskFilters()">⟲ Bersihkan Filter</button><button class="btn sm" onclick="taskResetColumns()">↔ Reset Kolom</button>${v162ResetLebarBtn(COLW_KEYS.tasks)}<button class="btn sm" onclick="taskExportCsv()">↓ CSV</button><span class="task-count">${rows.length?((taskPage-1)*taskPageSize+1):0}–${Math.min(taskPage*taskPageSize,rows.length)} dari ${rows.length}</span></div>`+
  `<div class="sheet-guidance">⠿ Seret header untuk memindahkan kolom · klik <b>▾</b> di tiap header untuk filter checkbox Excel, urutkan, dan cari nilai · <b>ⓘ Detail</b> membuka tugas.</div>`+
- `<div class="sheetwrap" role="region" aria-label="Sheet tugas tim" tabindex="0"><table class="sheet excel-sheet task-sheet"><thead><tr>${headers}</tr></thead><tbody>${page.map(x=>`<tr>${columns.map(c=>`<td data-column="${c.key}">${taskCell(x,c.key)}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${columns.length}" class="sheetempty">${taskProgressTab==='done'?'Belum ada pekerjaan selesai pada pilihan ini.':taskProgressTab==='pending'?'Tidak ada pekerjaan yang belum selesai pada pilihan ini.':'Tidak ada tugas sesuai filter. Gunakan Bersihkan Filter.'}</td></tr>`}</tbody></table></div>`+
+ `<div class="sheetwrap" role="region" aria-label="Sheet tugas tim" tabindex="0"><table class="sheet excel-sheet task-sheet"><thead><tr>${headers}</tr></thead><tbody>${page.map(x=>`<tr>${columns.map(c=>`<td data-column="${c.key}">${taskCell(x,c.key)}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${columns.length}" class="sheetempty v165-state ${taskProgressTab==='done'||taskProgressTab==='pending'?'v165-state--empty':'v165-state--filter-empty'}"><b>${taskProgressTab==='done'?'Belum ada yang selesai':taskProgressTab==='pending'?'Tidak ada antrean':'Filter kosong'}</b>${taskProgressTab==='done'?'Belum ada pekerjaan selesai pada pilihan ini.':taskProgressTab==='pending'?'Tidak ada pekerjaan yang belum selesai pada pilihan ini.':'Tidak ada tugas sesuai filter. Gunakan Bersihkan Filter.'}</td></tr>`}</tbody></table></div>`+
  `<div class="sheetfoot"><span>Menampilkan ${rows.length?((taskPage-1)*taskPageSize+1):0}–${Math.min(taskPage*taskPageSize,rows.length)} dari ${rows.length} tugas · ${isOfficialTasksLive()?'Sumber V3 official (bukan simulasi)':isLiveInbox()?(window.__V3_OFFICIAL_TASK_ERROR__?'Live · official tasks unavailable':'Accurate Live · menunggu official tasks'):'Data simulasi 3 PO'}</span><div class="pager"><button class="btn sm" ${taskPage===1?'disabled':''} onclick="setTaskPage(${taskPage-1})">‹ Sebelumnya</button><span>${taskPage} / ${pages}</span><button class="btn sm" ${taskPage>=pages?'disabled':''} onclick="setTaskPage(${taskPage+1})">Berikutnya ›</button></div></div></section></div>`;
 }
 function taskField(t,o,e){switch(t.id){
@@ -1766,7 +1962,7 @@ function saveShippingPlan(id){const o=orders.find(x=>x.id===id&&!x.deleted);if(!
 function showScheduleDetail(id){const o=orders.find(o=>o.id===id&&!o.deleted);if(!o)return;drawerId=id;const statuses=['inbox','schedule','run','qc','packing','ready'];const pos=Math.max(0,statuses.indexOf(o.stage));const steps=['SO Masuk','Jadwal','Cetak','QC','Packing'];const short=[0,1,2,3,4];const prog=(window.V3QtyIntegrity&&window.V3QtyIntegrity.scheduleDetailProgress(o))||{label:'UNKNOWN',pct:0,unknown:true};const donePct=prog.unknown?0:prog.pct;const qtyLabel=prog.unknown?'UNKNOWN':(fmt(o.qty)+' pcs');const qSnap=productionQty(o);const metricFmt=n=>n==null?'UNKNOWN':fmt(n)+' pcs';$('modal').innerHTML=`<div class="drawerback" onclick="if(event.target===this)closeScheduleDetail()"><aside class="drawer" role="dialog" aria-modal="true" aria-label="Detail Jadwal Produksi"><div class="drawerhead"><div><div class="eyebrow">DETAIL JADWAL · ${escape(o.id)}</div><h2>${escape(o.name)}</h2><div style="margin-top:4px">${flagLabel(o)}</div><div class="row">${tag(o.status)}<span class="sheetpill">Accurate SO</span></div></div><button class="btn sm" onclick="closeScheduleDetail()">✕ Tutup</button></div><div class="drawerbody"><div class="steps">${steps.map((v,i)=>`<div class="step ${i===Math.min(4,pos)?'now':i<pos?'done':''}">${escape(v)}</div>`).join('')}</div><div class="sectionlabel">Informasi Pesanan</div><div class="meta"><div><small>Nomor SO Accurate</small><b>${escape(o.id)}</b></div><div><small>Cabang Produksi</small><b>${escape(o.branch)}</b></div><div><small>Sales Penanggung Jawab</small><b>${escape(sampleSalesName(o))}</b></div><div><small>Qty Order</small><b>${qtyLabel}</b></div><div><small>Target Kirim</small><b>${escape(o.ship)}</b></div><div><small>Status Penerimaan</small>${tag(o.receipt)}</div><div><small>Sinkron Terakhir</small><b>${escape(o.updated)} WIB</b></div></div><div class="sectionlabel">Rincian Warna Sablon</div><div class="ink-detail-row">${sampleColorEntries(o).map(x=>`<div class="ink-detail"><b>Warna ke-${x.order}</b><span>${escape(x.name)}</span></div>`).join('')}</div><div class="sectionlabel">Penugasan Multioperator per Warna</div><div class="row" style="justify-content:space-between;margin-bottom:8px"><span class="muted">Satu PO · banyak operator dan mesin · target tiap lintasan warna.</span><button class="btn primary sm" onclick="openScheduleEditor('${o.id}')">＋ Atur Semua Operator</button></div><table class="table-tiny"><thead><tr><th>Warna</th><th>Operator</th><th>Mesin</th><th>Tanggal</th><th>Target</th></tr></thead><tbody>${colorAssignmentsFor(o).map(a=>`<tr><td>${a.colorIndex}/${sampleColorEntries(o).length} · ${escape(a.colorName)}</td><td>${escape(a.operator||'—')}</td><td>${escape(a.machine||'—')}</td><td>${escape(a.workDate||'—')}</td><td><b>${fmt(a.targetQty)}</b></td></tr>`).join('')||'<tr><td colspan="5">Belum ada alokasi</td></tr>'}</tbody></table><div class="sectionlabel">Prioritas & Buffer Produksi</div><div class="quickflag"><button class="btn sm ${o.urgent?'on':''}" onclick="setOrderFlag('${o.id}','urgent')" ${!urgentEnabled?'disabled':''}>⚑ ${o.urgent?'Urgent Aktif · Nonaktifkan':'Tandai Urgent'}</button><button class="btn sm ${o.bufferStock?'on':''}" onclick="setOrderFlag('${o.id}','buffer')" ${!bufferEnabled?'disabled':''}>▣ ${o.bufferStock?'Buffer Aktif · Nonaktifkan':'Aktifkan Buffer Stock'}</button><span class="muted">Buffer: ${fmt(o.bufferQty||0)} pcs · di luar Qty SO</span><button class="btn sm" onclick="closeScheduleDetail();go('settings')">⚙ Pengaturan</button></div><div class="sectionlabel">Kontrol Kuantitas Produksi</div><div class="production-detail-metrics">${[['Qty SO',qSnap.qty],['Terjadwal',qSnap.scheduled],['Sudah Cetak',qSnap.done],['Belum Dikerjakan',qSnap.remainingTotal],['Sisa Terjadwal',qSnap.remainingScheduled],['Belum Dijadwalkan',qSnap.unassigned],['Sudah Packing',qSnap.packed]].map(([label,n])=>`<div><small>${label}</small><strong>${metricFmt(n)}</strong></div>`).join('')}</div>${qSnap.qtyUnverified?'<div class="alertline">Qty PO belum terverifikasi — progress dan status selesai ditahan.</div>':''}${qSnap.invalid?'<div class="alertline">Qty output / packing melampaui batas alokasi atau order. Perlu pemeriksaan data.</div>':''}<div class="sectionlabel">Form Penjadwalan</div><div class="schedule-note">Jadwal operator, warna, mesin, tanggal dan target dibuat melalui <b>Atur Semua Operator</b>. Target PO dihitung dari lintasan warna dengan alokasi paling rendah agar tidak dihitung berulang.</div><button class="btn primary sm" onclick="openScheduleEditor('${o.id}')">Buka Form Multioperator →</button><div class="sectionlabel">Item & Realisasi</div><table class="table-tiny"><thead><tr><th>Produk</th><th>Order</th><th>Cetak</th><th>Packing</th></tr></thead><tbody><tr><td>${escape(o.item)}</td><td>${prog.unknown?'UNKNOWN':fmt(o.qty)}</td><td>${fmt(o.done)}</td><td>${fmt(o.packed)}</td></tr></tbody></table><div class="progressline" style="margin-top:18px"><span>Progress cetak</span><strong>${escape(prog.label)}</strong></div><div class="progress"><i style="width:${donePct}%"></i></div>${!o.approval?'<div class="alertline">Gate administrasi belum valid. Simulasi tidak mengizinkan pembuatan jadwal sampai gate diverifikasi.</div>':''}<div class="sectionlabel">Keterangan</div><div class="hint">Tombol ⓘ menampilkan detail tanpa berpindah halaman. Referensi Accurate tetap read-only; perubahan operator/mesin hanya data jadwal lokal simulasi.</div></div><div class="drawerfoot"><button class="btn" onclick="closeScheduleDetail()">Tutup</button><button class="btn" onclick="selected='${o.id}';closeScheduleDetail();go('tasks')">Buka Tugas Tim</button><button class="btn primary" ${!o.approval?'disabled title="Gate belum lolos"':''} onclick="openScheduleEditor('${o.id}')">Atur Multioperator</button></div></aside></div>`}
 function dateValue(o){const match=String(o.scheduleDate||'').match(/(\d+) Nov 2026/);return `2026-11-${String(match?Number(match[1]):9).padStart(2,'0')}`}
 function saveScheduleDetail(id){openScheduleEditor(id)}
-function closeScheduleDetail(){drawerId=null;$('modal').innerHTML=''}
+function closeScheduleDetail(){const back=$('modal')&&$('modal').querySelector('.drawerback');const reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;if(back&&!reduce){back.classList.add('v165-closing');clearTimeout(back._v165c);back._v165c=setTimeout(()=>{drawerId=null;$('modal').innerHTML=''},160);return}drawerId=null;$('modal').innerHTML=''}
 function v38PrintableQty(o){
  const lines=Array.isArray(o?.sourceLines)?o.sourceLines:[];
  return lines.length?lines.reduce((sum,line)=>sum+(line.processSnapshot==='NON_PRINT'?0:Math.max(0,Number(line.qty)||0)),0):Math.max(0,Number(o?.qty)||0);
@@ -2808,7 +3004,7 @@ function openInboxFilter(key,button){closeInboxFilter();closeSheetFilter();const
  document.body.appendChild(menu);const rect=button.getBoundingClientRect(),mw=Math.min(320,innerWidth-16),maxLeft=Math.max(8,innerWidth-mw-8);menu.style.width=mw+'px';menu.style.left=Math.min(rect.left,maxLeft)+'px';menu.style.top=(rect.bottom+5+menu.offsetHeight>innerHeight?Math.max(8,rect.top-menu.offsetHeight-5):rect.bottom+5)+'px';updateInboxFilterSelectionCount();menu.querySelector('input[placeholder="Cari dalam pilihan..."]')?.focus()}
 function inboxDetailFieldHtml(o,value,opts){opts=opts||{};const Qi=window.V3QtyIntegrity;if(Qi&&Qi.inboxDetailDependentHtml){return Qi.inboxDetailDependentHtml(o,{value:value,absence:opts.absence||'unavailable',escapeFn:escape,wrap:opts.wrap})}if(value!=null&&String(value).trim()&&!['—','-','Belum terverifikasi','Belum tersedia','Belum dimuat','Detail barang belum dimuat','Perlu verifikasi'].includes(String(value).trim())){const esc=escape(String(value));return opts.wrap?opts.wrap(esc):esc}const st=o&&o.detailLoadState||'not_loaded';if(st==='loading')return'<span class="muted">Memuat…</span>';if(st==='failed')return`<span class="muted">Gagal dimuat</span> <button type="button" class="btn sm" onclick="window.retryInboxDetail&&window.retryInboxDetail('${escape(o.id)}')">Retry</button>`;if(st!=='loaded')return'<span class="muted">Belum dimuat</span>';return`<span class="muted">${opts.absence==='unverified'?'Belum terverifikasi':'Belum tersedia'}</span>`}
 function inboxCellHtml(o,key){if(key==='id')return`<span class="so" title="${escape(o.id)}">${escape(o.id)}</span>`;if(key==='orderDate')return escape(o.orderDate||'—');if(key==='name')return`<b class="customer" title="${escape(o.name)}">${escape(o.name)}</b>`;if(key==='address')return inboxDetailFieldHtml(o,o.address,{wrap:v=>`<span class="po-multiline">${v}</span>`});if(key==='paymentTerms')return inboxDetailFieldHtml(o,o.paymentTerms);if(key==='createdByUser')return inboxDetailFieldHtml(o,o.createdByUser);if(key==='salesName'){const s=officialSalesCell(o);const show=s&&s!=='Belum terverifikasi'?s:null;return inboxDetailFieldHtml(o,show,{absence:'unverified',wrap:v=>`<b>${v}</b>`})}if(key==='expedition')return inboxDetailFieldHtml(o,o.expedition,{absence:'unavailable'});if(key==='ship')return inboxDetailFieldHtml(o,o.ship);if(key==='deliveryZone')return inboxDetailFieldHtml(o,o.deliveryZone);if(key==='branch')return escape(o.branch||'—');if(key==='orderPriority'){const v=orderPriorityCell(o);const show=(v==='Urgent'||v==='Normal')?v:null;const html=inboxDetailFieldHtml(o,show,{absence:'unverified'});if(show==='Urgent')return`<span class="flagtag">URGENT</span>`;return html}if(key==='bufferLabel'){const v=bufferLabelCell(o);const show=(v==='Buffer'||v==='Non-Buffer')?v:null;const html=inboxDetailFieldHtml(o,show,{absence:'unverified'});if(show==='Buffer')return`<span class="flagtag buffer">BUFFER</span>`;return html}if(key==='productionStatus')return tag(o.productionStatus||v36Status(o));if(key==='itemCodes')return inboxDetailFieldHtml(o,multiItemField(o,'item_code'),{wrap:v=>`<div class="po-multiline">${v}</div>`});if(key==='item'){const raw=multiItemField(o,'name')||(o.item&&o.item!=='Detail barang belum dimuat'?o.item:null);return inboxDetailFieldHtml(o,raw,{wrap:v=>`<div class="po-multiline">${v}</div>`})}if(key==='itemQtys')return inboxDetailFieldHtml(o,multiItemField(o,'qty'),{wrap:v=>`<div class="po-multiline right">${v}</div>`});if(key==='itemUnits')return inboxDetailFieldHtml(o,multiItemField(o,'unit'),{wrap:v=>`<div class="po-multiline">${v}</div>`});if(key==='itemProcesses')return inboxDetailFieldHtml(o,multiItemField(o,'process'),{wrap:v=>`<div class="po-multiline">${v}</div>`});if(key==='inkColors'){const colors=Array.isArray(o.inkColors)?o.inkColors.filter(Boolean).join('\n'):'';const raw=multiItemField(o,'color')||colors;return inboxDetailFieldHtml(o,raw,{wrap:v=>`<div class="po-multiline">${v}</div>`})}if(key==='qty')return window.V3QtyIntegrity?window.V3QtyIntegrity.inboxQtyCellHtml(o,escape):(o.qtyVerified&&o.qty!=null?`<b class="right">${fmt(o.qty)}</b>`:o.detailLoadState==='loading'?'<span class="muted">Memuat…</span>':o.detailLoadState==='failed'?`<span class="muted">Gagal dimuat</span> <button type="button" class="btn sm" onclick="window.retryInboxDetail&&window.retryInboxDetail('${escape(o.id)}')">Retry</button>`:o.detailLoadState==='loaded'?'<span class="muted">Qty belum terverifikasi</span>':'<span class="muted">Belum dimuat</span>');if(key==='lineCount'){const n=o.lineCount!=null?o.lineCount:(Array.isArray(o.sourceLines)&&o.sourceLines.length?o.sourceLines.length:null);return inboxDetailFieldHtml(o,n!=null?String(n):null,{wrap:v=>`<b>${v}</b>`})}if(key==='poNotes')return inboxDetailFieldHtml(o,o.poNotes,{wrap:v=>`<div class="po-notes">${v}</div>`});if(key==='detailPo')return`<button class="actionlink" type="button" aria-label="Detail PO ${escape(o.id)}" onclick="v49PODetail('${o.id}')"><span class="infoicon">i</span> Detail PO</button>`;if(key==='liveTracking')return`<button class="v36-track-btn" type="button" onclick="v36OpenTracking('${o.id}')">◉ Live Tracking</button>`;if(key==='action')return`<button class="actionlink" type="button" aria-label="Ringkasan PO ${escape(o.id)}" onclick="v49PODetail('${o.id}')"><span class="infoicon">i</span> Ringkasan PO</button>`;return'—'}
-function v36InboxView(a){const all=a.filter(o=>!o.deleted);const rows=inboxFilterRows(all);const baru=all.filter(o=>{const st=o.productionStatus||v36Status(o);return st==='Baru'||o.stage==='inbox'}).length;const terproses=all.length-baru;const filtersActive=Object.keys(inboxColFilters).length>0||!!inboxSort.key;const accurateTotal=(window.__V3_INBOX__&&window.__V3_INBOX__.total!=null)?window.__V3_INBOX__.total:null;inboxColumnOrder=normalizeInboxColumnOrder(inboxColumnOrder);const cols=inboxOrderedColumns();const vis=typeof getSheetVisibleColumns==='function'?getSheetVisibleColumns():null;const headers=cols.map(c=>{const filterable=c.kind!=='action';const active=!!inboxColFilters[c.key];const sorted=inboxSort.key===c.key;const locked=INBOX_LOCKED_COLUMNS.includes(c.key);const hidden=vis&&COLUMN_MAP[c.key]&&!vis.has(c.key)?'v40-col-hidden':'';const canDrag=!locked&&c.kind!=='action';const dragAttrs=canDrag?`draggable="true" ondragstart="inboxDragStart(event,'${c.key}')" ondragover="inboxDragOver(event,'${c.key}')" ondrop="inboxDrop(event,'${c.key}')" ondragend="inboxDragEnd()"`:`ondragover="inboxDragOver(event,'${c.key}')" ondrop="inboxDrop(event,'${c.key}')" ondragend="inboxDragEnd()"`;return`<th data-column="${c.key}" class="${hidden}" ${dragAttrs}><div class="sheet-th"><span class="sheet-drag" title="${locked?'Kolom identitas terkunci':'Geser untuk mengubah urutan'}" aria-hidden="true">${locked?'🔒':'⠿'}</span><span class="sheet-th-label" title="${escape(c.label)}">${escape(c.label)}</span>${filterable?`<button type="button" class="sheet-filter-trigger ${active?'filtered':''}" title="Filter / sort ${escape(c.label)} (halaman ini)" aria-label="Filter kolom ${escape(c.label)}" onclick="event.stopPropagation();openInboxFilter('${c.key}',this)">${sorted?(inboxSort.dir==='asc'?'↑':'↓'):active?'●':'▾'}</button>`:''}</div></th>`}).join('');return heading('PO Masuk · Monitoring Accurate','Monitoring baca-saja — tanpa input atau approval di halaman ini.')+`<div class="v36-kpis v159-kpi-row"><div><span>Total PO</span><strong>${all.length}</strong><small>Halaman dimuat</small></div><div><span>Baru</span><strong>${baru}</strong><small>Belum masuk workflow</small></div><div><span>Terproses</span><strong>${terproses}</strong><small>Sudah masuk workflow</small></div>${accurateTotal!=null?`<div><span>Total Accurate</span><strong>${fmt(accurateTotal)}</strong><small>Metadata server</small></div>`:`<div><span>Total Accurate</span><strong>—</strong><small>Belum tersedia</small></div>`}</div><section class="v36-inbox-section"><div class="v36-sectionhead"><div><strong>Daftar Pesanan Penjualan</strong><small>${INBOX_FILTER_SCOPE_LABEL} · ▾ filter · ⠿ urut · resize tepi kolom</small></div><span class="v36-readonly">◉ Hanya monitoring</span></div><div class="v36-toolbar sheetbar v36-inbox-toolbar"><label class="v36-search"><span>⌕</span><input id="v36-inbox-search" type="search" aria-label="Cari PO masuk" value="${escape(v36InboxQuery)}" placeholder="Cari nomor PO, pelanggan, produk, sales" oninput="v36SetInboxSearch(this.value)"></label><label>Status <select aria-label="Filter status PO" onchange="v36InboxStatus=this.value;render()">${['Semua','Baru','Terproses'].map(v=>`<option ${v36InboxStatus===v?'selected':''}>${v}</option>`).join('')}</select></label><label>Cabang <select aria-label="Filter cabang PO" onchange="v36InboxBranch=this.value;render()">${['Semua',...new Set(all.map(o=>o.branch).filter(Boolean))].map(v=>`<option ${v36InboxBranch===v?'selected':''}>${escape(v)}</option>`).join('')}</select></label><button class="btn sm" type="button" onclick="resetInboxFilters()">⟲ Reset Filter</button><button class="btn sm" type="button" onclick="resetInboxColumnOrder()">↔ Reset Kolom</button>${v162ResetLebarBtn(COLW_KEYS.inbox)}${sheetColumnVisibilityDropdown()}</div><div class="sheetwrap v36-inbox-sheetwrap" role="region" aria-label="Inbox Accurate — filter halaman ini" tabindex="0"><table class="sheet excel-sheet v36-inbox-sheet"><thead><tr>${headers}</tr></thead><tbody>${rows.map(o=>`<tr>${cols.map(c=>{const hidden=vis&&COLUMN_MAP[c.key]&&!vis.has(c.key)?'v40-col-hidden':'';return`<td data-column="${c.key}" class="${c.kind==='number'?'right':''} ${hidden}">${inboxCellHtml(o,c.key)}</td>`}).join('')}</tr>`).join('')||`<tr><td colspan="${cols.length}" class="v36-empty sheetempty">Tidak ada PO sesuai filter halaman ini.</td></tr>`}</tbody></table></div><div class="sheetfoot v36-tablefoot"><div>Filter halaman ini: ${rows.length} / ${all.length} PO dimuat${accurateTotal!=null?` · Total Accurate ${fmt(accurateTotal)} (tidak difilter client-side)`:''}${filtersActive?' · filter aktif hanya pada halaman ini':''}</div><span>Perubahan status hanya dari workflow terpisah.</span></div></section>`}
+function v36InboxView(a){const all=a.filter(o=>!o.deleted);const rows=inboxFilterRows(all);const baru=all.filter(o=>{const st=o.productionStatus||v36Status(o);return st==='Baru'||o.stage==='inbox'}).length;const terproses=all.length-baru;const filtersActive=Object.keys(inboxColFilters).length>0||!!inboxSort.key;const accurateTotal=(window.__V3_INBOX__&&window.__V3_INBOX__.total!=null)?window.__V3_INBOX__.total:null;inboxColumnOrder=normalizeInboxColumnOrder(inboxColumnOrder);const cols=inboxOrderedColumns();const vis=typeof getSheetVisibleColumns==='function'?getSheetVisibleColumns():null;const headers=cols.map(c=>{const filterable=c.kind!=='action';const active=!!inboxColFilters[c.key];const sorted=inboxSort.key===c.key;const locked=INBOX_LOCKED_COLUMNS.includes(c.key);const hidden=vis&&COLUMN_MAP[c.key]&&!vis.has(c.key)?'v40-col-hidden':'';const canDrag=!locked&&c.kind!=='action';const dragAttrs=canDrag?`draggable="true" ondragstart="inboxDragStart(event,'${c.key}')" ondragover="inboxDragOver(event,'${c.key}')" ondrop="inboxDrop(event,'${c.key}')" ondragend="inboxDragEnd()"`:`ondragover="inboxDragOver(event,'${c.key}')" ondrop="inboxDrop(event,'${c.key}')" ondragend="inboxDragEnd()"`;return`<th data-column="${c.key}" class="${hidden}" ${dragAttrs}><div class="sheet-th"><span class="sheet-drag" title="${locked?'Kolom identitas terkunci':'Geser untuk mengubah urutan'}" aria-hidden="true">${locked?'🔒':'⠿'}</span><span class="sheet-th-label" title="${escape(c.label)}">${escape(c.label)}</span>${filterable?`<button type="button" class="sheet-filter-trigger ${active?'filtered':''}" title="Filter / sort ${escape(c.label)} (halaman ini)" aria-label="Filter kolom ${escape(c.label)}" onclick="event.stopPropagation();openInboxFilter('${c.key}',this)">${sorted?(inboxSort.dir==='asc'?'↑':'↓'):active?'●':'▾'}</button>`:''}</div></th>`}).join('');return heading('PO Masuk · Monitoring Accurate','Monitoring baca-saja — tanpa input atau approval di halaman ini.')+`<div class="v36-kpis v159-kpi-row"><div class="kpi-primary"><span>Total PO</span><strong>${all.length}</strong><small>Halaman dimuat</small></div><div class="kpi-primary"><span>Baru</span><strong>${baru}</strong><small>Belum masuk workflow</small></div><div class="kpi-secondary"><span>Terproses</span><strong>${terproses}</strong><small>Sudah masuk workflow</small></div>${accurateTotal!=null?`<div class="kpi-secondary"><span>Total Accurate</span><strong>${fmt(accurateTotal)}</strong><small>Metadata server</small></div>`:`<div class="kpi-secondary"><span>Total Accurate</span><strong>—</strong><small>Belum tersedia</small></div>`}</div><section class="v36-inbox-section"><div class="v36-sectionhead"><div><strong>Daftar Pesanan Penjualan</strong><small>${INBOX_FILTER_SCOPE_LABEL} · ▾ filter · ⠿ urut · resize tepi kolom</small></div><span class="v36-readonly">◉ Hanya monitoring</span></div><div class="v36-toolbar sheetbar v36-inbox-toolbar"><label class="v36-search"><span>⌕</span><input id="v36-inbox-search" type="search" aria-label="Cari PO masuk" value="${escape(v36InboxQuery)}" placeholder="Cari nomor PO, pelanggan, produk, sales" oninput="v36SetInboxSearch(this.value)"></label><label>Status <select aria-label="Filter status PO" onchange="v36InboxStatus=this.value;render()">${['Semua','Baru','Terproses'].map(v=>`<option ${v36InboxStatus===v?'selected':''}>${v}</option>`).join('')}</select></label><label>Cabang <select aria-label="Filter cabang PO" onchange="v36InboxBranch=this.value;render()">${['Semua',...new Set(all.map(o=>o.branch).filter(Boolean))].map(v=>`<option ${v36InboxBranch===v?'selected':''}>${escape(v)}</option>`).join('')}</select></label><button class="btn sm" type="button" onclick="resetInboxFilters()">⟲ Reset Filter</button><button class="btn sm" type="button" onclick="resetInboxColumnOrder()">↔ Reset Kolom</button>${v162ResetLebarBtn(COLW_KEYS.inbox)}${sheetColumnVisibilityDropdown()}</div><div class="sheetwrap v36-inbox-sheetwrap" role="region" aria-label="Inbox Accurate — filter halaman ini" tabindex="0"><table class="sheet excel-sheet v36-inbox-sheet"><thead><tr>${headers}</tr></thead><tbody>${rows.map(o=>`<tr>${cols.map(c=>{const hidden=vis&&COLUMN_MAP[c.key]&&!vis.has(c.key)?'v40-col-hidden':'';return`<td data-column="${c.key}" class="${c.kind==='number'?'right':''} ${hidden}">${inboxCellHtml(o,c.key)}</td>`}).join('')}</tr>`).join('')||`<tr><td colspan="${cols.length}" class="v36-empty sheetempty v165-state v165-state--filter-empty"><b>Tidak ada data pada filter ini</b><br>Tidak ada PO sesuai filter halaman ini. Sesuaikan filter atau reset.</td></tr>`}</tbody></table></div><div class="sheetfoot v36-tablefoot"><div>Filter halaman ini: ${rows.length} / ${all.length} PO dimuat${accurateTotal!=null?` · Total Accurate ${fmt(accurateTotal)} (tidak difilter client-side)`:''}${filtersActive?' · filter aktif hanya pada halaman ini':''}</div><span>Perubahan status hanya dari workflow terpisah.</span></div></section>`}
 
 function v36ReceiptView(a){const rows=a.filter(o=>[o.id,o.name,o.receipt].join(' ').toLowerCase().includes(v36ReceiptQuery.toLowerCase()));return heading('Monitoring Penerimaan Penjualan','Kecocokan pembayaran Accurate dicatat terpisah dari status PO dan approval desain.')+`<div class="v36-note"><b>Arsitektur target:</b> Backend mencocokkan ID Penerimaan → Faktur / Uang Muka → PO, nilai, alokasi dan status. Jika sah serta memenuhi kebijakan customer, Approval Payment berubah otomatis. Untuk simulasi offline, gunakan tombol <b>Uji Fixture Penerimaan</b>; tombol ini tidak membuat Penerimaan Accurate.</div><div class="v36-toolbar"><label class="v36-search"><span>⌕</span><input id="v36-receipt-search" aria-label="Cari penerimaan" placeholder="Cari nomor PO / pelanggan" value="${escape(v36ReceiptQuery)}" oninput="v36SetReceiptSearch(this.value)"></label><label>Peran demo <select aria-label="Peran monitoring pembayaran" onchange="chooseIntakeRole(this.value)">${['Admin','Designer','Kepala Produksi','Holding','Direktur'].map(x=>`<option ${intakeRole===x?'selected':''}>${x}</option>`).join('')}</select></label></div><div class="v36-table-container"><table class="v36-table"><thead><tr><th>No. PO</th><th>Pelanggan</th><th>Catatan Penerimaan</th><th>Approval Payment</th><th>Sumber Keputusan</th><th>Simulasi Backend</th></tr></thead><tbody>${rows.map(o=>{const g=gateFor(o);return `<tr><td><b>${escape(o.id)}</b></td><td>${escape(o.name)}</td><td>${g.paymentAmount>0?'Rp '+fmt(g.paymentAmount):'Belum tersedia'}</td><td>${intakePill(g.payment)}</td><td>${g.payment==='APPROVED'?'Penerimaan tervalidasi · demo':g.payment==='BYPASSED'?'Bypass '+escape(g.paymentActor):'—'}</td><td>${g.payment==='PENDING'&&o.stage==='inbox'?`<button type="button" class="btn sm" onclick="v36SimulateReceipt('${escape(o.id)}')">Uji Fixture Penerimaan</button>`:'<span class="muted">Tidak ada aksi</span>'}</td></tr>`}).join('')||'<tr><td colspan="6">Tidak ada penerimaan sesuai pencarian.</td></tr>'}</tbody></table></div><div class="v36-tablefoot">Pada aplikasi produksi nyata, tombol simulasi tidak tersedia; sinkronisasi dilakukan oleh backend otomatis dengan audit log dan idempotency.</div>`}
 function v38ReceiptValidation(po,receipt){
@@ -3415,7 +3611,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'){v3CloseHelp();v3Tog
   });
  }
 };
-window.v49Close=function(){document.getElementById('modal').innerHTML=''};
+window.v49Close=function(){const modal=document.getElementById('modal');const back=modal&&modal.querySelector('.drawerback');const reduce=window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;if(back&&!reduce){back.classList.add('v165-closing');clearTimeout(back._v165c);back._v165c=setTimeout(()=>{modal.innerHTML=''},160);return}if(modal)modal.innerHTML=''};
  const spec={
   'payment-bypass':[['Alasan bypass','textarea'],['Referensi keputusan','text']],
   'payment-revoke':[['Alasan pencabutan','textarea']],
