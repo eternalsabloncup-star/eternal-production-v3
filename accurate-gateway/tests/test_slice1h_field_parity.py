@@ -48,7 +48,9 @@ def test_labeled_custom_fields_expedition_zone_buffer_status():
     assert mapped["urgent_state"] == "normal"
 
 
-def test_unlabeled_charfield_noise_stays_absent():
+def test_unlabeled_wrong_header_slots_do_not_invent_buffer_urgent_or_expedition():
+    # Header charField1/2 are NOT Owner buffer/urgent slots (those are 5/4).
+    # charField3 Owner-maps to delivery_zone; expedition stays blocked.
     mapped = normalize_sales_order(
         {
             "id": 3,
@@ -71,8 +73,9 @@ def test_unlabeled_charfield_noise_stays_absent():
     assert mapped["buffer_stock"] is None
     assert mapped["urgent_state"] is None
     assert mapped["expedition"] is None
-    assert mapped["line_items"][0]["production_process"] == "unknown"
-    assert mapped["line_items"][0]["color"] is None
+    assert mapped["delivery_zone"] == "OUTLET"
+    assert mapped["line_items"][0]["production_process"] == "print"
+    assert mapped["line_items"][0]["color"] == "HIJAU ARMY"
 
 
 def test_labeled_line_process_and_color_multi_item():

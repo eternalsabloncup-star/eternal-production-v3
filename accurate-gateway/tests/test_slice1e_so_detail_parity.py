@@ -82,7 +82,7 @@ def test_ad_meliora_detail_lines_qty_and_mixed_process():
     assert mapped["urgent_state"] is None
 
 
-def test_blank_process_stays_unknown_not_print():
+def test_product_name_alone_stays_unknown_without_process_slot():
     raw = {
         "id": 1,
         "number": "SO-X",
@@ -95,12 +95,32 @@ def test_blank_process_stays_unknown_not_print():
                 "itemNo": "X",
                 "detailName": "Cetak Box",
                 "quantity": 10,
-                "charField1": "PRINT",
             }
         ],
     }
     mapped = so_detail(normalize_sales_order(raw))
     assert mapped["line_items"][0]["production_process"] == "unknown"
+
+
+def test_owner_unlabeled_charfield1_print_token_maps():
+    raw = {
+        "id": 11,
+        "number": "SO-X2",
+        "statusName": "OPEN",
+        "customer": {"id": 1, "name": "A"},
+        "branch": {"id": 1, "name": "B"},
+        "detailItem": [
+            {
+                "id": 9,
+                "itemNo": "X",
+                "detailName": "Cup",
+                "quantity": 10,
+                "charField1": "PRINT",
+            }
+        ],
+    }
+    mapped = so_detail(normalize_sales_order(raw))
+    assert mapped["line_items"][0]["production_process"] == "print"
 
 
 def test_list_summary_has_no_fabricated_lines_or_qty():

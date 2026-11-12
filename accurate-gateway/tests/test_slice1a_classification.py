@@ -53,7 +53,8 @@ def test_unknown_classifications_stay_null_or_unknown_after_sync_shape():
     assert out["urgent_state"] is None
 
 
-def test_no_false_production_from_print_related_candidates():
+def test_no_false_production_from_product_name_alone():
+    # Product name / item flags must never invent print; Owner slot still maps when present.
     detail = normalize_sales_order(
         {
             "id": 2,
@@ -68,7 +69,6 @@ def test_no_false_production_from_print_related_candidates():
                     "itemNo": "P-1",
                     "detailName": "Cetak Box",
                     "quantity": 5,
-                    "charField1": "PRINT",
                     "numericField1": 1,
                     "item": {"name": "Print Item", "isSold": True},
                 }
@@ -79,6 +79,28 @@ def test_no_false_production_from_print_related_candidates():
     assert mapped["line_items"][0]["production_process"] == "unknown"
     assert mapped["buffer_stock"] is None
     assert mapped["urgent_state"] is None
+
+
+def test_owner_slot_charfield1_maps_print_token():
+    detail = normalize_sales_order(
+        {
+            "id": 22,
+            "number": "SO-2B",
+            "statusName": "OPEN",
+            "customer": {"id": 1, "name": "A"},
+            "branch": {"id": 1, "name": "B"},
+            "detailItem": [
+                {
+                    "id": 10,
+                    "itemNo": "P-1",
+                    "detailName": "Cup",
+                    "quantity": 5,
+                    "charField1": "PRINT",
+                }
+            ],
+        }
+    )
+    assert so_detail(detail)["line_items"][0]["production_process"] == "print"
 
 
 def test_mixed_print_non_print_lines_representable():

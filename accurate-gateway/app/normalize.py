@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from app.custom_field_mapping import approved_raw_value
+
 
 def _party(raw: Any, id_key: str = "id", name_key: str = "name") -> dict[str, Any]:
     if isinstance(raw, dict):
@@ -348,37 +350,54 @@ def _qty(row: dict[str, Any]) -> float | None:
     return qty if verified else None
 
 
-def _explicit_production_process(row: dict[str, Any]) -> str:
-    """print|non_print from explicit process field or labeled custom field only.
-
-    Never infer from unlabeled charField*, item master flags, or product-name heuristics.
-    Never treat blank as print. Missing/unrecognized → unknown.
-    """
-    raw = row.get("production_process")
-    if raw is None:
-        raw = row.get("productionProcess")
-    if raw is None:
-        raw = _custom_field_by_label(row, _PROCESS_LABELS)
+def _normalize_process_token(raw: Any) -> str:
+    """Map recognized process tokens → print|non_print; else unknown."""
     if raw is None:
         return "unknown"
     normalized = str(raw).strip().lower().replace(" ", "_").replace("-", "_")
     if normalized in {"print", "non_print"}:
         return normalized
-    # Display labels from verified Eternal classification only — not name heuristics.
     if normalized in {"cetak"}:
         return "print"
-    if normalized in {"tidak_cetak", "noncetak", "non_cetak", "tidakcetak"}:
+    if normalized in {
+        "tidak_cetak",
+        "noncetak",
+        "non_cetak",
+        "tidakcetak",
+        "tidak_print",
+        "non_print_item",
+    }:
         return "non_print"
     return "unknown"
 
 
+def _explicit_production_process(row: dict[str, Any]) -> str:
+    """print|non_print from explicit field, Owner-approved slot, or labeled CF.
+
+    Never infer from product name/category. Blank/unrecognized → unknown.
+    Header slots never apply to line process (scope-isolated).
+    """
+    raw = row.get("production_process")
+    if raw is None:
+        raw = row.get("productionProcess")
+    if raw is None:
+        raw = approved_raw_value(
+            row, scope="line", kind="production_process"
+        )
+    if raw is None:
+        raw = _custom_field_by_label(row, _PROCESS_LABELS)
+    return _normalize_process_token(raw)
+
+
 def _line_color(row: dict[str, Any], item: dict[str, Any]) -> str | None:
+    # Official Accurate color text — Owner-approved line charField2 when unlabeled.
     return _first_str(
         row.get("color"),
         row.get("warna"),
         row.get("detailColor"),
         item.get("color"),
         item.get("warna"),
+        approved_raw_value(row, scope="line", kind="color"),
         _custom_field_by_label(row, _COLOR_LABELS),
         _custom_field_by_label(item, _COLOR_LABELS) if isinstance(item, dict) else None,
     )
@@ -494,9 +513,15 @@ def normalize_sales_order_list_item(raw: dict[str, Any]) -> dict[str, Any]:
     so_number = str(raw.get("number") or raw.get("no") or "")
     customer_po = _customer_po_number(raw)
     sales, sales_source = _extract_sales(raw)
-    # Buffer/Urgent only when labeled custom field (or later detail) proves meaning.
-    buffer_stock = _parse_buffer_stock(_custom_field_by_label(raw, _BUFFER_LABELS))
-    urgent_state = _parse_urgent_state(_custom_field_by_label(raw, _ORDER_STATUS_LABELS))
+    # Buffer/Urgent: Owner-approved header slots, else labeled CF only.
+    buffer_stock = _parse_buffer_stock(
+        approved_raw_value(raw, scope="header", kind="buffer")
+        or _custom_field_by_label(raw, _BUFFER_LABELS)
+    )
+    urgent_state = _parse_urgent_state(
+        approved_raw_value(raw, scope="header", kind="order_priority")
+        or _custom_field_by_label(raw, _ORDER_STATUS_LABELS)
+    )
     return {
         "id": _document_id(raw),
         "accurate_id": _document_id(raw),
@@ -579,15 +604,21 @@ def normalize_sales_order(raw: dict[str, Any]) -> dict[str, Any]:
         raw.get("zone"),
         raw.get("deliveryZoneName"),
         raw.get("shipZone"),
+        approved_raw_value(raw, scope="header", kind="delivery_zone"),
         _custom_field_by_label(raw, _ZONE_LABELS),
     )
-    # Re-resolve Buffer/Urgent on full detail (list often omits custom fields).
-    buffer_stock = _parse_buffer_stock(_custom_field_by_label(raw, _BUFFER_LABELS))
-    urgent_state = _parse_urgent_state(_custom_field_by_label(raw, _ORDER_STATUS_LABELS))
-    if buffer_stock is not None:
-        base["buffer_stock"] = buffer_stock
-    if urgent_state is not None:
-        base["urgent_state"] = urgent_state
+    # Re-resolve Buffer/Urgent on full detail (Owner slots + labeled CF).
+    buffer_stock = _parse_buffer_stock(
+        approved_raw_value(raw, scope="header", kind="buffer")
+        or _custom_field_by_label(raw, _BUFFER_LABELS)
+    )
+    urgent_state = _parse_urgent_state(
+        approved_raw_value(raw, scope="header", kind="order_priority")
+        or _custom_field_by_label(raw, _ORDER_STATUS_LABELS)
+    )
+    # Always set after detail resolve — None stays unknown (never invent false).
+    base["buffer_stock"] = buffer_stock
+    base["urgent_state"] = urgent_state
     base["notes"] = _first_str(
         raw.get("description"),
         raw.get("notes"),

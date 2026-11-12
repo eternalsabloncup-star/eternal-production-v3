@@ -111,7 +111,8 @@ def test_multicolor_does_not_multiply_physical_qty():
     assert mapped["line_items"][0]["color"] == "RED"
 
 
-def test_unlabeled_charfield_process_stays_unknown():
+def test_unlabeled_owner_slots_map_process_color_not_expedition():
+    # Slice 1N: Owner ordinals apply without companion labels; expedition still blocked.
     mapped = normalize_sales_order(
         {
             "id": 4,
@@ -129,15 +130,20 @@ def test_unlabeled_charfield_process_stays_unknown():
         }
     )
     assert mapped["expedition"] is None
-    assert mapped["line_items"][0]["production_process"] == "unknown"
-    assert mapped["line_items"][0]["color"] is None
+    assert mapped["delivery_zone"] == "OUTLET"
+    assert mapped["line_items"][0]["production_process"] == "print"
+    assert mapped["line_items"][0]["color"] == "RED"
 
 
-def test_custom_field_mapping_foundation_blocked():
+def test_custom_field_mapping_owner_partial_not_expedition():
+    # Slice 1N: Owner slots active; expedition/sales still blocked.
     st = mapping_status()
-    assert st["status"] == "BLOCKED"
-    assert st["approved_rule_count"] == 0
-    assert resolve_approved_slot(scope="header", slot="charField3", companion_label=None) is None
+    assert st["status"] == "PARTIAL"
+    assert st["approved_rule_count"] == 5
+    assert (
+        resolve_approved_slot(scope="header", slot="charField3", companion_label=None)
+        == "delivery_zone"
+    )
     assert (
         resolve_approved_slot(
             scope="header", slot="charField3", companion_label="Ekspedisi"
