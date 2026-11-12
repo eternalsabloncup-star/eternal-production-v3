@@ -1554,19 +1554,19 @@ def derive_team_tasks_for_job(
                 )
             )
 
-        # Penjadwalan — visible only when payment approved/bypassed.
+        # Penjadwalan — Siap (actionable) when payment OK; save still needs design via gates_open_for_schedule.
         if payment_ok:
             if has_schedule:
                 tasks.append(_task_row(job, "schedule", "done"))
-            elif design_ok:
-                tasks.append(_task_row(job, "schedule", "actionable"))
             else:
                 tasks.append(
                     _task_row(
                         job,
                         "schedule",
-                        "blocked",
-                        reason="Design belum disetujui/bypass",
+                        "actionable",
+                        reason=None
+                        if design_ok
+                        else "Design masih diperlukan saat simpan jadwal",
                     )
                 )
         # else: not visible
@@ -1649,17 +1649,8 @@ def derive_team_tasks_for_job(
                 )
             )
 
-    # Unknown-only / no classified lines: surface upload only if we treat as print-unknown.
-    if not has_print and not has_non_print:
-        # Fail closed: show design upload as pending classification — not actionable print chain.
-        tasks.append(
-            _task_row(
-                job,
-                "design_upload",
-                "pending",
-                reason="production_process belum terklasifikasi (print/non_print)",
-            )
-        )
+    # Unknown-only: no fake print/non-print task chain — classification lives on Jadwal/Inbox.
+    # (empty list on purpose)
 
     return tasks
 

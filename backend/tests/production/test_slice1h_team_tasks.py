@@ -105,7 +105,7 @@ def test_approval_never_auto_on_upload():
     assert s["design_approve"] == "actionable"
 
 
-def test_schedule_visible_when_payment_ok_blocked_without_design():
+def test_schedule_siap_when_payment_ok_save_still_needs_design():
     job = _job(payment_status="approved", design_status="pending")
     lines = [SimpleNamespace(production_process="print")]
     designs = [SimpleNamespace(status="pending")]
@@ -119,9 +119,11 @@ def test_schedule_visible_when_payment_ok_blocked_without_design():
         events=[],
     )
     s = _states(tasks)
-    assert s["schedule"] == "blocked"
+    assert s["schedule"] == "actionable"
     assert "screen" not in s
     assert "prepare" not in s
+    sched = next(t for t in tasks if t["kind"] == "schedule")
+    assert "Design" in (sched.get("reason") or "")
 
 
 def test_screen_prepare_only_after_schedule_parallel():
@@ -173,10 +175,11 @@ def test_unknown_process_no_print_chain():
     tasks = derive_team_tasks_for_job(
         job, lines=lines, designs=[], assignments=[], prep_states=[], samples=[], events=[]
     )
-    s = _states(tasks)
-    assert s["design_upload"] == "pending"
-    assert "screen" not in s
-    assert "prepare" not in s
+    kinds = {t["kind"] for t in tasks}
+    assert kinds == set()
+    assert "screen" not in kinds
+    assert "prepare" not in kinds
+    assert "design_upload" not in kinds
 
 
 @pytest.mark.asyncio

@@ -39,17 +39,22 @@ Stable business id: `{accurate_so_number}::{kind}[::{so_line_id]`.
 
 1. **Upload Design** — print lines only; available without payment; done when a design file exists or design bypassed/approved.
 2. **Approval Design** — separate; actionable only when a **pending** design version exists; never auto-approve on upload.
-3. **Penjadwalan** — visible when payment approved/bypassed; **blocked** if design not approved/bypassed; create still uses `gates_open_for_schedule`.
+3. **Penjadwalan** — **Siap/actionable** when payment approved/bypassed (even if design still open); **save/create** still requires both gates via `gates_open_for_schedule`.
 4. **Screen + Prepare Cup** — only after valid schedule assignment(s); parallel.
 5. **Downstream** (sample / print / packing) — only after prep evidence.
 6. **Non-cetak** — `stockprep` / `stockpack` only; **no** fake screen/sample/print. Non-print-only skips design gate when session lines are known.
+7. **Unknown-only** — no fake task chain; classification stays on Jadwal/Inbox.
 
 ## Frontend
 
 - Map `production_process` → `processSnapshot` (`PRINT` / `NON_PRINT` / `UNKNOWN`).
 - Live empty `sourceLines` stay empty (no demo invent).
-- Live Tugas Tim reads `__V3_OFFICIAL_TASKS__` from the tasks API; Upload vs Approval cards split; footer shows official source.
+- One `allTasks` path: official `__V3_OFFICIAL_TASKS__` when synced, else live-derived `flow31Tasks`; cards keep only **Siap | Selesai | Sedang**.
+- Footer never shows “Data simulasi 3 PO” in live mode.
+- Schedule editor / `intakeApproved` / `validateScheduleDraft` use `bothOfficialGatesOk`.
 - Gate display synced from `design_status` / `payment_status` independently.
+
+See also: `docs/slice1h-schedule-gates.md` (Jadwal KPI / print-before-ACC).
 
 ## No migration
 
