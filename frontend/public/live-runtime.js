@@ -1924,6 +1924,7 @@
       return j.accurate_so_number;
     });
     let body;
+    window.__V3_OFFICIAL_TASK_ERROR__ = null;
     try {
       body = await request(API + "/production/jobs/tasks", {
         method: "POST",
@@ -1934,17 +1935,29 @@
         },
       });
     } catch (err) {
-      // Read-only fallback if create permission missing.
-      const q =
-        API +
-        "/production/jobs/tasks" +
-        (soNumbers.length
-          ? "?so=" + encodeURIComponent(soNumbers.join(","))
-          : "");
-      body = await request(q);
+      // Read-only GET if create permission missing — still official, never FLOW31.
+      try {
+        const q =
+          API +
+          "/production/jobs/tasks" +
+          (soNumbers.length
+            ? "?so=" + encodeURIComponent(soNumbers.join(","))
+            : "");
+        body = await request(q);
+      } catch (err2) {
+        window.__V3_OFFICIAL_TASK_SOURCE__ = null;
+        window.__V3_OFFICIAL_TASKS__ = [];
+        window.__V3_OFFICIAL_TASK_ERROR__ =
+          (err2 && err2.message) ||
+          (err && err.message) ||
+          "Gagal memuat /production/jobs/tasks";
+        if (typeof window.render === "function") window.render();
+        throw err2;
+      }
     }
     window.__V3_OFFICIAL_TASK_SOURCE__ = body && body.source;
     window.__V3_OFFICIAL_TASKS__ = mapOfficialTaskRows((body && body.tasks) || []);
+    window.__V3_OFFICIAL_TASK_ERROR__ = null;
     (body && body.jobs ? body.jobs : []).forEach(function (job) {
       if (!job) return;
       jobCache[job.accurate_so_number] = job;

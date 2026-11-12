@@ -456,17 +456,28 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
         json={"approved_qty": "3"},
     )
 
-    # Pack available qty (outputs - rejects approximately): use conservative 50
+    # Pack physical cups only (color_pass 1): 30+20-2 correction -3 reject = 45.
+    # Pass-2 output (40) must not inflate packable stock.
     pack = await client.post(
         f"/api/v1/production/jobs/{jid}/packing",
         headers=h,
         json={
             "so_line_id": "line-1",
-            "qty_physical": "50",
+            "qty_physical": "45",
             "idempotency_key": "pack-pass-1",
         },
     )
     assert pack.status_code == 200, pack.text
+    pack_over = await client.post(
+        f"/api/v1/production/jobs/{jid}/packing",
+        headers=h,
+        json={
+            "so_line_id": "line-1",
+            "qty_physical": "1",
+            "idempotency_key": "pack-pass-over",
+        },
+    )
+    assert pack_over.status_code == 409, pack_over.text
 
     # Cancelled SJ fail-closed
     load_bad = await client.post(

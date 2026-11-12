@@ -213,7 +213,11 @@ async def compute_run(
             continue
         b = _acc(asg.operator_name, asg.branch_id)
         bucket = COLOR_BUCKET.get(int(e.color_pass or 1), "one")
-        b[f"qty_{bucket}"] = b[f"qty_{bucket}"] + Decimal(e.qty_physical or 0)
+        # Work-pass qty for payroll — prefer qty_pass_ops; never treat multi-pass as stock.
+        work_qty = (
+            e.qty_pass_ops if e.qty_pass_ops is not None else e.qty_physical
+        )
+        b[f"qty_{bucket}"] = b[f"qty_{bucket}"] + Decimal(work_qty or 0)
         b["event_ids"].append(e.id)
 
     # Subtract verified rejects in period from same operator/color bucket.

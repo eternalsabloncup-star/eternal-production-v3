@@ -20,6 +20,13 @@ from app.models.user import User
 from app.models.work_order import WorkOrder
 from app.services.production import permissions as P
 
+# Canonical ledger event contracts (producers write the first name; consumers accept aliases).
+CANONICAL_PACKING_EVENT = "packing_batch"
+PACKING_EVENT_TYPES = frozenset({"packing_batch", "packing_recorded"})
+OUTPUT_EVENT_TYPES = frozenset({"output_confirmed", "output_correction"})
+# Physical cups enter the ledger on color_pass 1. Later passes are work-ops on the same cups.
+PHYSICAL_CUP_COLOR_PASS = 1
+
 
 def _require(user: User, *perms: str) -> None:
     have = set(user.permissions or [])
@@ -37,6 +44,50 @@ async def get_job(session: AsyncSession, job_id: int) -> ProductionJob:
     if job is None:
         raise HTTPException(404, "Production job tidak ditemukan")
     return job
+
+
+def physical_cup_qty_from_events(
+    events: list,
+    *,
+    so_line_id: str | None = None,
+) -> Decimal:
+    """Finished physical cups from append-only events — never sum multi-color passes.
+
+    Rule: color_pass == 1 (or missing/legacy null treated as pass 1) contributes cups.
+    Corrections adjust the same pass. Higher color_pass values are operator work-ops only.
+    """
+    total = Decimal("0")
+    for e in events:
+        et = getattr(e, "event_type", None)
+        if et not in OUTPUT_EVENT_TYPES:
+            continue
+        line = getattr(e, "so_line_id", None)
+        if so_line_id is not None and line != so_line_id:
+            continue
+        pass_no = getattr(e, "color_pass", None)
+        if pass_no is None:
+            pass_no = PHYSICAL_CUP_COLOR_PASS
+        if int(pass_no) != PHYSICAL_CUP_COLOR_PASS:
+            continue
+        total += Decimal(getattr(e, "qty_physical", 0) or 0)
+    return total
+
+
+def packing_qty_from_events(
+    events: list,
+    *,
+    so_line_id: str | None = None,
+) -> Decimal:
+    """Sum packing evidence — accepts canonical packing_batch and alias packing_recorded."""
+    total = Decimal("0")
+    for e in events:
+        if getattr(e, "event_type", None) not in PACKING_EVENT_TYPES:
+            continue
+        line = getattr(e, "so_line_id", None)
+        if so_line_id is not None and line != so_line_id:
+            continue
+        total += Decimal(getattr(e, "qty_physical", 0) or 0)
+    return total
 
 
 def _coerce_buffer_stock(value) -> bool | None:
@@ -945,13 +996,14 @@ async def record_packing(
     _branch(user, job.branch_id)
     if qty_physical <= 0:
         raise HTTPException(422, "Qty packing harus > 0")
+    # Physical cups only from color_pass 1 — never sum all multi-color passes.
     produced = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
             ProductionEvent.job_id == job.id,
-            ProductionEvent.event_type.in_(
-                ["output_confirmed", "output_correction"]
-            ),
+            ProductionEvent.event_type.in_(list(OUTPUT_EVENT_TYPES)),
             ProductionEvent.so_line_id == so_line_id,
+            func.coalesce(ProductionEvent.color_pass, PHYSICAL_CUP_COLOR_PASS)
+            == PHYSICAL_CUP_COLOR_PASS,
         )
     )
     # Only authorized verified rejects reduce packable physical qty.
@@ -960,12 +1012,14 @@ async def record_packing(
             ProductionEvent.job_id == job.id,
             ProductionEvent.event_type == "reject_verified",
             ProductionEvent.so_line_id == so_line_id,
+            func.coalesce(ProductionEvent.color_pass, PHYSICAL_CUP_COLOR_PASS)
+            == PHYSICAL_CUP_COLOR_PASS,
         )
     )
     packed = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
             ProductionEvent.job_id == job.id,
-            ProductionEvent.event_type == "packing_batch",
+            ProductionEvent.event_type.in_(list(PACKING_EVENT_TYPES)),
             ProductionEvent.so_line_id == so_line_id,
         )
     )
@@ -974,7 +1028,7 @@ async def record_packing(
         raise HTTPException(409, "Overpacking: melebihi qty fisik tersedia")
     event = ProductionEvent(
         job_id=job.id,
-        event_type="packing_batch",
+        event_type=CANONICAL_PACKING_EVENT,
         so_line_id=so_line_id,
         lot_code=lot_code,
         qty_physical=qty_physical,
@@ -1020,7 +1074,7 @@ async def record_loading(
     packed = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
             ProductionEvent.job_id == job.id,
-            ProductionEvent.event_type == "packing_batch",
+            ProductionEvent.event_type.in_(list(PACKING_EVENT_TYPES)),
         )
     )
     loaded = await session.scalar(
@@ -1113,10 +1167,21 @@ async def record_pod(
             ProductionEvent.accurate_sj_id == accurate_sj_id,
         )
     )
+    already_pod = await session.scalar(
+        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.event_type == "pod",
+            ProductionEvent.accurate_sj_id == accurate_sj_id,
+        )
+    )
+    remaining = Decimal(loaded or 0) - Decimal(already_pod or 0)
     if Decimal(loaded or 0) <= 0:
         raise HTTPException(409, "POD tidak boleh bypass Loading")
-    if qty_physical <= 0 or qty_physical > Decimal(loaded or 0):
-        raise HTTPException(409, "Qty POD tidak valid terhadap Loading")
+    if qty_physical <= 0 or qty_physical > remaining:
+        raise HTTPException(409, "Qty POD tidak valid terhadap sisa Loading SJ")
+    # V1 requires 2 photos + sender/recipient signatures. Current schema has a single
+    # evidence_ref string — full multi-attachment POD is BLOCKED without migration.
+    # Fail closed on empty evidence; do not invent multi-proof from one generic ref.
     event = ProductionEvent(
         job_id=job.id,
         event_type="pod",
@@ -1124,7 +1189,7 @@ async def record_pod(
         accurate_sj_id=accurate_sj_id,
         idempotency_key=idempotency_key,
         actor_user_id=user.id,
-        evidence_ref=evidence_ref,
+        evidence_ref=evidence_ref.strip(),
         reason=f"receiver:{receiver_name.strip()}",
     )
     session.add(event)
@@ -1513,22 +1578,9 @@ def derive_team_tasks_for_job(
         s for s in samples if getattr(s, "status", None) in {"approved", "bypassed"}
     ]
     sample_uploaded = bool(samples)
-    print_qty = sum(
-        (
-            Decimal(getattr(e, "qty_physical", 0) or 0)
-            for e in events
-            if getattr(e, "event_type", None) == "output_confirmed"
-        ),
-        Decimal("0"),
-    )
-    pack_qty = sum(
-        (
-            Decimal(getattr(e, "qty_physical", 0) or 0)
-            for e in events
-            if getattr(e, "event_type", None) == "packing_recorded"
-        ),
-        Decimal("0"),
-    )
+    # Physical finished cups (pass 1 only) — never inflate with multi-color work-ops.
+    print_qty = physical_cup_qty_from_events(events)
+    pack_qty = packing_qty_from_events(events)
 
     tasks: list[dict] = []
 
