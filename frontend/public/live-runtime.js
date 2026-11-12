@@ -1798,6 +1798,131 @@
   };
   window.v3PublishOrders = publishOrders;
 
+  // Slice 1F addendum — Live Tracking (Inbox): no demo drawer, no invented progress.
+  const TRACKING_PATH_PREFIXES = ["/track/", "/t/"];
+
+  function extractOfficialTrackingUrl(source) {
+    if (!source || typeof source !== "object") return null;
+    const nested = source.tracking;
+    const candidates = [
+      source.tracking_url,
+      source.public_tracking_url,
+      source.trackingUrl,
+      source.publicTrackingUrl,
+      nested && nested.url,
+      nested && nested.public_url,
+      nested && nested.publicUrl,
+    ];
+    for (let i = 0; i < candidates.length; i += 1) {
+      const raw = candidates[i];
+      if (raw == null) continue;
+      const url = String(raw).trim();
+      if (url) return url;
+    }
+    return null;
+  }
+
+  function isAllowedTrackingUrl(url) {
+    const raw = String(url || "").trim();
+    if (!raw) return false;
+    const lower = raw.toLowerCase();
+    if (
+      lower.indexOf("javascript:") === 0 ||
+      lower.indexOf("data:") === 0 ||
+      lower.indexOf("vbscript:") === 0 ||
+      lower.indexOf("blob:") === 0
+    ) {
+      return false;
+    }
+    try {
+      const parsed = new URL(raw, window.location.origin);
+      if (parsed.username || parsed.password) return false;
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+      const pathOk = TRACKING_PATH_PREFIXES.some(function (p) {
+        return parsed.pathname.indexOf(p) === 0;
+      });
+      if (!pathOk) return false;
+      const host = parsed.hostname.toLowerCase();
+      const isLocal =
+        host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+      if (parsed.protocol === "http:" && !isLocal) return false;
+      return parsed.origin === window.location.origin;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function declaredSo(source) {
+    if (!source || typeof source !== "object") return null;
+    const candidates = [
+      source.so_number,
+      source.po_number,
+      source.number,
+      source.tracking && source.tracking.so_number,
+      source.id,
+    ];
+    for (let i = 0; i < candidates.length; i += 1) {
+      const raw = candidates[i];
+      if (raw == null) continue;
+      const s = String(raw).trim();
+      if (!s) continue;
+      if (/^\d+$/.test(s)) continue; // numeric job id ≠ SO number
+      return s;
+    }
+    return null;
+  }
+
+  function decideLiveTrackingOpen(so, order, job) {
+    const id = String(so || "").trim();
+    if (!id) {
+      return { status: "unavailable", reason: "missing_so" };
+    }
+    const declared = declaredSo(job) || declaredSo(order);
+    if (declared && declared !== id) {
+      return { status: "unavailable", reason: "cross_po_mismatch" };
+    }
+    const url =
+      extractOfficialTrackingUrl(job) || extractOfficialTrackingUrl(order);
+    if (!url) return { status: "unavailable", reason: "no_official_url" };
+    if (!isAllowedTrackingUrl(url)) {
+      return { status: "unavailable", reason: "invalid_url" };
+    }
+    return { status: "open", url: url };
+  }
+
+  function showTrackingUnavailable() {
+    // Never open SIMULASI OFFLINE drawer; never invent progress; no fake links.
+    document.getElementById("v36-tracking-overlay")?.remove();
+    toast("Tracking belum tersedia");
+  }
+
+  window.v3OpenLiveTracking = function (so) {
+    const id = String(so || "").trim();
+    const order = orderBySo(id);
+    if (!order) {
+      showTrackingUnavailable();
+      return;
+    }
+    // Read-only decision from cached job summary only — no mutation, no demo timeline.
+    const job = jobCache[id] || null;
+    const decision = decideLiveTrackingOpen(id, order, job);
+    if (decision.status === "open" && decision.url) {
+      window.open(decision.url, "_blank", "noopener,noreferrer");
+      return;
+    }
+    showTrackingUnavailable();
+  };
+
+  // Authoritative overrides — disable legacy demo tracking entry points.
+  window.v36OpenTracking = function (id) {
+    document.getElementById("v36-tracking-overlay")?.remove();
+    window.v3OpenLiveTracking(id);
+  };
+  window.v36RenderTracking = function () {
+    document.getElementById("v36-tracking-overlay")?.remove();
+    // Intentionally empty of progress UI — demo path removed.
+  };
+
   (async function bootLive() {
     clearGhosts();
     const ok = await verifySession();

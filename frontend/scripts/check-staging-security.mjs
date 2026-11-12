@@ -59,6 +59,19 @@ if (/let orders=\[\]/.test(production)) {
 for (const hook of ["v3OpenWorkflow", "v50RefreshInbox", "v3Logout"]) {
   if (!live.includes(hook)) errors.push(`live-runtime missing ${hook}`);
 }
+if (!/v3OpenLiveTracking/.test(live)) {
+  errors.push("live-runtime missing v3OpenLiveTracking (Slice 1F addendum)");
+}
+if (!/Tracking belum tersedia/.test(live)) {
+  errors.push("live-runtime must surface Tracking belum tersedia");
+}
+if (/LIVE TRACKING · SIMULASI OFFLINE/.test(production)) {
+  errors.push("production.html must not ship SIMULASI OFFLINE live-tracking drawer");
+}
+if (!/Slice 1F addendum: V43 SIMULASI OFFLINE tracking drawer disabled/.test(production)) {
+  errors.push("production.html must disable V43 demo tracking drawer");
+}
+
 
 if (!/\/auth\/login/.test(app)) errors.push("App.tsx missing login API");
 if (!/epv3_access_token/.test(app)) errors.push("App.tsx missing token key");
