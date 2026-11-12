@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Step 90 — sanitized four-field Accurate Live evidence probe.
+"""Step 90/102 — sanitized four-field Accurate Live evidence probe.
 
 Scope only:
   1) Sales / Penjual
@@ -7,12 +7,16 @@ Scope only:
   3) Status Pesanan (Owner H CF4)
   4) Buffer / Non-Buffer (Owner H CF5)
 
+Modes:
+  - verify (default): requires --expected-file; MATCH/MISMATCH/UNKNOWN
+  - --discover-only: --expected-file optional; JSON paths + parser classes only
+
 Safety:
   - GET sales-order list/detail only; POST api-token.do auth bootstrap only.
   - Never print credentials, tokens, customer data, SO numbers, raw payloads,
-    or field values — only JSON path names + MATCH/MISMATCH/UNKNOWN.
-  - Does not invent new mappings; path discovery for Pengiriman candidates is
-    presence-only until Live proves which key maps to UI Pengiriman.
+    or field values — only JSON path names + classifications.
+  - Does not invent new mappings; Pengiriman candidate keys are presence-only
+    and never marked resolved without a normalizer-mapped path.
 """
 
 from __future__ import annotations
@@ -195,11 +199,26 @@ def cmp_bool(actual: Any, expected: bool) -> str:
     return "UNKNOWN"
 
 
+def _presence_class(slot: dict[str, str], mapped_class: str) -> str:
+    if slot["value_present"] == "false":
+        return "absent"
+    if mapped_class == "unknown":
+        return "present_unrecognized_or_unparsed"
+    return "present_mapped"
+
+
 def build_four_field_report(
     raw: dict[str, Any],
-    expected: dict[str, Any],
+    expected: dict[str, Any] | None,
     so_number: str,
+    *,
+    discover_only: bool = False,
 ) -> dict[str, Any]:
+    """Build sanitized four-field matrix.
+
+    discover_only=True: no expected file; report JSON paths + parser classes only
+    (no MATCH/MISMATCH verification). Never prints field values.
+    """
     from app.custom_field_mapping import approved_raw_value, mapping_status
     from app.normalize import (
         _extract_sales,
@@ -214,6 +233,7 @@ def build_four_field_report(
         return {
             "ok": False,
             "probe": PROBE_NAME,
+            "mode": "discover" if discover_only else "verify",
             "blocker": "document_number_mismatch",
             "expected_so_hash": _so_hash(so_number),
             "actual_so_hash": _so_hash(number) if number else None,
@@ -230,88 +250,98 @@ def build_four_field_report(
     urgent_class = classify_urgent(mapped.get("urgent_state"))
     buffer_class = classify_buffer(mapped.get("buffer_stock"))
 
-    # Presence taxonomy for CF slots (no values leaked).
-    def presence_class(slot: dict[str, str], mapped_class: str) -> str:
-        if slot["value_present"] == "false":
-            return "absent"
-        if mapped_class == "unknown":
-            return "present_unrecognized_or_unparsed"
-        return "present_mapped"
+    sales_row: dict[str, Any] = {
+        "field": "Sales",
+        "json_path": sales_paths[0] if sales_paths else "UNKNOWN",
+        "all_json_paths": sales_paths,
+        "normalizer_supported_paths": sales_paths,  # discovery from actual keys present
+        "present": bool(sales_paths),
+        "classification": "mapped" if sales_name else "unknown",
+        "parser_source": sales_source,
+        "normalizer_supported": True,  # salesman* keys are already supported
+    }
+    peng_row: dict[str, Any] = {
+        "field": "Pengiriman",
+        "json_path": ship["proven_json_path"],
+        "mapped_native_paths_present": ship["mapped_native_paths_present"],
+        "unproven_candidate_paths_present": ship["unproven_candidate_paths_present"],
+        "present": bool(
+            ship["mapped_native_paths_present"]
+            or ship["unproven_candidate_paths_present"]
+        ),
+        "classification": (
+            "mapped"
+            if mapped.get("expedition")
+            else (
+                "unknown_path_candidate_only"
+                if ship["unproven_candidate_paths_present"]
+                else "unknown"
+            )
+        ),
+        # Candidate presence alone never means RESOLVED.
+        "resolved": bool(mapped.get("expedition")),
+        "normalizer_supported": bool(ship["mapped_native_paths_present"]),
+    }
+    status_row: dict[str, Any] = {
+        "field": "Status",
+        "json_path": cf4["json_path"],
+        "present": cf4["value_present"] == "true",
+        "companion_label_present": cf4["companion_label_present"] == "true",
+        "classification": urgent_class,
+        "presence_class": _presence_class(cf4, urgent_class),
+        "owner_slot_hit": owner_status_raw is not None,
+        "normalizer_supported": True,  # Owner CF4
+    }
+    buffer_row: dict[str, Any] = {
+        "field": "Buffer",
+        "json_path": cf5["json_path"],
+        "present": cf5["value_present"] == "true",
+        "companion_label_present": cf5["companion_label_present"] == "true",
+        "classification": buffer_class,
+        "presence_class": _presence_class(cf5, buffer_class),
+        "owner_slot_hit": owner_buffer_raw is not None,
+        "normalizer_supported": True,  # Owner CF5
+        "parser_accepts_non_spaced_hyphen": _parse_buffer_stock("Non - Buffer")
+        is False,
+        "parser_accepts_normal": _parse_urgent_state("Normal") == "normal",
+    }
 
-    matrix = [
-        {
-            "field": "Sales",
-            "json_path": sales_paths[0] if sales_paths else "UNKNOWN",
-            "all_json_paths": sales_paths,
-            "present": bool(sales_paths),
-            "classification": "mapped" if sales_name else "unknown",
-            "verification": cmp_str(sales_name, expected["sales"]),
-            "parser_source": sales_source,
-        },
-        {
-            "field": "Pengiriman",
-            "json_path": ship["proven_json_path"],
-            "mapped_native_paths_present": ship["mapped_native_paths_present"],
-            "unproven_candidate_paths_present": ship[
-                "unproven_candidate_paths_present"
-            ],
-            "present": bool(
-                ship["mapped_native_paths_present"]
-                or ship["unproven_candidate_paths_present"]
-            ),
-            "classification": (
-                "mapped"
-                if mapped.get("expedition")
-                else (
-                    "unknown_path_candidate_only"
-                    if ship["unproven_candidate_paths_present"]
-                    else "unknown"
-                )
-            ),
-            "verification": cmp_str(mapped.get("expedition"), expected["expedition"]),
-        },
-        {
-            "field": "Status",
-            "json_path": cf4["json_path"],
-            "present": cf4["value_present"] == "true",
-            "companion_label_present": cf4["companion_label_present"] == "true",
-            "classification": urgent_class,
-            "presence_class": presence_class(cf4, urgent_class),
-            "verification": cmp_str(mapped.get("urgent_state"), expected["urgent_state"]),
-            "owner_slot_hit": owner_status_raw is not None,
-        },
-        {
-            "field": "Buffer",
-            "json_path": cf5["json_path"],
-            "present": cf5["value_present"] == "true",
-            "companion_label_present": cf5["companion_label_present"] == "true",
-            "classification": buffer_class,
-            "presence_class": presence_class(cf5, buffer_class),
-            "verification": cmp_bool(
-                mapped.get("buffer_stock"), expected["buffer_stock"]
-            ),
-            "owner_slot_hit": owner_buffer_raw is not None,
-            # Prove parsers accept Owner UI spacing without leaking values.
-            "parser_accepts_non_spaced_hyphen": _parse_buffer_stock("Non - Buffer")
-            is False,
-            "parser_accepts_normal": _parse_urgent_state("Normal") == "normal",
-        },
-    ]
+    if not discover_only:
+        if expected is None:
+            raise ValueError("expected_required_unless_discover_only")
+        sales_row["verification"] = cmp_str(sales_name, expected["sales"])
+        peng_row["verification"] = cmp_str(
+            mapped.get("expedition"), expected["expedition"]
+        )
+        status_row["verification"] = cmp_str(
+            mapped.get("urgent_state"), expected["urgent_state"]
+        )
+        buffer_row["verification"] = cmp_bool(
+            mapped.get("buffer_stock"), expected["buffer_stock"]
+        )
 
     return {
         "ok": True,
         "probe": PROBE_NAME,
+        "mode": "discover" if discover_only else "verify",
         "so_hash": _so_hash(so_number),
+        "identity": {"number_match": "yes"},
         "mapping_contract": mapping_status(),
-        "four_field_matrix": matrix,
+        "four_field_matrix": [sales_row, peng_row, status_row, buffer_row],
         "security": {
             "raw_values_printed": False,
             "expected_values_printed": False,
             "so_number_printed": False,
             "customer_printed": False,
             "credentials_printed": False,
+            "discover_only": discover_only,
         },
     }
+
+
+def build_discovery_report(raw: dict[str, Any], so_number: str) -> dict[str, Any]:
+    """Step 102 — path/classification discovery without expected values."""
+    return build_four_field_report(raw, None, so_number, discover_only=True)
 
 
 def load_expected_four(path: str, so_number: str) -> dict[str, Any]:
@@ -337,21 +367,34 @@ def load_expected_four(path: str, so_number: str) -> dict[str, Any]:
     }
 
 
-async def async_main(env_file: str, expected_file: str, so_number: str) -> int:
+async def async_main(
+    env_file: str,
+    expected_file: str,
+    so_number: str,
+    *,
+    discover_only: bool = False,
+) -> int:
     slice1l = _load_slice1l()
     slice1l.silence_sensitive_loggers()
     slice1l._HTTP_METHODS_EXECUTED.clear()
     report: dict[str, Any] = {
         "ok": False,
         "probe": PROBE_NAME,
+        "mode": "discover" if discover_only else "verify",
         "so_hash": _so_hash(so_number) if so_number else None,
     }
     try:
-        if not so_number or not expected_file:
-            report["blocker"] = "so_number_and_expected_required"
+        if not so_number:
+            report["blocker"] = "so_number_required"
             print(json.dumps(report, indent=2))
             return 2
-        expected = load_expected_four(expected_file, so_number)
+        if not discover_only and not expected_file:
+            report["blocker"] = "expected_file_required_unless_discover_only"
+            print(json.dumps(report, indent=2))
+            return 2
+        expected = (
+            None if discover_only else load_expected_four(expected_file, so_number)
+        )
         slice1l.load_env_file(env_file)
         from app.accurate_client import AccurateClient
         from app.config import settings
@@ -373,7 +416,9 @@ async def async_main(env_file: str, expected_file: str, so_number: str) -> int:
             report["blocker"] = "accurate_detail_shape"
             print(json.dumps(report, indent=2))
             return 1
-        built = build_four_field_report(raw, expected, so_number)
+        built = build_four_field_report(
+            raw, expected, so_number, discover_only=discover_only
+        )
         built["http"] = {
             "allowed_methods": list(slice1l._ALLOWED_HTTP_METHODS),
             "executed_methods": list(slice1l._HTTP_METHODS_EXECUTED),
@@ -388,11 +433,18 @@ async def async_main(env_file: str, expected_file: str, so_number: str) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Step 90 four-field sanitized probe")
+    parser = argparse.ArgumentParser(
+        description="Step 90/102 four-field sanitized probe (verify or discover-only)"
+    )
     parser.add_argument("--env-file", default=DEFAULT_ENV_FILE)
     parser.add_argument("--expected-file", default="")
     parser.add_argument("--so-number", default="")
     parser.add_argument("--syntax-check-only", action="store_true")
+    parser.add_argument(
+        "--discover-only",
+        action="store_true",
+        help="Discover JSON paths + parser classes without expected-file MATCH.",
+    )
     args = parser.parse_args()
     if args.syntax_check_only:
         print(
@@ -402,12 +454,20 @@ def main() -> int:
                     "syntax_check_only": True,
                     "probe": PROBE_NAME,
                     "executed_live": False,
+                    "supports_discover_only": True,
                 },
                 indent=2,
             )
         )
         return 0
-    return asyncio.run(async_main(args.env_file, args.expected_file, args.so_number))
+    return asyncio.run(
+        async_main(
+            args.env_file,
+            args.expected_file,
+            args.so_number,
+            discover_only=bool(args.discover_only),
+        )
+    )
 
 
 if __name__ == "__main__":
