@@ -200,6 +200,32 @@
       null;
     const salesOfficial =
       s.sales != null && String(s.sales).trim() ? String(s.sales).trim() : null;
+    const QiUrgent = window.V3QtyIntegrity;
+    const urgentFields =
+      QiUrgent && QiUrgent.urgentFieldsFromAccurateState
+        ? QiUrgent.urgentFieldsFromAccurateState(s.urgent_state)
+        : (function () {
+            const st =
+              s.urgent_state == null || !String(s.urgent_state).trim()
+                ? null
+                : String(s.urgent_state).trim();
+            const urgent =
+              st === "approved_urgent" || st === "legacy_urgent"
+                ? true
+                : st === "normal"
+                  ? false
+                  : null;
+            return {
+              urgent: urgent,
+              urgentState: st,
+              orderPriority:
+                urgent === true
+                  ? "Urgent"
+                  : urgent === false
+                    ? "Normal"
+                    : "Belum terverifikasi",
+            };
+          })();
     return {
       id: number,
       accurateId: s.accurate_id ?? null,
@@ -282,12 +308,6 @@
       expedition: s.expedition || null,
       deliveryZone: s.delivery_zone || null,
       poNotes: s.notes || null,
-      orderPriority:
-        s.urgent_state === "approved_urgent" || s.urgent_state === "legacy_urgent"
-          ? "Urgent"
-          : s.urgent_state === "normal"
-            ? "Normal"
-            : "Belum terverifikasi",
       bufferLabel:
         s.buffer_stock === true
           ? "Buffer"
@@ -309,9 +329,9 @@
           return x.color;
         })
         .filter(Boolean),
-      // Slice 1A: unknown Accurate mapping → null/unknown, never invent false.
-      urgent: null,
-      urgentState: s.urgent_state == null ? null : String(s.urgent_state),
+      urgent: urgentFields.urgent,
+      urgentState: urgentFields.urgentState,
+      orderPriority: urgentFields.orderPriority,
       bufferStock: s.buffer_stock === true ? true : s.buffer_stock === false ? false : null,
       bufferQty: null,
       scheduledQty: 0,
@@ -515,18 +535,34 @@
     if (detail.delivery_zone) o.deliveryZone = detail.delivery_zone;
     if (detail.notes) o.poNotes = detail.notes;
     o.ship = detail.deadline || detail.estimated_delivery || o.ship || null;
-    if (
-      detail.urgent_state === "approved_urgent" ||
-      detail.urgent_state === "legacy_urgent"
-    ) {
-      o.orderPriority = "Urgent";
-      o.urgentState = String(detail.urgent_state);
-    } else if (detail.urgent_state === "normal") {
-      o.orderPriority = "Normal";
-      o.urgentState = "normal";
-    } else if (!o.orderPriority) {
-      o.orderPriority = "Belum terverifikasi";
-    }
+    // Step 58: keep urgent / urgentState / orderPriority in lockstep; preserve list when detail omits.
+    (function () {
+      const Qi = window.V3QtyIntegrity;
+      const merged =
+        Qi && Qi.mergeUrgentFromIncoming
+          ? Qi.mergeUrgentFromIncoming(o, detail.urgent_state)
+          : null;
+      if (merged) {
+        o.urgent = merged.urgent;
+        o.urgentState = merged.urgentState;
+        o.orderPriority = merged.orderPriority;
+        return;
+      }
+      if (
+        detail.urgent_state === "approved_urgent" ||
+        detail.urgent_state === "legacy_urgent"
+      ) {
+        o.urgent = true;
+        o.orderPriority = "Urgent";
+        o.urgentState = String(detail.urgent_state);
+      } else if (detail.urgent_state === "normal") {
+        o.urgent = false;
+        o.orderPriority = "Normal";
+        o.urgentState = "normal";
+      } else if (!o.orderPriority) {
+        o.orderPriority = "Belum terverifikasi";
+      }
+    })();
     if (detail.buffer_stock === true) {
       o.bufferLabel = "Buffer";
       o.bufferStock = true;
@@ -762,13 +798,32 @@
     syncOrderGatesFromJob(order, job);
     order.bufferStock =
       job.buffer_stock === true ? true : job.buffer_stock === false ? false : null;
-    order.urgentState = job.urgent_state == null ? null : String(job.urgent_state);
-    order.urgent =
-      order.urgentState === "approved_urgent" || order.urgentState === "legacy_urgent"
-        ? true
-        : order.urgentState
-          ? false
+    (function () {
+      const Qi = window.V3QtyIntegrity;
+      const merged =
+        Qi && Qi.mergeUrgentFromIncoming
+          ? Qi.mergeUrgentFromIncoming(order, job.urgent_state)
           : null;
+      if (merged) {
+        order.urgent = merged.urgent;
+        order.urgentState = merged.urgentState;
+        order.orderPriority = merged.orderPriority;
+        return;
+      }
+      if (
+        job.urgent_state === "approved_urgent" ||
+        job.urgent_state === "legacy_urgent"
+      ) {
+        order.urgent = true;
+        order.urgentState = String(job.urgent_state);
+        order.orderPriority = "Urgent";
+      } else if (job.urgent_state === "normal") {
+        order.urgent = false;
+        order.urgentState = "normal";
+        order.orderPriority = "Normal";
+      }
+      // else: preserve existing order urgent fields
+    })();
     return job;
   }
 

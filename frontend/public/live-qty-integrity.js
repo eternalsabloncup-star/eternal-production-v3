@@ -225,6 +225,81 @@
     return enrichGeneration === startedGeneration && !!present;
   }
 
+  function urgentFlagFromState(urgentState) {
+    if (urgentState == null) return null;
+    const s = String(urgentState).trim();
+    if (!s) return null;
+    if (s === "approved_urgent" || s === "legacy_urgent") return true;
+    if (s === "normal") return false;
+    return null;
+  }
+
+  function orderPriorityFromState(urgentState) {
+    const flag = urgentFlagFromState(urgentState);
+    if (flag === true) return "Urgent";
+    if (flag === false) return "Normal";
+    return "Belum terverifikasi";
+  }
+
+  function urgentFieldsFromAccurateState(urgentState) {
+    const state =
+      urgentState == null || !String(urgentState).trim()
+        ? null
+        : String(urgentState).trim();
+    return {
+      urgent: urgentFlagFromState(state),
+      urgentState: state,
+      orderPriority: orderPriorityFromState(state),
+    };
+  }
+
+  function mergeUrgentFromIncoming(existing, incomingUrgentState) {
+    const hasIncoming =
+      incomingUrgentState != null && String(incomingUrgentState).trim() !== "";
+    if (!hasIncoming) {
+      const keptState =
+        existing &&
+        existing.urgentState != null &&
+        String(existing.urgentState).trim()
+          ? String(existing.urgentState).trim()
+          : null;
+      if (keptState) return urgentFieldsFromAccurateState(keptState);
+      if (existing && existing.urgent === true) {
+        return {
+          urgent: true,
+          urgentState: existing.urgentState || "approved_urgent",
+          orderPriority: existing.orderPriority || "Urgent",
+        };
+      }
+      if (existing && existing.urgent === false) {
+        return {
+          urgent: false,
+          urgentState: existing.urgentState || "normal",
+          orderPriority: existing.orderPriority || "Normal",
+        };
+      }
+      return {
+        urgent: null,
+        urgentState: null,
+        orderPriority:
+          (existing && existing.orderPriority) || "Belum terverifikasi",
+      };
+    }
+    return urgentFieldsFromAccurateState(incomingUrgentState);
+  }
+
+  function countUrgentOrders(rows) {
+    return (rows || []).filter(function (o) {
+      return o && o.urgent === true;
+    }).length;
+  }
+
+  function filterUrgentOrders(rows) {
+    return (rows || []).filter(function (o) {
+      return o && o.urgent === true;
+    });
+  }
+
   global.V3QtyIntegrity = {
     isQtyUnverified: isQtyUnverified,
     productionQtySnapshot: productionQtySnapshot,
@@ -235,5 +310,11 @@
     scheduleDetailProgress: scheduleDetailProgress,
     fetchDetailDeduped: fetchDetailDeduped,
     shouldApplyDetail: shouldApplyDetail,
+    urgentFlagFromState: urgentFlagFromState,
+    orderPriorityFromState: orderPriorityFromState,
+    urgentFieldsFromAccurateState: urgentFieldsFromAccurateState,
+    mergeUrgentFromIncoming: mergeUrgentFromIncoming,
+    countUrgentOrders: countUrgentOrders,
+    filterUrgentOrders: filterUrgentOrders,
   };
 })(typeof window !== "undefined" ? window : globalThis);
