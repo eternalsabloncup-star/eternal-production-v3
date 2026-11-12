@@ -75,7 +75,7 @@ describe("Slice 1M.1 qty integrity (typed module)", () => {
       qtyVerified: false,
       detailLoadState: "failed",
     });
-    expect(html).toContain("Gagal memuat");
+    expect(html).toContain("Gagal dimuat");
     expect(html).toContain("Retry");
     expect(html).toContain("retryInboxDetail('PO/11/X/1')");
     expect(html).not.toContain("<script>");

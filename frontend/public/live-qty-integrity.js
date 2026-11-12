@@ -146,9 +146,72 @@
       .replace(/'/g, "&#39;");
   }
 
+  var INBOX_PLACEHOLDER_VALUES = {
+    "": true,
+    "—": true,
+    "-": true,
+    "Belum terverifikasi": true,
+    "Belum tersedia": true,
+    "Belum dimuat": true,
+    "Memuat…": true,
+    "Memuat...": true,
+    "Gagal dimuat": true,
+    "Gagal memuat": true,
+    "Detail barang belum dimuat": true,
+    "Perlu verifikasi": true,
+  };
+
+  function inboxFieldHasVerifiedDisplay(value) {
+    if (value == null) return false;
+    if (typeof value === "number") return Number.isFinite(value);
+    if (typeof value === "boolean") return true;
+    var s = String(value).trim();
+    if (!s) return false;
+    if (INBOX_PLACEHOLDER_VALUES[s]) return false;
+    return true;
+  }
+
+  function inboxDetailRetryHtml(soNumber, escapeFn) {
+    var esc = escapeFn || escapeAttr;
+    var so = esc(soNumber || "");
+    return (
+      '<span class="muted">Gagal dimuat</span> ' +
+      '<button type="button" class="btn sm" onclick="window.retryInboxDetail&&window.retryInboxDetail(\'' +
+      so +
+      "')\">Retry</button>"
+    );
+  }
+
+  function inboxDetailPendingHtml(o, escapeFn) {
+    var state = (o && o.detailLoadState) || "not_loaded";
+    if (state === "loading") return '<span class="muted">Memuat…</span>';
+    if (state === "failed") return inboxDetailRetryHtml(o && o.id, escapeFn);
+    if (state === "loaded") return "";
+    return '<span class="muted">Belum dimuat</span>';
+  }
+
+  function inboxAbsenceHtml(kind) {
+    var label = kind === "unverified" ? "Belum terverifikasi" : "Belum tersedia";
+    return '<span class="muted">' + label + "</span>";
+  }
+
+  function inboxDetailDependentHtml(o, options) {
+    options = options || {};
+    var escapeFn = options.escapeFn || escapeAttr;
+    var absence = options.absence || "unavailable";
+    var value = options.value;
+    if (inboxFieldHasVerifiedDisplay(value)) {
+      var escaped = escapeFn(String(value));
+      return options.wrap ? options.wrap(escaped) : escaped;
+    }
+    var pending = inboxDetailPendingHtml(o, escapeFn);
+    if (pending) return pending;
+    return inboxAbsenceHtml(absence);
+  }
+
   function inboxQtyCellHtml(o, escapeFn) {
-    const esc = escapeFn || escapeAttr;
-    const state = o.detailLoadState || "not_loaded";
+    var esc = escapeFn || escapeAttr;
+    var state = o.detailLoadState || "not_loaded";
     if (
       o.qtyVerified === true &&
       o.qty != null &&
@@ -159,14 +222,7 @@
       );
     }
     if (state === "loading") return '<span class="muted">Memuat…</span>';
-    if (state === "failed") {
-      const so = esc(o.id || "");
-      return (
-        '<span class="muted">Gagal memuat</span> <button type="button" class="btn sm" onclick="window.retryInboxDetail&&window.retryInboxDetail(\'' +
-        so +
-        "')\">Retry</button>"
-      );
-    }
+    if (state === "failed") return inboxDetailRetryHtml(o && o.id, esc);
     if (state === "loaded") {
       return '<span class="muted">Qty belum terverifikasi</span>';
     }
@@ -307,6 +363,11 @@
     scheduleOverviewSum: scheduleOverviewSum,
     escapeAttr: escapeAttr,
     inboxQtyCellHtml: inboxQtyCellHtml,
+    inboxFieldHasVerifiedDisplay: inboxFieldHasVerifiedDisplay,
+    inboxDetailRetryHtml: inboxDetailRetryHtml,
+    inboxDetailPendingHtml: inboxDetailPendingHtml,
+    inboxAbsenceHtml: inboxAbsenceHtml,
+    inboxDetailDependentHtml: inboxDetailDependentHtml,
     scheduleDetailProgress: scheduleDetailProgress,
     fetchDetailDeduped: fetchDetailDeduped,
     shouldApplyDetail: shouldApplyDetail,

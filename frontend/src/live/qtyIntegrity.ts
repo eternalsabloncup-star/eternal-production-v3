@@ -230,7 +230,7 @@ export function inboxQtyCellHtml(
   }
   if (state === "failed") {
     const so = escapeFn(o.id || "");
-    return `<span class="muted">Gagal memuat</span> <button type="button" class="btn sm" onclick="window.retryInboxDetail&&window.retryInboxDetail('${so}')">Retry</button>`;
+    return `<span class="muted">Gagal dimuat</span> <button type="button" class="btn sm" onclick="window.retryInboxDetail&&window.retryInboxDetail('${so}')">Retry</button>`;
   }
   if (state === "loaded") {
     return '<span class="muted">Qty belum terverifikasi</span>';
