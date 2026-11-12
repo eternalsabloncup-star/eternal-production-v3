@@ -235,6 +235,7 @@ async def test_idempotent_output_concurrent(client: AsyncClient) -> None:
         json={
             "so_line_id": "line-1",
             "qty": "1",
+            "screen_size": "kecil",
             "evidence_ref": "s",
             "idempotency_key": "scr-idem-1",
         },

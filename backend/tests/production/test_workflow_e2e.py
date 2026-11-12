@@ -180,6 +180,7 @@ async def test_full_happy_path_and_guards(client: AsyncClient) -> None:
             "so_line_id": "line-1",
             "qty": "2",
             "po_qty": "100",
+            "screen_size": "kecil",
             "evidence_ref": "screen-photo-1",
             "idempotency_key": "prep-screen-1",
             "assignment_id": assignment_id,
@@ -293,16 +294,13 @@ async def test_full_happy_path_and_guards(client: AsyncClient) -> None:
     )
     assert over.status_code == 409
 
+    from tests.production.pod_attach_helpers import pod_body, upload_pod_bundle
+
+    early_ids = await upload_pod_bundle(client, job_id, "sj-1", headers=h)
     pod_blocked = await client.post(
         f"/api/v1/production/jobs/{job_id}/pod",
         headers=h,
-        json={
-            "accurate_sj_id": "sj-1",
-            "qty_physical": "10",
-            "idempotency_key": "pod-early-1",
-            "evidence_ref": "photo-1",
-            "receiver_name": "Budi",
-        },
+        json=pod_body("sj-1", "10", "pod-early-1", early_ids),
     )
     assert pod_blocked.status_code == 409
 
@@ -317,18 +315,15 @@ async def test_full_happy_path_and_guards(client: AsyncClient) -> None:
         },
     )
     assert load.status_code == 200
+    # Early upload bound? No — POD failed so attachments stay unbound; reuse or new.
+    # Re-upload fresh bundle for successful POD (cannot reuse if somehow bound).
+    ok_ids = await upload_pod_bundle(client, job_id, "sj-1", headers=h)
     pod = await client.post(
         f"/api/v1/production/jobs/{job_id}/pod",
         headers=h,
-        json={
-            "accurate_sj_id": "sj-1",
-            "qty_physical": "20",
-            "idempotency_key": "pod-pass-1",
-            "evidence_ref": "photo-1",
-            "receiver_name": "Budi",
-        },
+        json=pod_body("sj-1", "20", "pod-pass-1", ok_ids),
     )
-    assert pod.status_code == 200
+    assert pod.status_code == 200, pod.text
 
     tracking = await client.get(
         f"/api/v1/production/jobs/{job_id}/tracking", headers=h

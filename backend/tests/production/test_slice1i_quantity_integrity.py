@@ -240,6 +240,7 @@ async def test_packing_rejects_sum_of_two_color_passes(client_1i: AsyncClient) -
             "so_line_id": "L1",
             "qty": "1",
             "po_qty": "5000",
+            "screen_size": "kecil",
             "evidence_ref": "scr",
             "idempotency_key": "scr-1i-multi-color",
             "assignment_id": asg1["id"],

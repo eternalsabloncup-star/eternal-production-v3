@@ -58,6 +58,12 @@ class Settings(BaseSettings):
     accurate_evidence_enforce: bool = Field(
         default=False, alias="V3_ACCURATE_EVIDENCE_ENFORCE"
     )
+    # Private local attachment root (POD photos/signatures). No public URLs.
+    # Never point this at ERP V1 storage paths.
+    attachment_root: str = Field(
+        default=str(_REPO_ROOT / "backend" / "var" / "attachments"),
+        alias="V3_ATTACHMENT_ROOT",
+    )
 
     @property
     def cors_origin_list(self) -> list[str]:

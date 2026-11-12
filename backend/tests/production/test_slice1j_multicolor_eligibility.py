@@ -302,6 +302,7 @@ async def _seed_two_color_job(client: AsyncClient) -> tuple[int, dict, dict]:
             "so_line_id": "L1",
             "qty": "1",
             "po_qty": "5000",
+            "screen_size": "kecil",
             "evidence_ref": "scr",
             "idempotency_key": "scr-1j-elig-pass",
             "assignment_id": asg1["id"],

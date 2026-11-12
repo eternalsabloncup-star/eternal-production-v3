@@ -181,6 +181,7 @@ async def test_helper_qty_guards_and_idempotency(client: AsyncClient) -> None:
         json={
             "so_line_id": "line-1",
             "qty": "1",
+            "screen_size": "kecil",
             "evidence_ref": "s1",
             "idempotency_key": "screen-ok-1",
             "assignment_id": asg_id,
@@ -211,6 +212,7 @@ async def test_payroll_rate_history_and_no_duplicate_wages(
         json={
             "so_line_id": "line-1",
             "qty": "1",
+            "screen_size": "kecil",
             "evidence_ref": "s1",
             "idempotency_key": "pay-screen-1",
             "assignment_id": asg_id,

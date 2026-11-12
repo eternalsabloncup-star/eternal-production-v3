@@ -346,7 +346,8 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
                 "so_line_id": "line-1",
                 "qty": "1",
                 "po_qty": "100",
-                "evidence_ref": "screen-ev",
+                "screen_size": "kecil",
+            "evidence_ref": "screen-ev",
                 "idempotency_key": key,
                 "assignment_id": asg["id"],
             },
@@ -504,16 +505,13 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
     )
     assert load.status_code == 200, load.text
 
+    from tests.production.pod_attach_helpers import pod_body, upload_pod_bundle
+
+    attach_ids = await upload_pod_bundle(client, jid, "SJ-OK-1", headers=h)
     pod = await client.post(
         f"/api/v1/production/jobs/{jid}/pod",
         headers=h,
-        json={
-            "accurate_sj_id": "SJ-OK-1",
-            "qty_physical": "40",
-            "evidence_ref": "pod-photo",
-            "receiver_name": "Budi",
-            "idempotency_key": "pod-pass-1",
-        },
+        json=pod_body("SJ-OK-1", "40", "pod-pass-1", attach_ids),
     )
     assert pod.status_code == 200, pod.text
 

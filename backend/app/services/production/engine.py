@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -10,6 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.production.attachment import ProductionAttachment  # noqa: F401
 from app.models.production.design import DesignVersion
 from app.models.production.event import ProductionEvent
 from app.models.production.job import ProductionJob
@@ -1201,20 +1203,43 @@ async def record_pod(
     accurate_sj_id: str,
     qty_physical: Decimal,
     idempotency_key: str,
-    evidence_ref: str,
     receiver_name: str,
+    attachment_ids: dict[str, int],
+    evidence_ref: str | None = None,
 ) -> ProductionEvent:
+    """Confirm POD with four verified private attachments (photos + signatures).
+
+    Legacy single evidence_ref is retained only as an audit note when provided —
+    it never substitutes for the four attachment requirements.
+    Historical POD rows without attachments remain readable and are not relabeled.
+    """
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
-    if not evidence_ref.strip() or not receiver_name.strip():
-        raise HTTPException(422, "POD memerlukan bukti dan identitas penerima")
+    if not (receiver_name or "").strip():
+        raise HTTPException(422, "POD memerlukan nama penerima")
+    sj = (accurate_sj_id or "").strip()
+    if not sj:
+        raise HTTPException(422, "Identitas SJ Accurate wajib")
+
+    # Idempotent replay — do not rebind attachments or invent a second POD.
+    existing = await session.scalar(
+        select(ProductionEvent).where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        if existing.event_type != "pod":
+            raise HTTPException(409, "Idempotency key duplikat")
+        return existing
+
     cancelled = await session.scalar(
         select(func.count())
         .select_from(ProductionEvent)
         .where(
             ProductionEvent.job_id == job.id,
             ProductionEvent.event_type == "sj_cancelled",
-            ProductionEvent.accurate_sj_id == accurate_sj_id,
+            ProductionEvent.accurate_sj_id == sj,
         )
     )
     if int(cancelled or 0) > 0:
@@ -1225,16 +1250,18 @@ async def record_pod(
         .where(
             ProductionEvent.job_id == job.id,
             ProductionEvent.event_type == "loading",
-            ProductionEvent.accurate_sj_id == accurate_sj_id.strip(),
+            ProductionEvent.accurate_sj_id == sj,
         )
         .order_by(ProductionEvent.id.desc())
         .limit(1)
     )
-    if loading_row is not None and (loading_row.accurate_sj_number or "").strip():
+    if loading_row is None:
+        raise HTTPException(409, "POD tidak boleh bypass Loading")
+    if (loading_row.accurate_sj_number or "").strip():
         from app.services.accurate_evidence import require_valid_sj
 
         await require_valid_sj(
-            accurate_sj_id=accurate_sj_id,
+            accurate_sj_id=sj,
             accurate_sj_number=loading_row.accurate_sj_number,
             expected_so_number=job.accurate_so_number,
             expected_branch_id=job.branch_id,
@@ -1243,14 +1270,14 @@ async def record_pod(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
             ProductionEvent.job_id == job.id,
             ProductionEvent.event_type == "loading",
-            ProductionEvent.accurate_sj_id == accurate_sj_id,
+            ProductionEvent.accurate_sj_id == sj,
         )
     )
     already_pod = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
             ProductionEvent.job_id == job.id,
             ProductionEvent.event_type == "pod",
-            ProductionEvent.accurate_sj_id == accurate_sj_id,
+            ProductionEvent.accurate_sj_id == sj,
         )
     )
     remaining = Decimal(loaded or 0) - Decimal(already_pod or 0)
@@ -1258,21 +1285,34 @@ async def record_pod(
         raise HTTPException(409, "POD tidak boleh bypass Loading")
     if qty_physical <= 0 or qty_physical > remaining:
         raise HTTPException(409, "Qty POD tidak valid terhadap sisa Loading SJ")
-    # V1 requires 2 photos + sender/recipient signatures. Current schema has a single
-    # evidence_ref string — full multi-attachment POD is BLOCKED without migration.
-    # Fail closed on empty evidence; do not invent multi-proof from one generic ref.
+
+    from app.services.production import attachments as attach_svc
+
+    bound = await attach_svc.validate_unbound_pod_attachments(
+        session,
+        job=job,
+        accurate_sj_id=sj,
+        attachment_ids=attachment_ids,
+    )
+    # Compact audit pointer — not a substitute for attachment rows.
+    note = evidence_ref.strip() if evidence_ref and evidence_ref.strip() else None
+    attach_map = {p: bound[p].id for p in sorted(bound)}
     event = ProductionEvent(
         job_id=job.id,
         event_type="pod",
         qty_physical=qty_physical,
-        accurate_sj_id=accurate_sj_id,
+        accurate_sj_id=sj,
         idempotency_key=idempotency_key,
         actor_user_id=user.id,
-        evidence_ref=evidence_ref.strip(),
+        evidence_ref=note
+        or ("pod_attachments:" + ",".join(f"{k}:{v}" for k, v in attach_map.items())),
         reason=f"receiver:{receiver_name.strip()}",
+        payload_json=json.dumps({"attachments": attach_map}, separators=(",", ":")),
     )
     session.add(event)
     try:
+        await session.flush()
+        await attach_svc.bind_attachments_to_event(session, bound, event.id)
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
@@ -1454,6 +1494,7 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                 "role": p.role,
                 "qty": str(p.qty),
                 "evidence_ref": p.evidence_ref,
+                "screen_size": getattr(p, "screen_size", None),
                 "assignment_id": p.assignment_id,
             }
             for p in prep_states
@@ -1467,6 +1508,7 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                 "qty_before": str(e.qty_before),
                 "qty_after": str(e.qty_after),
                 "evidence_ref": e.evidence_ref,
+                "screen_size": getattr(e, "screen_size", None),
             }
             for e in prep_events
         ],
@@ -1571,6 +1613,18 @@ _TASK_META = {
         "label": "Packing Barang Non-Cetak",
         "verb": "Konfirmasi packing",
         "group": "stockpack",
+    },
+    "loading": {
+        "role": "Driver",
+        "label": "Loading",
+        "verb": "Konfirmasi loading SJ",
+        "group": "loading",
+    },
+    "delivery": {
+        "role": "Driver",
+        "label": "Pengiriman",
+        "verb": "Konfirmasi POD",
+        "group": "delivery",
     },
 }
 
@@ -1754,6 +1808,79 @@ def derive_team_tasks_for_job(
                             reason="Menunggu seluruh warna/pass selesai sebelum packing",
                         )
                     )
+
+        # Loading → Pengiriman (POD) — evidence-based; never fake Done from UI.
+        load_qty = sum(
+            (
+                Decimal(getattr(e, "qty_physical", 0) or 0)
+                for e in events
+                if getattr(e, "event_type", None) == "loading"
+            ),
+            Decimal("0"),
+        )
+        pod_qty = sum(
+            (
+                Decimal(getattr(e, "qty_physical", 0) or 0)
+                for e in events
+                if getattr(e, "event_type", None) == "pod"
+            ),
+            Decimal("0"),
+        )
+        # Compliant POD = event with payload attachments map (Slice 1K+).
+        # Legacy POD without attachments remains readable but does not mark delivery done.
+        compliant_pod = False
+        for e in events:
+            if getattr(e, "event_type", None) != "pod":
+                continue
+            raw = getattr(e, "payload_json", None) or ""
+            if '"attachments"' in str(raw) and "pod_photo_1" in str(raw):
+                compliant_pod = True
+                break
+        if pack_qty > 0:
+            if load_qty > 0:
+                tasks.append(_task_row(job, "loading", "done"))
+            else:
+                tasks.append(_task_row(job, "loading", "actionable"))
+            if load_qty > 0:
+                if compliant_pod and pod_qty > 0:
+                    if pod_qty >= load_qty:
+                        tasks.append(_task_row(job, "delivery", "done"))
+                    else:
+                        tasks.append(
+                            _task_row(
+                                job,
+                                "delivery",
+                                "actionable",
+                                reason="Pengiriman parsial — sisa loading masih ada",
+                            )
+                        )
+                else:
+                    tasks.append(
+                        _task_row(
+                            job,
+                            "delivery",
+                            "actionable",
+                            reason="POD wajib 2 foto + 2 TTD terverifikasi",
+                        )
+                    )
+            else:
+                tasks.append(
+                    _task_row(
+                        job,
+                        "delivery",
+                        "blocked",
+                        reason="Menunggu Loading SJ resmi",
+                    )
+                )
+        elif finished_qty > 0 or print_qty > 0:
+            tasks.append(
+                _task_row(
+                    job,
+                    "loading",
+                    "blocked",
+                    reason="Menunggu packing sebelum loading",
+                )
+            )
 
     if has_non_print:
         # Non-cetak: no fake screen/sample/print. Payment opens visibility.

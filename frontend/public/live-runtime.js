@@ -344,13 +344,21 @@
   async function request(path, options) {
     const opts = options || {};
     const headers = Object.assign({}, authHeaders(), opts.headers || {});
-    if (opts.body != null) headers["Content-Type"] = "application/json";
+    let body;
+    if (opts.formData) {
+      body = opts.formData;
+      // Browser sets multipart boundary — do not force JSON content-type.
+      delete headers["Content-Type"];
+    } else if (opts.body != null) {
+      headers["Content-Type"] = "application/json";
+      body = JSON.stringify(opts.body);
+    }
     const response = await fetch(path, {
       method: opts.method || "GET",
       credentials: "same-origin",
       headers: headers,
       cache: "no-store",
-      body: opts.body != null ? JSON.stringify(opts.body) : undefined,
+      body: body,
     });
     if (response.status === 401) {
       redirectToLogin();
@@ -861,6 +869,7 @@
           escapeHtml(p.role) +
           " · line " +
           escapeHtml(p.so_line_id) +
+          (p.screen_size ? " · screen " + escapeHtml(p.screen_size) : "") +
           " · qty " +
           escapeHtml(p.qty) +
           " · " +
@@ -1000,12 +1009,14 @@
           escapeHtml(order.qty || 1) +
           '"/></label>' +
           '<label>Screen qty<input id="v3-prep-screen" type="number" value="1"/></label>' +
+          '<label>Screen size<select id="v3-prep-screen-size"><option value="kecil">Kecil</option><option value="besar">Besar</option></select></label>' +
           '<label>Helper qty<input id="v3-prep-helper" type="number" value="' +
           escapeHtml(order.qty || 1) +
           '"/></label>' +
           '<label>Evidence<input id="v3-prep-ev" value="prep-evidence"/></label>' +
           '<button type="button" class="btn sm" data-v3="prep-screen">Simpan screener</button>' +
           '<button type="button" class="btn sm" data-v3="prep-helper">Simpan helper</button>' +
+          '<p class="v49-quiet">Screen Kecil/Besar wajib dari backend — bukan localStorage.</p>' +
           historyList("Status prep", prepHist),
       ) +
       section(
@@ -1050,18 +1061,22 @@
           '<button type="button" class="btn sm" data-v3="pack">Confirm packing batch</button>',
       ) +
       section(
-        "Delivery",
+        "Delivery / POD",
         '<label>Accurate SJ id<input id="v3-sj-id"/></label>' +
           '<label>Accurate SJ number<input id="v3-sj-no"/></label>' +
           '<label>Loading qty<input id="v3-load-qty" type="number" min="1" value="1"/></label>' +
           '<button type="button" class="btn sm" data-v3="load">Loading</button>' +
-          '<label>POD qty<input id="v3-pod-qty" type="number" min="1" value="1"/></label>' +
-          '<label>Receiver<input id="v3-pod-recv"/></label>' +
-          '<label>Evidence<input id="v3-pod-ev" value="pod-photo"/></label>' +
-          '<button type="button" class="btn sm" data-v3="pod">POD</button>' +
+          '<label>POD qty (parsial OK)<input id="v3-pod-qty" type="number" min="1" value="1"/></label>' +
+          '<label>Nama penerima<input id="v3-pod-recv"/></label>' +
+          '<label>Foto 1<input id="v3-pod-photo1" type="file" accept="image/*"/></label>' +
+          '<label>Foto 2<input id="v3-pod-photo2" type="file" accept="image/*"/></label>' +
+          '<label>TTD pengirim<input id="v3-pod-sig-s" type="file" accept="image/*"/></label>' +
+          '<label>TTD penerima<input id="v3-pod-sig-r" type="file" accept="image/*"/></label>' +
+          '<button type="button" class="btn sm" data-v3="pod">Konfirmasi POD</button>' +
+          '<pre id="v3-pod-status" class="v49-quiet"></pre>' +
           '<label>Cancel SJ reason<input id="v3-sj-cancel-reason"/></label>' +
           '<button type="button" class="btn sm" data-v3="sj-cancel">Cancel/supersede SJ</button>' +
-          '<p class="v49-quiet">SJ harus identitas Accurate resmi. Tanpa id/number, aksi ditolak server.</p>',
+          '<p class="v49-quiet">POD resmi butuh Loading + 2 foto + 2 TTD + nama penerima. Tanpa itu server menolak — tidak ada status delivered palsu.</p>',
       ) +
       section(
         "Tracking",
@@ -1291,17 +1306,18 @@
           jid +
           "/prep/" +
           (role === "screener" ? "screener" : "helper");
-        await request(path, {
-          method: "POST",
-          body: {
-            so_line_id: field("v3-prep-line") || firstLineId(order),
-            qty: field(role === "screener" ? "v3-prep-screen" : "v3-prep-helper") || "1",
-            po_qty: field("v3-prep-po") || String(order.qty || 1),
-            evidence_ref: field("v3-prep-ev") || "prep-evidence",
-            idempotency_key: idemKey("prep"),
-            assignment_id: field("v3-asg-id") ? Number(field("v3-asg-id")) : null,
-          },
-        });
+        const body = {
+          so_line_id: field("v3-prep-line") || firstLineId(order),
+          qty: field(role === "screener" ? "v3-prep-screen" : "v3-prep-helper") || "1",
+          po_qty: field("v3-prep-po") || String(order.qty || 1),
+          evidence_ref: field("v3-prep-ev") || "prep-evidence",
+          idempotency_key: idemKey("prep"),
+          assignment_id: field("v3-asg-id") ? Number(field("v3-asg-id")) : null,
+        };
+        if (role === "screener") {
+          body.screen_size = field("v3-prep-screen-size") || "kecil";
+        }
+        await request(path, { method: "POST", body: body });
         toast("Prep " + role + " tersimpan");
         return;
       }
@@ -1424,19 +1440,48 @@
       if (action === "pod") {
         const sjId = field("v3-sj-id");
         const recv = field("v3-pod-recv");
-        const ev = field("v3-pod-ev");
-        if (!sjId || !recv || !ev) throw new Error("SJ id, penerima, bukti wajib");
-        await request(API + "/production/jobs/" + jid + "/pod", {
+        if (!sjId || !recv) throw new Error("SJ id dan nama penerima wajib");
+        const files = [
+          ["pod_photo_1", "v3-pod-photo1"],
+          ["pod_photo_2", "v3-pod-photo2"],
+          ["pod_sig_sender", "v3-pod-sig-s"],
+          ["pod_sig_recipient", "v3-pod-sig-r"],
+        ];
+        const ids = {};
+        for (let i = 0; i < files.length; i++) {
+          const purpose = files[i][0];
+          const el = document.getElementById(files[i][1]);
+          const file = el && el.files && el.files[0];
+          if (!file) throw new Error("Wajib unggah " + purpose);
+          const fd = new FormData();
+          fd.append("accurate_sj_id", sjId);
+          fd.append("purpose", purpose);
+          fd.append("file", file, file.name || purpose + ".png");
+          const uploaded = await request(
+            API + "/production/jobs/" + jid + "/attachments",
+            { method: "POST", formData: fd },
+          );
+          ids[purpose] = uploaded.id;
+        }
+        const pod = await request(API + "/production/jobs/" + jid + "/pod", {
           method: "POST",
           body: {
             accurate_sj_id: sjId,
             qty_physical: field("v3-pod-qty") || "1",
-            evidence_ref: ev,
             receiver_name: recv,
             idempotency_key: idemKey("pod"),
+            attachment_pod_photo_1: ids.pod_photo_1,
+            attachment_pod_photo_2: ids.pod_photo_2,
+            attachment_pod_sig_sender: ids.pod_sig_sender,
+            attachment_pod_sig_recipient: ids.pod_sig_recipient,
           },
         });
-        toast("POD tersimpan");
+        const statusEl = document.getElementById("v3-pod-status");
+        if (statusEl) {
+          statusEl.textContent =
+            "POD #" + pod.id + " OK · attachments " + JSON.stringify(ids);
+        }
+        toast("POD tersimpan (4 lampiran terikat)");
         return;
       }
       if (action === "sj-cancel") {

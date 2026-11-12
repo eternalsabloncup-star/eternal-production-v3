@@ -58,6 +58,8 @@ class PrepState(Base):
     role: Mapped[str] = mapped_column(String(16))  # screener|helper
     qty: Mapped[Decimal] = mapped_column(Numeric(18, 3), default=0)
     evidence_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Canonical screener size: kecil|besar. NULL = unknown (never invent default).
+    screen_size: Mapped[str | None] = mapped_column(String(16), nullable=True)
     assignment_id: Mapped[int | None] = mapped_column(
         ForeignKey("schedule_assignments.id"), nullable=True
     )
@@ -86,6 +88,7 @@ class PrepEvent(Base):
         ForeignKey("schedule_assignments.id"), nullable=True
     )
     evidence_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    screen_size: Mapped[str | None] = mapped_column(String(16), nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(120))
     actor_user_id: Mapped[int] = mapped_column(Integer)

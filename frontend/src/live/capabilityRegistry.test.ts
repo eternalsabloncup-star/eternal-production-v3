@@ -18,9 +18,11 @@ describe("Slice 1I capability registry", () => {
     }
   });
 
-  it("marks multi-evidence POD as BLOCKED without inventing SELESAI", () => {
+  it("marks multi-evidence POD as SELESAI only with attachment tests (not live)", () => {
     const pod = CAPABILITY_REGISTRY.find((c) => c.id === "delivery.pod_multi_evidence");
-    expect(pod?.status).toBe("BLOCKED");
+    expect(pod?.status).toBe("SELESAI");
+    expect(pod?.validation).toBe("code_test");
+    expect(pod?.tests).toContain("slice1k");
   });
 
   it("marks packing event + physical multicolor as SELESAI with code_test", () => {
@@ -39,10 +41,11 @@ describe("Slice 1I capability registry", () => {
     expect(fin?.nextAction).toBeTruthy();
   });
 
-  it("keeps screen size and SLA blocked or partial without schema", () => {
+  it("marks screener size SELESAI (code_test) and keeps SLA blocked", () => {
     const scr = CAPABILITY_REGISTRY.find((c) => c.id === "screener.after_schedule");
     const sla = CAPABILITY_REGISTRY.find((c) => c.id === "sla.working_days");
-    expect(scr?.status).toBe("PARSIAL");
+    expect(scr?.status).toBe("SELESAI");
+    expect(scr?.validation).toBe("code_test");
     expect(sla?.status).toBe("BLOCKED");
   });
 });

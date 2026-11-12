@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 from fastapi import HTTPException
@@ -21,6 +22,8 @@ from app.services.production.engine import (
     _require,
     gates_open_for_schedule,
 )
+
+SCREEN_SIZES = frozenset({"kecil", "besar"})
 
 
 def _normalize_production_process(value: str | None) -> str:
@@ -75,8 +78,10 @@ async def upsert_job_line_qty(
             row.po_qty = po_qty
         if accurate_item_id is not None:
             row.accurate_item_id = accurate_item_id or None
-        # Idempotent re-sync: keep explicit unknown; never invent print.
-        row.production_process = process
+        # Only overwrite process when caller supplies an explicit value.
+        # Helper/screener qty updates must not clobber Accurate classification.
+        if production_process is not None:
+            row.production_process = process
     await session.flush()
     return row
 
@@ -155,6 +160,7 @@ async def set_preparation(
     assignment_id: int | None = None,
     reason: str | None = None,
     as_correction: bool = False,
+    screen_size: str | None = None,
 ) -> PrepState:
     if role == "screener":
         _require(user, P.PREP_SCREENER)
@@ -168,6 +174,27 @@ async def set_preparation(
         raise HTTPException(422, "Qty persiapan tidak valid")
     if not evidence_ref.strip():
         raise HTTPException(422, "Bukti persiapan wajib")
+    size_n: str | None = None
+    if role == "screener":
+        # Canonical owner of screen size is PrepState/PrepEvent (screener work).
+        raw = (screen_size or "").strip().lower()
+        if raw not in SCREEN_SIZES:
+            raise HTTPException(422, "screen_size wajib: kecil|besar")
+        size_n = raw
+    elif screen_size is not None and str(screen_size).strip():
+        raise HTTPException(422, "screen_size hanya untuk role screener")
+    # Screener/Helper only after at least one active schedule assignment on the line.
+    scheduled = await session.scalar(
+        select(func.count())
+        .select_from(ScheduleAssignment)
+        .where(
+            ScheduleAssignment.job_id == job.id,
+            ScheduleAssignment.so_line_id == so_line_id,
+            ScheduleAssignment.status.in_(["active", "completed"]),
+        )
+    )
+    if int(scheduled or 0) <= 0:
+        raise HTTPException(409, "Persiapan hanya setelah penjadwalan valid pada line")
     if assignment_id is not None:
         asg = await session.get(ScheduleAssignment, assignment_id)
         if asg is None or asg.job_id != job.id:
@@ -207,6 +234,7 @@ async def set_preparation(
             role=role,
             qty=qty,
             evidence_ref=evidence_ref.strip(),
+            screen_size=size_n,
             assignment_id=assignment_id,
             updated_by=user.id,
         )
@@ -216,6 +244,9 @@ async def set_preparation(
         state.evidence_ref = evidence_ref.strip()
         state.assignment_id = assignment_id
         state.updated_by = user.id
+        if role == "screener":
+            # Size correction updates current state; history keeps prior values.
+            state.screen_size = size_n
 
     event_type = "correct" if as_correction or qty_before != qty else "set"
     hist = PrepEvent(
@@ -227,12 +258,16 @@ async def set_preparation(
         qty_after=qty,
         assignment_id=assignment_id,
         evidence_ref=evidence_ref.strip(),
+        screen_size=size_n,
         reason=reason,
         idempotency_key=idempotency_key,
         actor_user_id=user.id,
     )
     session.add(hist)
     # Mirror into canonical production event ledger for tracking.
+    payload = {"qty_before": str(qty_before), "qty_after": str(qty)}
+    if size_n:
+        payload["screen_size"] = size_n
     session.add(
         ProductionEvent(
             job_id=job.id,
@@ -244,7 +279,7 @@ async def set_preparation(
             actor_user_id=user.id,
             evidence_ref=evidence_ref.strip(),
             reason=reason,
-            payload_json=f'{{"qty_before":"{qty_before}","qty_after":"{qty}"}}',
+            payload_json=json.dumps(payload, separators=(",", ":")),
         )
     )
     # Changing prep invalidates sample gate if sample was required path.

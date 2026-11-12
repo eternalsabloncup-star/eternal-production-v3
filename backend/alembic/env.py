@@ -23,6 +23,7 @@ from app.models import (  # noqa: F401 — register metadata
     PayrollRun,
     PrepEvent,
     PrepState,
+    ProductionAttachment,
     ProductionEvent,
     ProductionJob,
     SampleVersion,

@@ -1,5 +1,6 @@
 """Phase 2 production workflow models."""
 
+from app.models.production.attachment import ProductionAttachment
 from app.models.production.design import DesignVersion
 from app.models.production.event import ProductionEvent
 from app.models.production.job import ProductionJob
@@ -17,6 +18,7 @@ __all__ = [
     "ScheduleAssignment",
     "SampleVersion",
     "ProductionEvent",
+    "ProductionAttachment",
     "JobLineQty",
     "PrepState",
     "PrepEvent",

@@ -5,13 +5,15 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user, require_permissions
 from app.db.session import get_db_session
 from app.models.user import User
+from app.services.production import attachments as attach_svc
 from app.services.production import engine, permissions as P
 from app.services.production import prep as prep_svc
 
@@ -135,8 +137,14 @@ class PodBody(BaseModel):
     accurate_sj_id: str
     qty_physical: Decimal
     idempotency_key: str = Field(min_length=8, max_length=120)
-    evidence_ref: str
     receiver_name: str
+    # Four distinct ProductionAttachment ids — required for compliant POD.
+    attachment_pod_photo_1: int
+    attachment_pod_photo_2: int
+    attachment_pod_sig_sender: int
+    attachment_pod_sig_recipient: int
+    # Optional legacy note only — never substitutes for attachments.
+    evidence_ref: str | None = None
 
 
 class VerifyRejectBody(BaseModel):
@@ -166,6 +174,8 @@ class PrepBody(BaseModel):
     assignment_id: int | None = None
     reason: str | None = None
     as_correction: bool = False
+    # Required for screener: kecil|besar. Ignored/forbidden for helper.
+    screen_size: str | None = None
 
 
 def _job_summary(job) -> dict:
@@ -498,12 +508,14 @@ async def prep_screener(
         assignment_id=body.assignment_id,
         reason=body.reason,
         as_correction=body.as_correction,
+        screen_size=body.screen_size,
     )
     remaining = await prep_svc.remaining_helper_qty(session, job.id, body.so_line_id)
     return {
         "id": state.id,
         "role": state.role,
         "qty": str(state.qty),
+        "screen_size": state.screen_size,
         "helper_remaining_vs_po": str(remaining),
     }
 
@@ -710,10 +722,102 @@ async def pod_record(
         accurate_sj_id=body.accurate_sj_id,
         qty_physical=body.qty_physical,
         idempotency_key=body.idempotency_key,
-        evidence_ref=body.evidence_ref,
         receiver_name=body.receiver_name,
+        evidence_ref=body.evidence_ref,
+        attachment_ids={
+            "pod_photo_1": body.attachment_pod_photo_1,
+            "pod_photo_2": body.attachment_pod_photo_2,
+            "pod_sig_sender": body.attachment_pod_sig_sender,
+            "pod_sig_recipient": body.attachment_pod_sig_recipient,
+        },
     )
-    return {"id": event.id, "event_type": event.event_type}
+    return {
+        "id": event.id,
+        "event_type": event.event_type,
+        "evidence_ref": event.evidence_ref,
+        "payload_json": event.payload_json,
+    }
+
+
+@router.post("/{job_id}/attachments")
+async def upload_attachment(
+    job_id: int,
+    accurate_sj_id: str = Form(...),
+    purpose: str = Form(...),
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    job = await engine.get_job(session, job_id)
+    row = await attach_svc.store_upload(
+        session,
+        user,
+        job,
+        accurate_sj_id=accurate_sj_id,
+        purpose=purpose,
+        upload=file,
+    )
+    return {
+        "id": row.id,
+        "purpose": row.purpose,
+        "accurate_sj_id": row.accurate_sj_id,
+        "content_type": row.content_type,
+        "byte_size": row.byte_size,
+        "content_sha256": row.content_sha256,
+        "production_event_id": row.production_event_id,
+    }
+
+
+@router.get("/attachments/{attachment_id}")
+async def download_attachment(
+    attachment_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    row = await attach_svc.get_attachment_for_user(session, user, attachment_id)
+    data = await attach_svc.read_attachment_bytes(row)
+    return Response(
+        content=data,
+        media_type=row.content_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{row.purpose}-{row.id}"',
+            "X-Content-SHA256": row.content_sha256,
+            "Cache-Control": "private, no-store",
+        },
+    )
+
+
+@router.get("/{job_id}/attachments")
+async def list_attachments(
+    job_id: int,
+    accurate_sj_id: str | None = None,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_permissions(P.JOB_READ)),
+):
+    job = await engine.get_job(session, job_id)
+    if job.branch_id not in list(user.branch_ids or []):
+        from fastapi import HTTPException
+
+        raise HTTPException(403, "Cabang di luar lingkup akses")
+    rows = await attach_svc.list_job_attachments(
+        session, job.id, accurate_sj_id=accurate_sj_id
+    )
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "purpose": r.purpose,
+                "accurate_sj_id": r.accurate_sj_id,
+                "content_type": r.content_type,
+                "byte_size": r.byte_size,
+                "content_sha256": r.content_sha256,
+                "production_event_id": r.production_event_id,
+                "uploaded_by": r.uploaded_by,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+    }
 
 
 @router.post("/{job_id}/sj/cancel")
