@@ -12,9 +12,15 @@ export type PoLineLike = {
 export type PoRowLike = {
   id?: string | null;
   name?: string | null;
+  orderDate?: string | null;
+  address?: string | null;
+  paymentTerms?: string | null;
   salesName?: string | null;
   salesSource?: string | null;
   createdByUser?: string | null;
+  expedition?: string | null;
+  ship?: string | null;
+  deliveryZone?: string | null;
   branch?: string | null;
   urgent?: boolean | null;
   bufferStock?: boolean | null;
