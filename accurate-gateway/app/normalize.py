@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -312,16 +313,39 @@ def _uom(row: dict[str, Any], item: dict[str, Any]) -> str:
     return str(unit or "")
 
 
-def _qty(row: dict[str, Any]) -> float:
-    raw = row.get("quantity")
-    if raw is None:
+def _parse_qty(row: dict[str, Any]) -> tuple[float | None, bool]:
+    """Parse line quantity with explicit verification.
+
+    Returns ``(qty, verified)``:
+    - Official zero → ``(0.0, True)``
+    - Valid finite nonzero → ``(n, True)``
+    - Missing / blank / invalid / NaN / Infinity → ``(None, False)``
+
+    Never coerces unverified quantity into a verified zero.
+    """
+    if "quantity" in row:
+        raw = row.get("quantity")
+    elif "qty" in row:
         raw = row.get("qty")
+    else:
+        return None, False
     if raw is None:
-        return 0.0
+        return None, False
+    if isinstance(raw, str) and not raw.strip():
+        return None, False
     try:
-        return float(raw)
+        num = float(raw)
     except (TypeError, ValueError):
-        return 0.0
+        return None, False
+    if not math.isfinite(num):
+        return None, False
+    return num, True
+
+
+def _qty(row: dict[str, Any]) -> float | None:
+    """Verified quantity or ``None`` when unverified (Slice 1M)."""
+    qty, verified = _parse_qty(row)
+    return qty if verified else None
 
 
 def _explicit_production_process(row: dict[str, Any]) -> str:
@@ -391,6 +415,7 @@ def _lines(raw: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         item = row.get("item") if isinstance(row.get("item"), dict) else {}
         line_id, item_id = _line_identity(row, item)
+        qty, qty_verified = _parse_qty(row)
         out.append(
             {
                 "id": line_id,
@@ -409,7 +434,8 @@ def _lines(raw: dict[str, Any]) -> list[dict[str, Any]]:
                     or item.get("name")
                     or ""
                 ),
-                "qty": _qty(row),
+                "qty": qty,
+                "qty_verified": qty_verified,
                 "uom": _uom(row, item),
                 "unit_price": float(row.get("unitPrice") or row.get("price") or 0),
                 "color": _line_color(row, item),
@@ -496,8 +522,15 @@ def normalize_sales_order(raw: dict[str, Any]) -> dict[str, Any]:
     base = normalize_sales_order_list_item(raw)
     lines = _lines(raw)
     base["line_items"] = lines
-    base["total_quantity"] = sum(float(li.get("qty") or 0) for li in lines)
     base["line_count"] = len(lines)
+    # Verified PO total only when every line quantity is verified (print + non-print).
+    # Never invent total from unverified zeros; never multiply by ink/color count.
+    if lines and all(bool(li.get("qty_verified")) for li in lines):
+        base["total_quantity"] = sum(float(li["qty"]) for li in lines)
+        base["total_quantity_verified"] = True
+    else:
+        base["total_quantity"] = None
+        base["total_quantity_verified"] = False
     # Re-resolve on full detail payload (list may omit salesmanList).
     sales, sales_source = _extract_sales(raw)
     base["sales"] = sales

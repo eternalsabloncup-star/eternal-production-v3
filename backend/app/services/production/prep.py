@@ -91,7 +91,11 @@ async def sync_job_lines_from_so_detail(
     job: ProductionJob,
     line_items: list[dict],
 ) -> list[JobLineQty]:
-    """Upsert lines by Accurate detailItem.id. No charField heuristic mapping."""
+    """Upsert lines by Accurate detailItem.id. No charField heuristic mapping.
+
+    Slice 1M: unverified / missing / non-finite quantity must not become a
+    production line with verified zero — eligibility rejects those rows.
+    """
     synced: list[JobLineQty] = []
     for line in line_items:
         if not isinstance(line, dict):
@@ -101,14 +105,29 @@ async def sync_job_lines_from_so_detail(
         ).strip()
         if not line_id:
             continue
+        qty_verified = line.get("qty_verified")
         qty_raw = line.get("quantity")
         if qty_raw is None:
             qty_raw = line.get("qty")
+        if qty_verified is False or qty_raw is None:
+            raise HTTPException(
+                422,
+                "Qty line Accurate belum terverifikasi — tidak dapat dijadwalkan/diproses",
+            )
         try:
             po_qty = Decimal(str(qty_raw))
-        except Exception:
-            continue
+        except Exception as exc:
+            raise HTTPException(
+                422,
+                "Qty line Accurate tidak valid — tidak dapat dijadwalkan/diproses",
+            ) from exc
+        if not po_qty.is_finite():
+            raise HTTPException(
+                422,
+                "Qty line Accurate tidak valid — tidak dapat dijadwalkan/diproses",
+            )
         if po_qty <= 0:
+            # Official zero: no production line to schedule; do not invent work.
             continue
         item_id = line.get("accurate_item_id") or line.get("item_id")
         item_id_s = str(item_id).strip() if item_id is not None else None

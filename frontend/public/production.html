@@ -536,6 +536,7 @@ function scheduleColorRows(rows){
 function editColorAssignment(id,index){openScheduleEditor(id,index)}
 function openScheduleEditor(id,focusColor){
  const o=orders.find(x=>x.id===id&&!x.deleted);if(!o)return;if(!hasPrintLine(o)){toast('PO non-cetak tidak memerlukan penjadwalan operator sablon');return;}
+ if(isLiveInbox()&&!o.qtyVerified){toast('Qty PO belum terverifikasi — penjadwalan diblokir hingga detail Accurate memuat qty resmi');return;}
  scheduleDraft={id,rows:structuredClone(colorAssignmentsFor(o)),focusColor:Number(focusColor)||1};
  renderScheduleEditor();
 }
@@ -582,6 +583,7 @@ function updateScheduleDraft(id,key,value){if(!scheduleDraft)return;const row=sc
 function addScheduleRow(){if(!scheduleDraft)return;const o=orders.find(x=>x.id===scheduleDraft.id);scheduleDraft.rows.push({id:makeScheduleId(),colorIndex:scheduleDraft.focusColor||1,colorName:sampleColorEntries(o)[0].name,operator:'',machine:'',workDate:formatScheduleISO(o.scheduleDate),targetQty:'',completedQty:null,legacy:false});renderScheduleEditor();}
 function removeScheduleRow(id){if(!scheduleDraft)return;const o=orders.find(x=>x.id===scheduleDraft.id),row=scheduleDraft.rows.find(x=>x.id===id);if(row?.legacy&&Number(o.done)>0){toast('Penugasan lama tidak dapat dihapus ketika output PO sudah tercatat');return}scheduleDraft.rows=scheduleDraft.rows.filter(x=>x.id!==id);renderScheduleEditor()}
 function validateScheduleDraft(d,o){
+ if(isLiveInbox()&&!o.qtyVerified)return 'Qty PO belum terverifikasi (UNKNOWN) — tidak boleh dijadwalkan sebagai nol.';
  if(!bothOfficialGatesOk(o)){
   const dGate=designGateLabel(o),pGate=paymentGateLabel(o);
   if(!gateOk(dGate)&&!gateOk(pGate))return 'Design Gate dan Payment Gate belum satisfied — jadwal tidak dapat disimpan.';
@@ -746,8 +748,8 @@ function serviceLines(o){return orderSourceLines(o).filter(l=>effectiveLineMode(
 function hasPrintLine(o){return printLines(o).length>0}
 function hasUnknownLine(o){return unknownLines(o).length>0}
 function hasStockLine(o){return stockLines(o).length>0}
-function printPhysicalQty(o){return printLines(o).reduce((s,l)=>{const n=Number(l.qty);return s+(Number.isFinite(n)?Math.max(0,n):0)},0)}
-function unknownPhysicalQty(o){return unknownLines(o).reduce((s,l)=>{const n=Number(l.qty);return s+(Number.isFinite(n)?Math.max(0,n):0)},0)}
+function printPhysicalQty(o){return printLines(o).reduce((s,l)=>{if(l&&l.qtyVerified===false)return s;const n=Number(l.qty);return s+(Number.isFinite(n)?Math.max(0,n):0)},0)}
+function unknownPhysicalQty(o){return unknownLines(o).reduce((s,l)=>{if(l&&l.qtyVerified===false)return s;const n=Number(l.qty);return s+(Number.isFinite(n)?Math.max(0,n):0)},0)}
 function designGateLabel(o){const s=String(o?.design_status||'').toLowerCase();if(s==='approved')return'APPROVED';if(s==='bypassed')return'BYPASSED';if(o?.design_status!=null)return'PENDING';return gateFor(o).design}
 function paymentGateLabel(o){const s=String(o?.payment_status||'').toLowerCase();if(s==='approved')return'APPROVED';if(s==='bypassed')return'BYPASSED';if(o?.payment_status!=null)return'PENDING';return gateFor(o).payment}
 function gateOk(label){return label==='APPROVED'||label==='BYPASSED'}
@@ -1068,11 +1070,15 @@ function exportSheet(){const rows=sheetFiltered(sourceRows());const cols=sheetVi
 // Spreadsheet-like column preferences are local to this browser / prototype only.
 function productionQty(o){
  // Live: Total Qty SO monitoring = qty fisik item Cetak saja (unknown terpisah).
+ // Slice 1M: unverified PO qty must not become verified zero for KPI/schedule.
+ if(isLiveInbox()&&!o.qtyVerified){
+  return {qty:0,scheduled:0,done:0,packed:0,unassigned:0,remainingScheduled:0,remainingTotal:0,invalid:false,unknownQty:1,qtyUnverified:true};
+ }
  const qty=isLiveInbox()?printPhysicalQty(o):Math.max(0,Math.trunc(Number(o.qty)||0));
  const scheduled=Math.min(qty,Math.max(0,Math.trunc(Number(o.scheduledQty)||0)));
  const done=Math.min(qty,Math.max(0,Math.trunc(Number(o.done)||0)));
  const packed=Math.max(0,Math.trunc(Number(o.packed)||0));
- return {qty,scheduled,done,packed,unassigned:Math.max(0,qty-scheduled),remainingScheduled:Math.max(0,scheduled-done),remainingTotal:Math.max(0,qty-done),invalid:scheduled>qty||done>qty||done>scheduled||packed>done,unknownQty:isLiveInbox()?unknownPhysicalQty(o):0};
+ return {qty,scheduled,done,packed,unassigned:Math.max(0,qty-scheduled),remainingScheduled:Math.max(0,scheduled-done),remainingTotal:Math.max(0,qty-done),invalid:scheduled>qty||done>qty||done>scheduled||packed>done,unknownQty:isLiveInbox()?unknownPhysicalQty(o):0,qtyUnverified:false};
 }
 function scheduleLead(o){
  const m=String(o.ship||'').match(/(\d{1,2}) Nov 2026/);if(!m)return 'Belum ada target';
@@ -1162,7 +1168,13 @@ let SHEET_COLUMNS=[
  {key:'itemUnits',label:'Satuan',kind:'text',value:o=>multiItemField(o,'unit')||o.itemUnits||'',cell:o=>`<div class="po-multiline">${escape(multiItemField(o,'unit')||o.itemUnits||'—')}</div>`},
  {key:'itemProcesses',label:'Proses Barang',kind:'text',value:o=>multiItemField(o,'process')||o.itemProcesses||'',cell:o=>`<div class="po-multiline">${escape(multiItemField(o,'process')||o.itemProcesses||'—')}</div>`},
  {key:'inkColors',label:'Warna Barang',kind:'text',value:o=>multiItemField(o,'color')||(Array.isArray(o.inkColors)?o.inkColors.join('\n'):''),cell:o=>`<div class="po-multiline">${escape(multiItemField(o,'color')||(Array.isArray(o.inkColors)?o.inkColors.join('\n'):'—')||'—')}</div>`},
- {key:'qty',label:'Total Qty',kind:'number',value:o=>o.qtyVerified?o.qty:null,cell:o=>o.qtyVerified?`<b>${fmt(o.qty)}</b>`:'<span class="muted">Belum dimuat</span>'},
+ {key:'qty',label:'Total Qty',kind:'number',value:o=>o.qtyVerified?o.qty:null,cell:o=>{
+  if(o.qtyVerified&&o.qty!=null)return`<b>${fmt(o.qty)}</b>`;
+  if(o.detailLoadState==='loading')return'<span class="muted">Memuat…</span>';
+  if(o.detailLoadState==='failed')return`<span class="muted">Gagal muat</span> <button type="button" class="btn sm" onclick="window.retryInboxDetail&&window.retryInboxDetail('${escape(o.id)}')">Retry</button>`;
+  if(o.detailLoadState==='loaded')return'<span class="muted">Qty belum terverifikasi</span>';
+  return'<span class="muted">Belum dimuat</span>';
+ }},
  {key:'lineCount',label:'Jumlah Jenis',kind:'number',value:o=>o.lineCount!=null?o.lineCount:(Array.isArray(o.sourceLines)?o.sourceLines.length:null),cell:o=>{const n=o.lineCount!=null?o.lineCount:(Array.isArray(o.sourceLines)?o.sourceLines.length:null);return n!=null?`<b>${fmt(n)}</b>`:'—'}},
  {key:'poNotes',label:'Keterangan PO',kind:'text',value:o=>o.poNotes||'',cell:o=>`<div class="po-notes">${escape(o.poNotes||'—')}</div>`},
  {key:'detailPo',label:'Detail PO',kind:'action',value:o=>'',cell:o=>`<button class="actionlink" aria-label="Detail PO ${escape(o.id)}" onclick="v49PODetail('${o.id}')"><span class="infoicon">i</span> Detail PO</button>`},
@@ -2406,6 +2418,7 @@ inputOutput=function(id){toast('Gunakan Tugas Tim → Konfirmasi Qty Cetak untuk
 inputPacking=function(id){toast('Gunakan Tugas Tim → Packing untuk bukti per produk.');go('tasks')};
 saveTask=function(id,type){return flow31Save(id,type)};
 openScheduleEditor=function(id){const o=orders.find(x=>x.id===id);if(!o){return}const l=(o.sourceLines||[]).find(line=>effectiveLineMode(o,line)==='PRINT');if(!l){toast(hasUnknownLine(o)?'Ada line proses belum terverifikasi — selesaikan klasifikasi sebelum jadwal operator':'PO non-cetak tidak memerlukan jadwal operator');return}
+ if(isLiveInbox()&&!o.qtyVerified){toast('Qty PO belum terverifikasi — penjadwalan diblokir');return}
  if(isLiveInbox()){
   if(!bothOfficialGatesOk(o))toast('Monitoring boleh tanpa ACC; simpan jadwal tetap membutuhkan Design Gate + Payment Gate');
   if(typeof window.v3OpenWorkflow==='function'){window.v3OpenWorkflow(id);return}

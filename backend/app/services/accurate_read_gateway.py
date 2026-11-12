@@ -7,6 +7,7 @@ No ERP V1 JWT/Accurate secrets. Fail closed. Bounded retries on transport only.
 from __future__ import annotations
 
 import asyncio
+import math
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -256,12 +257,39 @@ async def get_sales_order(gateway: ReadGateway, number: str) -> dict:
     if not isinstance(lines, list):
         raise HTTPException(502, "Detail Sales Order tidak memiliki daftar item")
     parsed_lines = []
+    all_qty_verified = True
+    verified_sum = 0.0
     for line in lines:
         if not isinstance(line, dict):
             continue
         process = line.get("production_process")
         if process not in {"print", "non_print", "unknown"}:
             process = "unknown"
+        qty_verified = line.get("qty_verified")
+        raw_qty = (
+            line.get("quantity")
+            if line.get("quantity") is not None
+            else line.get("qty")
+        )
+        if qty_verified is None:
+            qty_verified = raw_qty is not None
+        qty_verified = bool(qty_verified)
+        qty = None
+        if qty_verified and raw_qty is not None:
+            try:
+                qty = float(raw_qty)
+            except (TypeError, ValueError):
+                qty = None
+                qty_verified = False
+            if qty is not None and not math.isfinite(qty):
+                qty = None
+                qty_verified = False
+        if qty_verified and qty is not None:
+            verified_sum += qty
+        else:
+            all_qty_verified = False
+            qty = None
+            qty_verified = False
         parsed_lines.append(
             {
                 "accurate_line_id": line.get("accurate_line_id") or line.get("id"),
@@ -269,27 +297,33 @@ async def get_sales_order(gateway: ReadGateway, number: str) -> dict:
                 or line.get("item_id"),
                 "item_code": line.get("item_code") or line.get("sku"),
                 "name": line.get("name") or line.get("description"),
-                "quantity": line.get("quantity")
-                if line.get("quantity") is not None
-                else line.get("qty"),
+                "quantity": qty,
+                "qty_verified": qty_verified,
                 "unit": line.get("unit") or line.get("uom"),
                 "color": line.get("color"),
                 "notes": line.get("notes"),
                 "production_process": process,
             }
         )
-    total_qty = so.get("total_quantity")
-    if total_qty is None:
-        total_qty = 0
-        for line in parsed_lines:
-            try:
-                total_qty += float(line.get("quantity") or 0)
-            except (TypeError, ValueError):
-                pass
+    if "total_quantity_verified" in so:
+        total_verified = bool(so.get("total_quantity_verified"))
+        total_qty = so.get("total_quantity") if total_verified else None
+    elif so.get("total_quantity") is not None and (
+        not parsed_lines or all_qty_verified
+    ):
+        total_qty = so.get("total_quantity")
+        total_verified = True
+    elif parsed_lines and all_qty_verified:
+        total_qty = verified_sum
+        total_verified = True
+    else:
+        total_qty = None
+        total_verified = False
     result.update(
         {
             "line_items": parsed_lines,
             "total_quantity": total_qty,
+            "total_quantity_verified": total_verified,
             "line_count": so.get("line_count")
             if so.get("line_count") is not None
             else len(parsed_lines),

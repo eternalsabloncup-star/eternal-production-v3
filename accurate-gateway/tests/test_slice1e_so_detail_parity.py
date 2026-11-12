@@ -54,7 +54,10 @@ def test_ad_meliora_detail_lines_qty_and_mixed_process():
     assert mapped["accurate_id"] == "990055"
     assert mapped["customer"] == "AD MELIORA COFFEE & EATERY"
     assert mapped["total_quantity"] == 2000.0
+    assert mapped["total_quantity_verified"] is True
     assert mapped["line_count"] == 2
+    assert mapped["line_items"][0]["qty_verified"] is True
+    assert mapped["line_items"][1]["qty_verified"] is True
     assert mapped["sales"] == "Sales Jogja Official"
     assert mapped["sales_source"] == "salesPersonName"
     assert mapped["created_by_user"] == "Admin Creator"

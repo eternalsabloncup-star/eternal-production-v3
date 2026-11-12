@@ -169,18 +169,27 @@
     const number = String(s.number || s.po_number || "").trim();
     if (!number) return null;
     const lines = Array.isArray(s.line_items) ? s.line_items : [];
-    const qtyVerified =
-      s.total_quantity != null ||
-      (lines.length > 0 &&
-        lines.every((x) => x.quantity != null || x.qty != null));
+    // Slice 1M: trust explicit verification flags; never treat missing qty as verified 0.
+    let qtyVerified = false;
     let qty = null;
-    if (s.total_quantity != null && Number.isFinite(Number(s.total_quantity))) {
-      qty = Number(s.total_quantity);
-    } else if (lines.length) {
+    if (s.total_quantity_verified === true && s.total_quantity != null) {
+      const n = Number(s.total_quantity);
+      if (Number.isFinite(n)) {
+        qty = n;
+        qtyVerified = true;
+      }
+    } else if (
+      lines.length > 0 &&
+      lines.every(function (x) {
+        return x.qty_verified === true && (x.quantity != null || x.qty != null);
+      })
+    ) {
       qty = lines.reduce(function (sum, x) {
         const n = Number(x.quantity != null ? x.quantity : x.qty);
         return sum + (Number.isFinite(n) ? n : 0);
       }, 0);
+      qtyVerified = Number.isFinite(qty);
+      if (!qtyVerified) qty = null;
     }
     const productionStatus =
       s.production_status === "Terproses" ? "Terproses" : "Baru";
@@ -222,14 +231,23 @@
       qty: qtyVerified ? qty : null,
       qtyVerified: Boolean(qtyVerified),
       detailLoaded: Boolean(lines.length),
+      detailLoadState: lines.length ? "loaded" : "not_loaded",
+      detailError: null,
       lineCount: s.line_count != null ? Number(s.line_count) : lines.length || null,
       sourceLines: lines.map(function (x) {
+        const lineQtyVerified = x.qty_verified === true;
+        const rawLineQty = x.quantity != null ? x.quantity : x.qty;
+        const lineQty =
+          lineQtyVerified && rawLineQty != null && Number.isFinite(Number(rawLineQty))
+            ? Number(rawLineQty)
+            : null;
         return {
           id: x.accurate_line_id || x.id || null,
           itemId: x.accurate_item_id || null,
           item_code: x.item_code || null,
           name: x.name || null,
-          qty: x.quantity != null ? x.quantity : x.qty,
+          qty: lineQty,
+          qtyVerified: lineQtyVerified && lineQty != null,
           unit: x.unit || null,
           color: x.color || null,
           notes: x.notes || null,
@@ -390,6 +408,7 @@
   }
 
   const detailCache = Object.create(null);
+  const detailInflight = Object.create(null);
   let enrichGeneration = 0;
   const ENRICH_CONCURRENCY = 3; // bounded — never fire 50 detail calls unbounded
 
@@ -404,12 +423,19 @@
     if (!o || !detail) return o;
     const lines = Array.isArray(detail.line_items) ? detail.line_items : [];
     o.sourceLines = lines.map(function (x) {
+      const lineQtyVerified = x.qty_verified === true;
+      const rawLineQty = x.quantity != null ? x.quantity : x.qty;
+      const lineQty =
+        lineQtyVerified && rawLineQty != null && Number.isFinite(Number(rawLineQty))
+          ? Number(rawLineQty)
+          : null;
       return {
         id: x.accurate_line_id || x.id || null,
         itemId: x.accurate_item_id || null,
         item_code: x.item_code || null,
         name: x.name || null,
-        qty: x.quantity != null ? x.quantity : x.qty,
+        qty: lineQty,
+        qtyVerified: lineQtyVerified && lineQty != null,
         unit: x.unit || null,
         color: x.color || null,
         notes: x.notes || null,
@@ -432,19 +458,36 @@
         })
         .filter(Boolean)
         .join(" + ") || "Tidak ada baris barang";
-    if (detail.total_quantity != null && Number.isFinite(Number(detail.total_quantity))) {
+    if (
+      detail.total_quantity_verified === true &&
+      detail.total_quantity != null &&
+      Number.isFinite(Number(detail.total_quantity))
+    ) {
       o.qty = Number(detail.total_quantity);
       o.qtyVerified = true;
-    } else if (o.sourceLines.length) {
+    } else if (
+      o.sourceLines.length &&
+      o.sourceLines.every(function (x) {
+        return x.qtyVerified === true && x.qty != null;
+      })
+    ) {
       o.qty = o.sourceLines.reduce(function (sum, x) {
-        const n = Number(x.qty);
-        return sum + (Number.isFinite(n) ? n : 0);
+        return sum + Number(x.qty);
       }, 0);
-      o.qtyVerified = true;
+      o.qtyVerified = Number.isFinite(o.qty);
+      if (!o.qtyVerified) {
+        o.qty = null;
+      }
+    } else {
+      // Detail loaded but quantity incomplete/unverified — never invent verified zero.
+      o.qty = null;
+      o.qtyVerified = false;
     }
     o.lineCount =
       detail.line_count != null ? Number(detail.line_count) : o.sourceLines.length;
     o.detailLoaded = true;
+    o.detailLoadState = "loaded";
+    o.detailError = null;
     if (detail.branch_name || detail.outlet) {
       o.branch = detail.branch_name || detail.outlet;
     }
@@ -454,10 +497,12 @@
       o.salesSource = detail.sales_source || o.salesSource || "detail";
       o.salesMissingReason = null;
     } else if (
-      !o.salesName ||
-      o.salesName === "Belum terverifikasi"
+      o.salesName &&
+      o.salesName !== "Belum terverifikasi"
     ) {
-      // Never fall back to creator / branch / login; never wipe a verified list sales.
+      // Preserve verified list sales when detail omits sales — never wipe, never use creator.
+      o.salesMissingReason = null;
+    } else {
       o.salesName = "Belum terverifikasi";
       o.salesSource = detail.sales_source || o.salesSource || null;
       o.salesMissingReason = "accurate_sales_field_absent";
@@ -529,28 +574,67 @@
     return o;
   }
 
-  async function fetchOrderDetail(number) {
-    if (detailCache[number]) return detailCache[number];
-    const detail = await request(
+  async function fetchOrderDetail(number, opts) {
+    const force = !!(opts && opts.force);
+    if (!force && detailCache[number]) return detailCache[number];
+    if (!force && detailInflight[number]) return detailInflight[number];
+    const pending = request(
       API + "/production/orders/" + encodeURIComponent(number),
-    );
-    detailCache[number] = detail;
-    return detail;
+    )
+      .then(function (detail) {
+        detailCache[number] = detail;
+        delete detailInflight[number];
+        return detail;
+      })
+      .catch(function (err) {
+        // Do not permanently cache failures — allow retry.
+        delete detailInflight[number];
+        delete detailCache[number];
+        throw err;
+      });
+    detailInflight[number] = pending;
+    return pending;
   }
 
-  async function enrichInboxPage(numbers) {
+  function markDetailFailed(so) {
+    const o = orderBySo(so);
+    if (!o) return;
+    o.detailLoadState = "failed";
+    o.detailLoaded = false;
+    o.detailError = "Gagal memuat detail Accurate";
+    // Keep qty unverified; never invent zero from a failed enrich.
+    if (!o.qtyVerified) {
+      o.qty = null;
+    }
+  }
+
+  async function enrichInboxPage(numbers, opts) {
+    const force = !!(opts && opts.force);
     const gen = ++enrichGeneration;
     const queue = (numbers || []).filter(Boolean).slice();
+    queue.forEach(function (so) {
+      const o = orderBySo(so);
+      if (!o) return;
+      if (force || o.detailLoadState !== "loaded") {
+        o.detailLoadState = "loading";
+        o.detailError = null;
+      }
+    });
+    if (typeof window.render === "function") window.render();
     async function worker() {
       while (queue.length && gen === enrichGeneration) {
         const so = queue.shift();
         try {
-          const detail = await fetchOrderDetail(so);
+          const detail = await fetchOrderDetail(so, { force: force });
           if (gen !== enrichGeneration) return;
+          // Stale isolation: only apply if SO still on current page orders.
+          if (!orderBySo(so)) continue;
           applyDetailToOrder(so, detail);
           if (typeof window.render === "function") window.render();
         } catch (_) {
-          // Leave row as "belum dimuat" — never invent fixture data.
+          if (gen !== enrichGeneration) return;
+          markDetailFailed(so);
+          if (typeof window.render === "function") window.render();
         }
       }
     }
@@ -559,6 +643,12 @@
     for (let i = 0; i < n; i += 1) runners.push(worker());
     await Promise.all(runners);
   }
+
+  window.retryInboxDetail = function (so) {
+    if (!so) return;
+    delete detailCache[so];
+    enrichInboxPage([so], { force: true });
+  };
 
   // Prefer Accurate sales field; never invent demo salesperson names.
   window.sampleSalesName = function (o) {
@@ -1850,9 +1940,12 @@
       Object.keys(boardCache).forEach(function (so) {
         if (!orderBySo(so)) delete boardCache[so];
       });
-      // Detail cache only for current page numbers.
+      // Detail cache only for current page numbers (stale isolation).
       Object.keys(detailCache).forEach(function (so) {
         if (!orderBySo(so)) delete detailCache[so];
+      });
+      Object.keys(detailInflight).forEach(function (so) {
+        if (!orderBySo(so)) delete detailInflight[so];
       });
       window.taskEntries = {};
       // Do not assign window.history — browser History API is read-only.

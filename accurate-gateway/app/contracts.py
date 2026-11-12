@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -67,13 +68,34 @@ def so_detail(row: dict[str, Any]) -> dict[str, Any]:
     base = so_list_row(row)
     lines_in = row.get("line_items") or []
     lines: list[dict[str, Any]] = []
-    total_qty = 0.0
+    verified_sum = 0.0
+    all_qty_verified = True
     if isinstance(lines_in, list):
         for li in lines_in:
             if not isinstance(li, dict):
                 continue
-            qty = float(li.get("qty") or li.get("quantity") or 0)
-            total_qty += qty
+            qty_verified = li.get("qty_verified")
+            if qty_verified is None:
+                # Legacy rows without flag: treat numeric qty as verified only if present.
+                raw_q = li.get("qty") if "qty" in li else li.get("quantity")
+                qty_verified = raw_q is not None
+            qty_verified = bool(qty_verified)
+            qty: float | None
+            if qty_verified:
+                try:
+                    qty = float(li.get("qty") if li.get("qty") is not None else li.get("quantity"))
+                except (TypeError, ValueError):
+                    qty = None
+                    qty_verified = False
+                if qty is not None and not math.isfinite(qty):
+                    qty = None
+                    qty_verified = False
+            else:
+                qty = None
+            if qty_verified and qty is not None:
+                verified_sum += qty
+            else:
+                all_qty_verified = False
             process = li.get("production_process")
             if process is not None:
                 process = str(process).strip().lower().replace(" ", "_")
@@ -86,6 +108,7 @@ def so_detail(row: dict[str, Any]) -> dict[str, Any]:
                     "item_code": li.get("sku") or li.get("item_code") or "",
                     "name": li.get("description") or li.get("name") or "",
                     "quantity": qty,
+                    "qty_verified": qty_verified,
                     "unit": li.get("uom") or li.get("unit") or "",
                     "color": li.get("color"),
                     "notes": li.get("notes"),
@@ -96,12 +119,23 @@ def so_detail(row: dict[str, Any]) -> dict[str, Any]:
     line_count = row.get("line_count")
     if line_count is None:
         line_count = len(lines)
+    if "total_quantity_verified" in row:
+        total_verified = bool(row.get("total_quantity_verified"))
+        total_qty = row.get("total_quantity") if total_verified else None
+    elif row.get("total_quantity") is not None and (not lines or all_qty_verified):
+        total_qty = row.get("total_quantity")
+        total_verified = True
+    elif lines and all_qty_verified:
+        total_qty = verified_sum
+        total_verified = True
+    else:
+        total_qty = None
+        total_verified = False
     base.update(
         {
             "line_items": lines,
-            "total_quantity": row.get("total_quantity")
-            if row.get("total_quantity") is not None
-            else total_qty,
+            "total_quantity": total_qty,
+            "total_quantity_verified": total_verified,
             "line_count": line_count,
             "links": row.get("links") or {},
             "address": row.get("address"),
