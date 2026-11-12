@@ -300,6 +300,11 @@ def build_four_field_report(
         "json_path": ship["proven_json_path"],
         "mapped_native_paths_present": ship["mapped_native_paths_present"],
         "unproven_candidate_paths_present": ship["unproven_candidate_paths_present"],
+        # Step 133/134 — shape metadata only (no values); never auto-map.
+        "shipment_shape": ship.get("shipment_shape"),
+        "shipment_mapped_to_expedition": bool(
+            ship.get("shipment_mapped_to_expedition", False)
+        ),
         "present": bool(
             ship["mapped_native_paths_present"]
             or ship["unproven_candidate_paths_present"]
@@ -503,7 +508,12 @@ async def async_main(
             None if discover_only else load_expected_four(expected_file, so_number)
         )
         slice1l.load_env_file(env_file)
-        from app.config import settings
+        # VPS-compatible init (Step 134): get_settings after env load, then
+        # AccurateClient(settings). Never call AccurateClient() with no args.
+        from app.config import get_settings
+
+        get_settings.cache_clear()
+        settings = get_settings()
 
         if str(getattr(settings, "gateway_mode", "")).lower() != "live":
             report["blocker"] = "GATEWAY_MODE_must_be_live"
@@ -518,7 +528,7 @@ async def async_main(
         stage = "init_client"
         from app.accurate_client import AccurateClient
 
-        client = AccurateClient()
+        client = AccurateClient(settings)
 
         stage = "resolve_so"
         so_id = await slice1l.resolve_exact_so_id(client, so_number)

@@ -141,6 +141,27 @@ def test_shipment_dict_candidate_shape_not_mapped():
         raw
     )
     assert mapped["expedition"] is None
+    # Live matrix must surface shape for Step 134 Owner review.
+    report = mod.build_discovery_report(raw, SYN_SO)
+    peng = next(r for r in report["four_field_matrix"] if r["field"] == "Pengiriman")
+    assert peng["shipment_mapped_to_expedition"] is False
+    assert peng["shipment_shape"]["value_type"] == "dict"
+    assert "DIAMBIL" not in json.dumps(report)
+
+
+def test_vps_compatibility_markers_present():
+    """Step 134 gate: get_settings + AccurateClient(settings) must exist in source."""
+    src = PROBE.read_text(encoding="utf-8")
+    assert "from app.config import get_settings" in src
+    assert "client = AccurateClient(settings)" in src
+    assert "shipment_shape" in src
+    # No bare no-arg client construction in executable code lines.
+    bare = [
+        ln
+        for ln in src.splitlines()
+        if "AccurateClient()" in ln and not ln.lstrip().startswith("#")
+    ]
+    assert bare == []
 
 
 def test_sales_absent_and_cf_absent():
