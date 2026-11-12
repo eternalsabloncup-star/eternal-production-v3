@@ -159,7 +159,7 @@ export type MonitorRow = {
   reason: string;
 };
 
-/** One row per print/unknown line (or per real assignment). Never duplicates physical qty across colours. */
+/** One row per print line (or per real assignment). Unknown/non-print stay out of Jadwal — review via Inbox/Detail PO. */
 export function buildScheduleMonitorRows(order: ScheduleOrderLike): MonitorRow[] {
   const designGate = gateLabelFromJob(order.design_status);
   const paymentGate = gateLabelFromJob(order.payment_status);
@@ -219,29 +219,6 @@ export function buildScheduleMonitorRows(order: ScheduleOrderLike): MonitorRow[]
         reason: "",
       });
     }
-  }
-
-  for (const line of unknownLinesOf(order)) {
-    rows.push({
-      orderId: order.id,
-      lineId: String(line.id || ""),
-      process: "UNKNOWN",
-      lineName: String(line.name || order.item || "Item"),
-      lineQty: Number.isFinite(Number(line.qty)) ? Math.max(0, Number(line.qty)) : 0,
-      colorName: String(line.color || "—"),
-      colorIndex: 0,
-      assignmentId: "",
-      assignmentQty: 0,
-      operator: "",
-      machine: "",
-      workDate: "",
-      status: "Proses Belum Terverifikasi",
-      designGate,
-      paymentGate,
-      schedulingAllowed: false,
-      reason:
-        "Klasifikasi proses Accurate belum terbukti (bukan Cetak / Tidak Cetak) — tidak masuk antrean operator cetak",
-    });
   }
 
   return rows;

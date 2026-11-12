@@ -85,7 +85,7 @@ describe("Slice 1H schedule monitor classification", () => {
     expect(rows[0].paymentGate).toBe("PENDING");
   });
 
-  it("puts unknown into verification queue, not print qty", () => {
+  it("excludes unknown from Jadwal rows and does not count as print qty", () => {
     const order = {
       id: "SO/3",
       design_status: "pending",
@@ -100,10 +100,56 @@ describe("Slice 1H schedule monitor classification", () => {
       ],
     };
     const rows = buildScheduleMonitorRows(order);
-    expect(rows).toHaveLength(1);
-    expect(rows[0].status).toBe("Proses Belum Terverifikasi");
+    expect(rows).toHaveLength(0);
     expect(printPhysicalQty(order)).toBe(0);
     expect(unknownPhysicalQty(order)).toBe(200);
+  });
+
+  it("mixed print+non_print shows only print on Jadwal; KPI uses print qty only", () => {
+    const order = {
+      id: "SO/MIX",
+      design_status: "approved",
+      payment_status: "approved",
+      scheduledQty: 3000,
+      done: 500,
+      sourceLines: [
+        {
+          id: "P1",
+          name: "Cup Cetak",
+          qty: 3000,
+          production_process: "print",
+          processSnapshot: "PRINT",
+        },
+        {
+          id: "N1",
+          name: "Lid",
+          qty: 3000,
+          production_process: "non_print",
+          processSnapshot: "NON_PRINT",
+        },
+        {
+          id: "U1",
+          name: "Misc",
+          qty: 100,
+          production_process: "unknown",
+          processSnapshot: "UNKNOWN",
+        },
+      ],
+    };
+    const rows = buildScheduleMonitorRows(order);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].process).toBe("PRINT");
+    expect(rows[0].lineQty).toBe(3000);
+    expect(printPhysicalQty(order)).toBe(3000);
+    expect(unknownPhysicalQty(order)).toBe(100);
+    const kpi = scheduleKpiFromOrders([order]);
+    expect(kpi.printQty).toBe(3000);
+    expect(kpi.scheduled).toBe(3000);
+    expect(kpi.done).toBe(500);
+    expect(kpi.remainingTotal).toBe(2500);
+    expect(kpi.remainingScheduled).toBe(2500);
+    expect(kpi.unassigned).toBe(0);
+    expect(kpi.unknownQty).toBe(100);
   });
 
   it("allows scheduling only when both gates satisfied", () => {

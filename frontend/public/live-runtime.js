@@ -75,7 +75,226 @@
     document.documentElement.classList.add("v3-auth-ok");
   }
 
+  function isPreviewFixture() {
+    return (
+      window.__V3_PREVIEW_FIXTURE__ === true ||
+      /(?:^|[?&])epv3_preview=fixture(?:&|$)/.test(location.search || "")
+    );
+  }
+
+  function seedPreviewFixtureOrders() {
+    // SIMULASI / FIXTURE — bukan Accurate Live. Hanya untuk preview UI Cursor.
+    const rows = [
+      {
+        id: "SO/PREVIEW-MIX-001",
+        accurateId: "fixture-mix-1",
+        name: "Renea Coffee (SIMULASI)",
+        item: "Cup PET 16oz Cetak + Lid Non-Cetak",
+        itemCodes: "CUP-16 · LID-16",
+        itemProcesses: "Cetak · Tidak Cetak",
+        itemUnits: "pcs · pcs",
+        qty: 8000,
+        qtyVerified: true,
+        detailLoaded: true,
+        detailLoadState: "loaded",
+        detailError: null,
+        lineCount: 2,
+        sourceLines: [
+          {
+            id: "L-PRINT",
+            itemId: "fi-1",
+            item_code: "CUP-16",
+            name: "Cup PET 16oz Cetak",
+            qty: 5000,
+            qtyVerified: true,
+            unit: "pcs",
+            color: "Putih",
+            notes: null,
+            production_process: "print",
+            processSnapshot: "PRINT",
+          },
+          {
+            id: "L-NON",
+            itemId: "fi-2",
+            item_code: "LID-16",
+            name: "Lid Non-Cetak",
+            qty: 3000,
+            qtyVerified: true,
+            unit: "pcs",
+            color: "—",
+            notes: null,
+            production_process: "non_print",
+            processSnapshot: "NON_PRINT",
+          },
+        ],
+        status: "PO Masuk",
+        stage: "inbox",
+        productionStatus: "Baru",
+        branch: "Yogyakarta",
+        branchId: null,
+        salesName: "Sales Fixture A",
+        createdByUser: "user.fixture",
+        orderDate: "2026-11-12",
+        address: "Jl. Preview Fixture No. 1\nYogyakarta",
+        paymentTerms: "COD",
+        expedition: "Internal Delivery",
+        ship: "15 Nov 2026",
+        deliveryZone: "Dalam Kota",
+        orderPriority: "Normal",
+        bufferLabel: "Non-Buffer",
+        poNotes: "Data simulasi Step 158 — bukan Accurate Live.",
+        design_status: "approved",
+        payment_status: "approved",
+        approval: true,
+        scheduledQty: 2000,
+        done: 500,
+        packed: 0,
+        productionAssignments: [
+          {
+            id: "asg-1",
+            soLineId: "L-PRINT",
+            colorIndex: 1,
+            colorName: "Putih",
+            operator: "Op Preview",
+            machine: "M1",
+            targetQty: 2000,
+            workDate: "2026-11-13",
+          },
+        ],
+        inkColors: ["Putih"],
+        deleted: false,
+      },
+      {
+        id: "SO/PREVIEW-UNK-002",
+        accurateId: "fixture-unk-2",
+        name: "Toko Unknown (SIMULASI)",
+        item: "Item Belum Terverifikasi",
+        itemCodes: "UNK-01",
+        itemProcesses: "Unknown",
+        itemUnits: "pcs",
+        qty: 100,
+        qtyVerified: true,
+        detailLoaded: true,
+        detailLoadState: "loaded",
+        detailError: null,
+        lineCount: 1,
+        sourceLines: [
+          {
+            id: "L-UNK",
+            itemId: "fi-3",
+            item_code: "UNK-01",
+            name: "Item Belum Terverifikasi",
+            qty: 100,
+            qtyVerified: true,
+            unit: "pcs",
+            color: "—",
+            notes: null,
+            production_process: "unknown",
+            processSnapshot: "UNKNOWN",
+          },
+        ],
+        status: "PO Masuk",
+        stage: "inbox",
+        productionStatus: "Baru",
+        branch: "Semarang",
+        branchId: null,
+        salesName: "Belum terverifikasi",
+        createdByUser: "user.fixture",
+        orderDate: "2026-11-11",
+        address: "Alamat simulasi Semarang",
+        paymentTerms: "Transfer",
+        expedition: null,
+        ship: "16 Nov 2026",
+        deliveryZone: "Luar Kota",
+        orderPriority: "Urgent",
+        bufferLabel: "Buffer",
+        poNotes: "Proses unknown — tinjau di Inbox/Detail, bukan Jadwal Cetak.",
+        design_status: "pending",
+        payment_status: "pending",
+        approval: false,
+        scheduledQty: 0,
+        done: 0,
+        packed: 0,
+        productionAssignments: [],
+        inkColors: [],
+        deleted: false,
+      },
+      {
+        id: "SO/PREVIEW-PRINT-003",
+        accurateId: "fixture-print-3",
+        name: "Cafe Cetak Murni (SIMULASI)",
+        item: "Cup PP 14oz Cetak",
+        itemCodes: "CUP-14",
+        itemProcesses: "Cetak",
+        itemUnits: "pcs",
+        qty: 2000,
+        qtyVerified: true,
+        detailLoaded: true,
+        detailLoadState: "loaded",
+        detailError: null,
+        lineCount: 1,
+        sourceLines: [
+          {
+            id: "L-P2",
+            itemId: "fi-4",
+            item_code: "CUP-14",
+            name: "Cup PP 14oz Cetak",
+            qty: 2000,
+            qtyVerified: true,
+            unit: "pcs",
+            color: "Hitam",
+            notes: null,
+            production_process: "print",
+            processSnapshot: "PRINT",
+          },
+        ],
+        status: "PO Masuk",
+        stage: "inbox",
+        productionStatus: "Baru",
+        branch: "Yogyakarta",
+        branchId: null,
+        salesName: "Sales Fixture B",
+        createdByUser: "user.fixture",
+        orderDate: "2026-11-10",
+        address: "Jl. Simulasi Cetak 3",
+        paymentTerms: "DP 50%",
+        expedition: "JNE",
+        ship: "18 Nov 2026",
+        deliveryZone: "Nasional",
+        orderPriority: "Normal",
+        bufferLabel: "Non-Buffer",
+        poNotes: "Hanya item cetak.",
+        design_status: "approved",
+        payment_status: "approved",
+        approval: true,
+        scheduledQty: 0,
+        done: 0,
+        packed: 0,
+        productionAssignments: [],
+        inkColors: ["Hitam"],
+        deleted: false,
+      },
+    ];
+    fetchError = "";
+    inboxTotal = rows.length;
+    inboxPage = 1;
+    lastSync = "preview-fixture";
+    publishOrders(rows);
+    window.__V3_INBOX__.mode = "live";
+    window.__V3_INBOX__.previewFixture = true;
+    window.__V3_INBOX__.fetchError = "";
+    return rows;
+  }
+
   async function verifySession() {
+    if (isPreviewFixture()) {
+      window.__V3_PREVIEW_FIXTURE__ = true;
+      try {
+        localStorage.setItem(TOKEN_KEY, "preview-fixture-token");
+      } catch (_) {}
+      markAuthOk({ username: "preview-fixture", role: "viewer" });
+      return true;
+    }
     const token = localStorage.getItem(TOKEN_KEY) || "";
     if (!String(token).trim()) {
       redirectToLogin();
@@ -1736,145 +1955,173 @@
     renderWorkflowDrawer(so);
   };
 
-  // Read-only PO detail — never creates a job.
-  window.v49PODetail = async function (number) {
+  function renderPoSummaryDrawer(number) {
     const o = orderBySo(number);
     if (!o) return;
     selectedSo = number;
     const modal = document.getElementById("modal");
-    modal.innerHTML =
-      '<div class="drawerback"><aside class="detaildrawer shipping-drawer" role="dialog" aria-modal="true"><div class="drawerhead"><h2>Detail Sales Order Accurate</h2><button type="button" class="btn sm" onclick="v49Close()">✕ Tutup</button></div><div class="drawerbody">Memuat detail dokumen…</div></aside></div>';
-    try {
-      const detail = await fetchOrderDetail(number);
-      applyDetailToOrder(number, detail);
-      if (typeof window.render === "function") window.render();
-      const lines = Array.isArray(detail.line_items) ? detail.line_items : [];
-      const cells = lines
-        .map(function (line) {
-          return (
-            "<tr><td>" +
-            escapeHtml(line.item_code || "—") +
-            "</td><td>" +
-            escapeHtml(line.name || "—") +
-            "</td><td>" +
-            (line.quantity == null
-              ? "Belum diketahui"
-              : escapeHtml(String(line.quantity))) +
-            "</td><td>" +
-            escapeHtml(line.unit || "—") +
-            "</td><td>" +
-            escapeHtml(processLabel(line.production_process)) +
-            "</td><td>" +
-            escapeHtml(line.color || "—") +
-            "</td><td>" +
-            escapeHtml(line.notes || "—") +
-            "</td></tr>"
-          );
-        })
-        .join("");
-      let gateHtml =
-        '<p class="v49-quiet">Job produksi V3 belum dibuat. Membuka detail tidak membuat job.</p>';
-      try {
-        const job = await lookupJob(number);
-        if (job) {
-          gateHtml =
-            "<p>Job V3 #<b>" +
-            escapeHtml(String(job.id)) +
-            "</b> · Design: <b>" +
-            escapeHtml(job.design_status || "—") +
-            "</b> · Payment: <b>" +
-            escapeHtml(job.payment_status || "—") +
-            "</b> · Sample: <b>" +
-            escapeHtml(job.sample_status || "—") +
-            "</b> · Proses: <b>" +
-            escapeHtml(job.processing_status || "—") +
-            '</b></p><p><button type="button" class="btn" id="v3-open-from-detail">Buka panel transaksi V3</button></p>';
-        } else {
-          gateHtml +=
-            '<p><button type="button" class="btn" id="v3-open-from-detail">Buka panel transaksi V3</button></p>';
-        }
-      } catch (jobErr) {
-        gateHtml =
-          '<p class="v49-quiet">' +
-          escapeHtml(jobErr.message || "Job tidak dapat dibaca") +
-          "</p>";
-      }
-      const branchLabel =
-        detail.branch_name ||
-        detail.outlet ||
-        detail.branch_id ||
-        "Belum terverifikasi";
-      modal.querySelector(".drawerbody").innerHTML =
-        "<p><b>" +
-        escapeHtml(detail.number || detail.po_number || number) +
-        "</b> · Accurate ID: " +
-        escapeHtml(detail.accurate_id || "—") +
-        "</p><p>Pelanggan: <b>" +
-        escapeHtml(detail.customer || "Pelanggan belum diketahui") +
-        "</b></p><p>Tanggal PO: " +
-        escapeHtml(detail.order_date || "—") +
-        " · Estimasi kirim: " +
-        escapeHtml(detail.deadline || detail.estimated_delivery || "—") +
-        "</p><p>Alamat: " +
-        escapeHtml(detail.address || "—") +
-        "</p><p>Syarat bayar: " +
-        escapeHtml(detail.payment_terms || "—") +
-        " · Pengiriman: " +
-        escapeHtml(detail.expedition || "—") +
-        " · Zona: " +
-        escapeHtml(detail.delivery_zone || "—") +
-        "</p><p>Sales: <b>" +
-        escapeHtml(detail.sales || "Belum diketahui") +
-        "</b> · Pembuat PO: <b>" +
-        escapeHtml(detail.created_by_user || "Belum diketahui") +
-        "</b></p><p>Cabang: <b>" +
-        escapeHtml(branchLabel) +
-        "</b> <span class=\"v49-quiet\">(id " +
-        escapeHtml(detail.branch_id || "—") +
-        ")</span></p><p>Buffer: " +
-        escapeHtml(
-          detail.buffer_stock === true
-            ? "Buffer"
-            : detail.buffer_stock === false
-              ? "Non-Buffer"
-              : "Belum terverifikasi",
-        ) +
-        " · Status Pesanan: " +
-        escapeHtml(
-          detail.urgent_state === "approved_urgent" ||
-            detail.urgent_state === "legacy_urgent"
-            ? "Urgent"
-            : detail.urgent_state === "normal"
-              ? "Normal"
-              : "Belum terverifikasi",
-        ) +
-        '</p><p>Keterangan:</p><div class="po-notes" style="white-space:pre-wrap">' +
-        escapeHtml(detail.notes || "—") +
-        "</div><p>Total qty: <b>" +
-        escapeHtml(
-          detail.total_quantity == null ? "—" : String(detail.total_quantity),
-        ) +
-        "</b> · Jenis barang: <b>" +
-        escapeHtml(
-          detail.line_count == null ? String(lines.length) : String(detail.line_count),
-        ) +
-        "</b></p><p>Status proses V3: <b>" +
-        escapeHtml(detail.production_status || "Baru") +
-        "</b></p>" +
-        gateHtml +
-        '<div class="v26-scroll"><table><thead><tr><th>Kode</th><th>Produk</th><th>Qty</th><th>Satuan</th><th>Proses</th><th>Warna</th><th>Catatan</th></tr></thead><tbody>' +
-        (cells || '<tr><td colspan="7">Tidak ada baris</td></tr>') +
-        '</tbody></table></div><p class="v49-quiet">Accurate read-only. Transaksi hanya via panel V3 contextual. Inbox tidak memproses.</p>';
-      const openBtn = document.getElementById("v3-open-from-detail");
-      if (openBtn) {
-        openBtn.onclick = function () {
-          window.v3OpenWorkflow(number);
-        };
-      }
-    } catch (err) {
-      modal.querySelector(".drawerbody").textContent =
-        "Detail belum tersedia: " + (err.message || err);
+    const st = o.detailLoadState || "not_loaded";
+    const lines = Array.isArray(o.sourceLines) ? o.sourceLines : [];
+    const field = function (label, value, fallback) {
+      const empty =
+        value == null ||
+        !String(value).trim() ||
+        ["—", "-", "Belum terverifikasi", "Belum tersedia"].includes(
+          String(value).trim(),
+        );
+      let shown;
+      if (!empty) shown = escapeHtml(String(value));
+      else if (st === "loading") shown = '<span class="muted">Memuat…</span>';
+      else if (st === "failed")
+        shown =
+          '<span class="muted">Gagal dimuat</span> <button type="button" class="btn sm" onclick="window.retryInboxDetail&&window.retryInboxDetail(\'' +
+          escapeHtml(number) +
+          "');window.v49PODetail('" +
+          escapeHtml(number) +
+          "')\">Retry</button>";
+      else if (st !== "loaded") shown = '<span class="muted">Belum dimuat</span>';
+      else shown = '<span class="muted">' + escapeHtml(fallback || "Belum tersedia") + "</span>";
+      return (
+        "<div><small>" +
+        escapeHtml(label) +
+        "</small><b>" +
+        shown +
+        "</b></div>"
+      );
+    };
+    let lineRows;
+    if (st === "loading" && !lines.length) {
+      lineRows =
+        '<tr><td colspan="6"><span class="muted">Memuat rincian produk…</span></td></tr>';
+    } else if (st === "failed" && !lines.length) {
+      lineRows =
+        '<tr><td colspan="6"><span class="muted">Gagal dimuat</span></td></tr>';
+    } else if (st !== "loaded" && !lines.length) {
+      lineRows =
+        '<tr><td colspan="6"><span class="muted">Detail barang belum dimuat</span></td></tr>';
+    } else {
+      lineRows =
+        lines
+          .map(function (x) {
+            return (
+              "<tr><td>" +
+              escapeHtml(x.item_code || "—") +
+              "</td><td>" +
+              escapeHtml(x.name || "—") +
+              "</td><td>" +
+              escapeHtml(x.qty == null ? "—" : String(x.qty)) +
+              "</td><td>" +
+              escapeHtml(x.unit || "—") +
+              "</td><td>" +
+              escapeHtml(processLabel(x.production_process)) +
+              "</td><td>" +
+              escapeHtml(x.color || "—") +
+              "</td></tr>"
+            );
+          })
+          .join("") ||
+        '<tr><td colspan="6">Belum ada rincian produk</td></tr>';
     }
+    const qtyHtml = o.qtyVerified
+      ? escapeHtml(String(o.qty)) + " pcs"
+      : st === "loading"
+        ? "Memuat…"
+        : st === "failed"
+          ? "Gagal dimuat"
+          : st === "loaded"
+            ? "Qty belum terverifikasi"
+            : "Belum dimuat";
+    const jenisHtml =
+      o.qtyVerified && (o.lineCount != null || lines.length)
+        ? escapeHtml(String(o.lineCount != null ? o.lineCount : lines.length))
+        : st === "loading"
+          ? "Memuat…"
+          : st === "failed"
+            ? "Gagal dimuat"
+            : st === "loaded"
+              ? "—"
+              : "Belum dimuat";
+    const sales =
+      o.salesName && o.salesName !== "Belum terverifikasi" ? o.salesName : null;
+    const prio =
+      o.orderPriority === "Urgent" || o.orderPriority === "Normal"
+        ? o.orderPriority
+        : null;
+    const buf =
+      o.bufferLabel === "Buffer" || o.bufferLabel === "Non-Buffer"
+        ? o.bufferLabel
+        : null;
+    modal.innerHTML =
+      '<div class="drawerback" id="v49-po-detail-back" onclick="if(event.target===this)v49Close()"><aside class="detaildrawer shipping-drawer" role="dialog" aria-modal="true" aria-label="Ringkasan PO ' +
+      escapeHtml(o.id) +
+      '" onclick="event.stopPropagation()"><div class="drawerhead"><div><div class="eyebrow">RINGKASAN PO · READ ONLY</div><h2>' +
+      escapeHtml(o.id) +
+      "</h2><small>" +
+      escapeHtml(o.name || "") +
+      '</small></div><button class="btn sm" type="button" onclick="v49Close()">✕ Tutup</button></div><div class="drawerbody"><div class="meta">' +
+      "<div><small>Tanggal PO</small><b>" +
+      escapeHtml(o.orderDate || "—") +
+      "</b></div>" +
+      "<div><small>Pelanggan</small><b>" +
+      escapeHtml(o.name || "—") +
+      "</b></div>" +
+      field("Alamat pengiriman", o.address) +
+      field("Sales", sales, "Belum terverifikasi") +
+      field("Metode Pengiriman", o.expedition) +
+      field("Estimasi pengiriman", o.ship) +
+      field("Zona Pengiriman", o.deliveryZone) +
+      "<div><small>Cabang</small><b>" +
+      escapeHtml(o.branch || "—") +
+      "</b></div>" +
+      field("Status Pesanan", prio, "Belum terverifikasi") +
+      field("Buffer / Non-Buffer", buf, "Belum terverifikasi") +
+      "<div><small>Total Qty PO</small><b>" +
+      qtyHtml +
+      "</b></div>" +
+      "<div><small>Jumlah jenis barang</small><b>" +
+      jenisHtml +
+      "</b></div></div><div class=\"sectionlabel\">Keterangan PO</div><div class=\"po-notes\" style=\"white-space:pre-wrap\">" +
+      (o.poNotes && String(o.poNotes).trim()
+        ? escapeHtml(o.poNotes).replace(/\n/g, "<br>")
+        : st === "loading"
+          ? '<span class="muted">Memuat…</span>'
+          : st === "failed"
+            ? '<span class="muted">Gagal dimuat</span>'
+            : st === "loaded"
+              ? '<span class="muted">—</span>'
+              : '<span class="muted">Belum dimuat</span>') +
+      '</div><div class="sectionlabel">Daftar item</div><div class="v26-scroll"><table><thead><tr><th>Kode</th><th>Nama</th><th>Qty</th><th>Satuan</th><th>Proses</th><th>Warna</th></tr></thead><tbody>' +
+      lineRows +
+      '</tbody></table></div><div class="v49-quiet">Ringkasan monitoring saja — tanpa mutasi workflow. Sales dari salesman Accurate, bukan user pembuat.</div></div><div class="drawerfoot"><button class="btn" type="button" onclick="v49Close()">Tutup</button><button class="btn primary" type="button" onclick="v49Close();v36OpenTracking(' +
+      JSON.stringify(number) +
+      ')">Live Tracking</button></div></aside></div>';
+    if (!window.__v49EscapeBound) {
+      window.__v49EscapeBound = true;
+      document.addEventListener("keydown", function (ev) {
+        if (ev.key === "Escape" && document.getElementById("v49-po-detail-back")) {
+          ev.preventDefault();
+          window.v49Close();
+        }
+      });
+    }
+  }
+
+  // Step 158: Detail/Ringkasan PO — read-only, uses inbox/enrich data (no workflow mutation).
+  window.v49PODetail = async function (number) {
+    const o = orderBySo(number);
+    if (!o) return;
+    selectedSo = number;
+    if (
+      !isPreviewFixture() &&
+      o.detailLoadState !== "loaded" &&
+      o.detailLoadState !== "loading" &&
+      typeof window.retryInboxDetail === "function"
+    ) {
+      try {
+        window.retryInboxDetail(number);
+      } catch (_) {}
+    }
+    renderPoSummaryDrawer(number);
   };
 
   window.v49Close = function () {
@@ -1910,23 +2157,18 @@
     const content = root.querySelector(".content");
     if (content && !status.parentElement) content.prepend(status);
 
+    // Step 158: no separate "Cari SO" card — in-table search + compact Accurate page pager only.
     let toolbar = document.getElementById("v3-inbox-tools");
     if (!toolbar && content) {
       toolbar = document.createElement("div");
       toolbar.id = "v3-inbox-tools";
-      toolbar.className = "v3-inbox-tools";
+      toolbar.className = "v3-inbox-tools v3-inbox-pager";
       toolbar.innerHTML =
-        '<label>Cari SO <input id="v3-inbox-q" type="search" placeholder="Nomor / keyword"/></label>' +
-        '<button type="button" class="btn sm" id="v3-inbox-search">Cari</button>' +
+        '<span class="v3-inbox-pager-label">Halaman Accurate</span>' +
         '<button type="button" class="btn sm" id="v3-inbox-prev">Prev</button>' +
         '<button type="button" class="btn sm" id="v3-inbox-next">Next</button>' +
         '<button type="button" class="btn sm" id="v3-inbox-refresh">Refresh</button>';
       content.prepend(toolbar);
-      document.getElementById("v3-inbox-search").onclick = function () {
-        inboxKeyword = field("v3-inbox-q");
-        inboxPage = 1;
-        refreshInbox(1);
-      };
       document.getElementById("v3-inbox-prev").onclick = function () {
         if (inboxPage > 1) refreshInbox(inboxPage - 1);
       };
@@ -1936,6 +2178,15 @@
       document.getElementById("v3-inbox-refresh").onclick = function () {
         refreshInbox(inboxPage);
       };
+    } else if (toolbar) {
+      toolbar.querySelectorAll("label").forEach(function (el) {
+        el.remove();
+      });
+      const searchBtn = document.getElementById("v3-inbox-search");
+      if (searchBtn) searchBtn.remove();
+      const q = document.getElementById("v3-inbox-q");
+      if (q) q.remove();
+      toolbar.classList.add("v3-inbox-pager");
     }
 
     root.querySelectorAll(".demo").forEach((x) => x.remove());
@@ -1949,32 +2200,23 @@
       .querySelectorAll('button[onclick*="resetDemo"]')
       .forEach((x) => x.remove());
 
-    // Inject contextual V3 open buttons on SO rows without removing existing UI.
-    root.querySelectorAll("tbody tr").forEach(function (tr) {
-      const first = tr.querySelector("td");
-      if (!first) return;
-      const so = (first.textContent || "").trim();
-      if (!so || !orderBySo(so)) return;
-      if (tr.querySelector(".v3-open-wf")) return;
-      const td = document.createElement("td");
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "btn sm v3-open-wf";
-      btn.textContent = "V3";
-      btn.title = "Panel transaksi V3 untuk SO ini";
-      btn.addEventListener("click", function (ev) {
-        ev.preventDefault();
-        ev.stopPropagation();
-        window.v3OpenWorkflow(so);
-      });
-      td.appendChild(btn);
-      tr.appendChild(td);
+    // Step 158: do not inject legacy "V3" workflow buttons on Inbox rows.
+    root.querySelectorAll(".v3-open-wf").forEach(function (btn) {
+      const cell = btn.closest("td");
+      if (cell) cell.remove();
+      else btn.remove();
     });
     return result;
   };
 
   async function refreshInbox(page) {
     if (loading) return;
+    if (isPreviewFixture()) {
+      inboxPage = page || 1;
+      seedPreviewFixtureOrders();
+      if (typeof window.render === "function") window.render();
+      return;
+    }
     if (authStatus !== "ok") {
       inboxTotal = null;
       publishOrders([]);
@@ -2406,5 +2648,18 @@
     }
     if (typeof window.render === "function") window.render();
     await refreshInbox(1);
+    if (isPreviewFixture()) {
+      let banner = document.getElementById("v158-preview-banner");
+      if (!banner) {
+        banner = document.createElement("div");
+        banner.id = "v158-preview-banner";
+        banner.setAttribute("role", "status");
+        banner.style.cssText =
+          "position:sticky;top:0;z-index:50;background:#fff3df;border-bottom:1px solid #f0d8ae;color:#8c622b;padding:8px 14px;font-size:12px;font-weight:700";
+        banner.textContent =
+          "PREVIEW CURSOR · DATA SIMULASI/FIXTURE — bukan Accurate Live · Step 158 UI only";
+        document.body.prepend(banner);
+      }
+    }
   })();
 })();
