@@ -56,6 +56,7 @@ def test_ad_meliora_detail_lines_qty_and_mixed_process():
     assert mapped["total_quantity"] == 2000.0
     assert mapped["line_count"] == 2
     assert mapped["sales"] == "Sales Jogja Official"
+    assert mapped["sales_source"] == "salesPersonName"
     assert mapped["created_by_user"] == "Admin Creator"
     assert mapped["sales"] != mapped["created_by_user"]
     assert mapped["branch_name"] == "Yogyakarta"

@@ -38,6 +38,9 @@ def so_list_row(row: dict[str, Any]) -> dict[str, Any]:
     sales = row.get("sales")
     if sales is not None:
         sales = str(sales).strip() or None
+    sales_source = row.get("sales_source")
+    if sales_source is not None:
+        sales_source = str(sales_source).strip() or None
     return {
         "accurate_id": accurate_id,
         "number": so_number,
@@ -53,6 +56,7 @@ def so_list_row(row: dict[str, Any]) -> dict[str, Any]:
         "total": row.get("total"),
         "order_date": row.get("order_date"),
         "sales": sales,
+        "sales_source": sales_source,
         # Nullable classifications — never coerce missing → false.
         "buffer_stock": buffer_stock,
         "urgent_state": urgent_state,

@@ -198,6 +198,27 @@
       item:
         lines.map((x) => x.name || x.item_code).filter(Boolean).join(" + ") ||
         "Detail barang belum dimuat",
+      itemCodes: lines
+        .map(function (x) {
+          return x.item_code;
+        })
+        .filter(Boolean)
+        .join(" · "),
+      itemProcesses: lines
+        .map(function (x) {
+          return x.production_process === "print"
+            ? "Cetak"
+            : x.production_process === "non_print"
+              ? "Tidak Cetak"
+              : "Unknown";
+        })
+        .join(" · "),
+      itemUnits: lines
+        .map(function (x) {
+          return x.unit || "";
+        })
+        .filter(Boolean)
+        .join(" · "),
       qty: qtyVerified ? qty : null,
       qtyVerified: Boolean(qtyVerified),
       detailLoaded: Boolean(lines.length),
@@ -225,6 +246,10 @@
       branch: branchLabel || "Belum terverifikasi",
       branchId: s.branch_id || null,
       salesName: salesOfficial || "Belum terverifikasi",
+      salesSource: s.sales_source || null,
+      salesMissingReason: salesOfficial
+        ? null
+        : "accurate_sales_field_absent",
       createdByUser: s.created_by_user || null,
       orderDate: s.order_date || null,
       address: s.address || null,
@@ -232,7 +257,19 @@
       expedition: s.expedition || null,
       deliveryZone: s.delivery_zone || null,
       poNotes: s.notes || null,
-      ship: s.deadline || s.estimated_delivery || "Belum diketahui",
+      orderPriority:
+        s.urgent_state === "approved_urgent" || s.urgent_state === "legacy_urgent"
+          ? "Urgent"
+          : s.urgent_state === "normal"
+            ? "Normal"
+            : "Belum terverifikasi",
+      bufferLabel:
+        s.buffer_stock === true
+          ? "Buffer"
+          : s.buffer_stock === false
+            ? "Non-Buffer"
+            : "Belum terverifikasi",
+      ship: s.deadline || s.estimated_delivery || null,
       scheduleDate: "",
       machine: "",
       operator: "",
@@ -376,7 +413,16 @@
       o.branch = detail.branch_name || detail.outlet;
     }
     if (detail.branch_id) o.branchId = detail.branch_id;
-    if (detail.sales) o.salesName = String(detail.sales);
+    if (detail.sales != null && String(detail.sales).trim()) {
+      o.salesName = String(detail.sales).trim();
+      o.salesSource = detail.sales_source || o.salesSource || "detail";
+      o.salesMissingReason = null;
+    } else {
+      // Never fall back to creator / branch / login user.
+      o.salesName = "Belum terverifikasi";
+      o.salesSource = detail.sales_source || null;
+      o.salesMissingReason = "accurate_sales_field_absent";
+    }
     o.createdByUser = detail.created_by_user || o.createdByUser || null;
     o.orderDate = detail.order_date || o.orderDate || null;
     o.address = detail.address || null;
@@ -384,11 +430,37 @@
     o.expedition = detail.expedition || null;
     o.deliveryZone = detail.delivery_zone || null;
     o.poNotes = detail.notes || null;
-    o.ship =
-      detail.deadline ||
-      detail.estimated_delivery ||
-      o.ship ||
-      "Belum diketahui";
+    o.ship = detail.deadline || detail.estimated_delivery || o.ship || null;
+    o.orderPriority =
+      detail.urgent_state === "approved_urgent" ||
+      detail.urgent_state === "legacy_urgent"
+        ? "Urgent"
+        : detail.urgent_state === "normal"
+          ? "Normal"
+          : "Belum terverifikasi";
+    o.bufferLabel =
+      detail.buffer_stock === true
+        ? "Buffer"
+        : detail.buffer_stock === false
+          ? "Non-Buffer"
+          : "Belum terverifikasi";
+    o.itemCodes = o.sourceLines
+      .map(function (x) {
+        return x.item_code;
+      })
+      .filter(Boolean)
+      .join(" · ");
+    o.itemProcesses = o.sourceLines
+      .map(function (x) {
+        return processLabel(x.production_process);
+      })
+      .join(" · ");
+    o.itemUnits = o.sourceLines
+      .map(function (x) {
+        return x.unit || "";
+      })
+      .filter(Boolean)
+      .join(" · ");
     o.inkColors = o.sourceLines
       .map(function (x) {
         return x.color;
@@ -1435,9 +1507,9 @@
         ) +
         " · Urgent: " +
         escapeHtml(detail.urgent_state || "Unknown") +
-        "</p><p>Keterangan: " +
+        '</p><p>Keterangan:</p><div class="po-notes" style="white-space:pre-wrap">' +
         escapeHtml(detail.notes || "—") +
-        "</p><p>Total qty: <b>" +
+        "</div><p>Total qty: <b>" +
         escapeHtml(
           detail.total_quantity == null ? "—" : String(detail.total_quantity),
         ) +

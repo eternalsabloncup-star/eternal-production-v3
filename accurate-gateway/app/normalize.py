@@ -49,25 +49,84 @@ def _first_str(*values: Any) -> str | None:
     return None
 
 
-def _sales_name(raw: dict[str, Any]) -> str | None:
-    """Official salesperson only — never confuse with document creator."""
-    nested = (
-        raw.get("salesPerson")
-        or raw.get("salesperson")
-        or raw.get("salesman")
-        or raw.get("sales")
-    )
-    if isinstance(nested, dict):
-        name = _first_str(nested.get("name"), nested.get("fullName"))
+def _sales_from_list(block: Any) -> list[str]:
+    """Extract salesperson names from Accurate salesmanList-style arrays."""
+    if not isinstance(block, list):
+        return []
+    names: list[str] = []
+    for entry in block:
+        if isinstance(entry, dict):
+            name = _first_str(
+                entry.get("name"),
+                entry.get("salesmanName"),
+                entry.get("salesPersonName"),
+                entry.get("salespersonName"),
+                entry.get("fullName"),
+                entry.get("nama"),
+            )
+        else:
+            name = _first_str(entry)
         if name:
-            return name
-    return _first_str(
-        raw.get("salesPersonName"),
-        raw.get("salespersonName"),
-        raw.get("salesmanName"),
-        raw.get("salesName"),
-        raw.get("sales") if not isinstance(raw.get("sales"), dict) else None,
+            names.append(name)
+    # Preserve order, drop duplicates.
+    return list(dict.fromkeys(names))
+
+
+def _extract_sales(raw: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Official salesperson only — never confuse with document creator.
+
+    Returns (name, source_field). source_field is for audit when missing/present.
+    Accurate Online commonly nests sellers in salesmanList.
+    """
+    for list_key in (
+        "salesmanList",
+        "salesPersonList",
+        "salespersonList",
+        "salesList",
+    ):
+        names = _sales_from_list(raw.get(list_key))
+        if names:
+            return ", ".join(names), list_key
+
+    nested_keys = (
+        ("salesPerson", "salesPerson"),
+        ("salesperson", "salesperson"),
+        ("salesman", "salesman"),
+        ("sales", "sales"),
     )
+    for key, source in nested_keys:
+        nested = raw.get(key)
+        if isinstance(nested, dict):
+            name = _first_str(
+                nested.get("name"),
+                nested.get("fullName"),
+                nested.get("salesmanName"),
+                nested.get("salesPersonName"),
+            )
+            if name:
+                return name, source
+
+    for key in (
+        "salesPersonName",
+        "salespersonName",
+        "salesmanName",
+        "salesName",
+    ):
+        name = _first_str(raw.get(key))
+        if name:
+            return name, key
+
+    scalar = raw.get("sales")
+    if not isinstance(scalar, dict):
+        name = _first_str(scalar)
+        if name:
+            return name, "sales"
+    return None, None
+
+
+def _sales_name(raw: dict[str, Any]) -> str | None:
+    name, _source = _extract_sales(raw)
+    return name
 
 
 def _created_by_user(raw: dict[str, Any]) -> str | None:
@@ -253,7 +312,7 @@ def normalize_sales_order_list_item(raw: dict[str, Any]) -> dict[str, Any]:
     branch = _branch_party(raw)
     so_number = str(raw.get("number") or raw.get("no") or "")
     customer_po = _customer_po_number(raw)
-    sales = _sales_name(raw)
+    sales, sales_source = _extract_sales(raw)
     return {
         "id": _document_id(raw),
         "accurate_id": _document_id(raw),
@@ -267,6 +326,8 @@ def normalize_sales_order_list_item(raw: dict[str, Any]) -> dict[str, Any]:
         "total": float(raw.get("totalAmount") or raw.get("total") or 0),
         "order_date": raw.get("transDate") or raw.get("orderDate") or raw.get("order_date"),
         "sales": sales,
+        # Audit: which Accurate field supplied sales; null ⇒ absent (not creator fallback).
+        "sales_source": sales_source,
         # Slice 0: Buffer/Urgent missing in live Accurate sample — never invent false.
         "buffer_stock": None,
         "urgent_state": None,
@@ -279,6 +340,10 @@ def normalize_sales_order(raw: dict[str, Any]) -> dict[str, Any]:
     base["line_items"] = lines
     base["total_quantity"] = sum(float(li.get("qty") or 0) for li in lines)
     base["line_count"] = len(lines)
+    # Re-resolve on full detail payload (list may omit salesmanList).
+    sales, sales_source = _extract_sales(raw)
+    base["sales"] = sales
+    base["sales_source"] = sales_source
     base["created_by_user"] = _created_by_user(raw)
     base["address"] = _first_str(
         raw.get("toAddress"),

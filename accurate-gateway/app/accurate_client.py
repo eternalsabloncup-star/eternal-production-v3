@@ -333,7 +333,8 @@ class AccurateClient:
                 "id,number,statusName,status,customer,customerId,customerName,"
                 "branch,branchId,branchName,transDate,totalAmount,"
                 "poNumber,poNo,customerPoNumber,"
-                "salesPersonName,salesmanName,salesName,salesPerson"
+                "salesPersonName,salesmanName,salesName,salesPerson,salesmanList,"
+                "salesPersonList,createdUserName,inputUserName"
             ),
             "sp.pageSize": page_size,
             "sp.page": page_n,

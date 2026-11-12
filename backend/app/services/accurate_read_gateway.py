@@ -196,6 +196,9 @@ def normalize_summary(row: dict) -> dict:
     sales = row.get("sales")
     if sales is not None:
         sales = str(sales).strip() or None
+    sales_source = row.get("sales_source")
+    if sales_source is not None:
+        sales_source = str(sales_source).strip() or None
     return {
         "accurate_id": so_id,
         "number": so_number,
@@ -206,6 +209,7 @@ def normalize_summary(row: dict) -> dict:
         "branch_id": branch_id,
         "branch_name": branch_name,
         "sales": sales,
+        "sales_source": sales_source,
         "order_date": row.get("order_date") or row.get("trans_date"),
         "deadline": row.get("deadline") or row.get("estimated_delivery"),
         # List summaries intentionally omit lines — detail endpoint is source of truth.
@@ -303,6 +307,9 @@ async def get_sales_order(gateway: ReadGateway, number: str) -> dict:
             or result.get("branch_name")
             or result.get("outlet"),
             "sales": so.get("sales") if so.get("sales") is not None else result.get("sales"),
+            "sales_source": so.get("sales_source")
+            if so.get("sales_source") is not None
+            else result.get("sales_source"),
             "buffer_stock": result.get("buffer_stock"),
             "urgent_state": result.get("urgent_state"),
         }
