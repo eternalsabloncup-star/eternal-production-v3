@@ -367,6 +367,71 @@ def load_expected_four(path: str, so_number: str) -> dict[str, Any]:
     }
 
 
+_PROBE_STAGES = (
+    "load_config",
+    "init_client",
+    "resolve_so",
+    "fetch_detail",
+    "normalize_four_fields",
+    "complete",
+)
+
+
+def classify_blocker(exc: BaseException, stage: str, safe_codes: frozenset[str]) -> str:
+    """Map exception → allowlisted blocker; never invent sensitive detail."""
+    raw_code = getattr(exc, "code", None)
+    if isinstance(raw_code, str) and raw_code in safe_codes:
+        return raw_code
+    if stage == "load_config":
+        if isinstance(exc, FileNotFoundError):
+            return "env_file_missing"
+        if isinstance(exc, PermissionError):
+            return "env_file_unreadable"
+        if isinstance(exc, ValueError) and str(exc) in safe_codes:
+            return str(exc)
+    if stage == "fetch_detail" and type(exc).__name__ == "AccurateUpstreamError":
+        # code already checked above; unknown upstream → generic
+        return "probe_runtime_error"
+    return "probe_runtime_error"
+
+
+def failure_report(
+    *,
+    slice1l: Any,
+    stage: str,
+    exc: BaseException,
+    mode: str,
+    so_number: str | None,
+) -> dict[str, Any]:
+    """Sanitized failure payload with explicit stage (no messages/tracebacks)."""
+    safe_codes = getattr(slice1l, "_SAFE_ERROR_CODES", frozenset())
+    error = slice1l._sanitize_exc(exc)
+    blocker = classify_blocker(exc, stage, safe_codes)
+    # Prefer sanitized allowlisted code when present.
+    if error.get("code") in safe_codes and error.get("code") != "probe_runtime_error":
+        blocker = error["code"]
+    return {
+        "ok": False,
+        "probe": PROBE_NAME,
+        "mode": mode,
+        "stage": stage,
+        "blocker": blocker,
+        "error": error,
+        "so_hash": _so_hash(so_number) if so_number else None,
+        "http": {
+            "allowed_methods": list(slice1l._ALLOWED_HTTP_METHODS),
+            "executed_methods": list(slice1l._HTTP_METHODS_EXECUTED),
+        },
+        "security": {
+            "raw_values_printed": False,
+            "exception_message_printed": False,
+            "traceback_printed": False,
+            "credentials_printed": False,
+            "so_number_printed": False,
+        },
+    }
+
+
 async def async_main(
     env_file: str,
     expected_file: str,
@@ -377,34 +442,53 @@ async def async_main(
     slice1l = _load_slice1l()
     slice1l.silence_sensitive_loggers()
     slice1l._HTTP_METHODS_EXECUTED.clear()
+    mode = "discover" if discover_only else "verify"
+    stage = "load_config"
     report: dict[str, Any] = {
         "ok": False,
         "probe": PROBE_NAME,
-        "mode": "discover" if discover_only else "verify",
+        "mode": mode,
+        "stage": stage,
         "so_hash": _so_hash(so_number) if so_number else None,
     }
     try:
         if not so_number:
             report["blocker"] = "so_number_required"
+            report["stage"] = "load_config"
             print(json.dumps(report, indent=2))
             return 2
         if not discover_only and not expected_file:
             report["blocker"] = "expected_file_required_unless_discover_only"
+            report["stage"] = "load_config"
             print(json.dumps(report, indent=2))
             return 2
+
+        stage = "load_config"
         expected = (
             None if discover_only else load_expected_four(expected_file, so_number)
         )
         slice1l.load_env_file(env_file)
-        from app.accurate_client import AccurateClient
         from app.config import settings
 
         if str(getattr(settings, "gateway_mode", "")).lower() != "live":
             report["blocker"] = "GATEWAY_MODE_must_be_live"
+            report["stage"] = "load_config"
+            report["http"] = {
+                "allowed_methods": list(slice1l._ALLOWED_HTTP_METHODS),
+                "executed_methods": list(slice1l._HTTP_METHODS_EXECUTED),
+            }
             print(json.dumps(report, indent=2))
             return 2
+
+        stage = "init_client"
+        from app.accurate_client import AccurateClient
+
         client = AccurateClient()
+
+        stage = "resolve_so"
         so_id = await slice1l.resolve_exact_so_id(client, so_number)
+
+        stage = "fetch_detail"
         slice1l._record_executed("GET /accurate/api/sales-order/detail.do")
         data = await client._request(
             "GET",
@@ -414,11 +498,20 @@ async def async_main(
         raw = data.get("d") or data.get("data") or data
         if not isinstance(raw, dict):
             report["blocker"] = "accurate_detail_shape"
+            report["stage"] = "fetch_detail"
+            report["http"] = {
+                "allowed_methods": list(slice1l._ALLOWED_HTTP_METHODS),
+                "executed_methods": list(slice1l._HTTP_METHODS_EXECUTED),
+            }
             print(json.dumps(report, indent=2))
             return 1
+
+        stage = "normalize_four_fields"
         built = build_four_field_report(
             raw, expected, so_number, discover_only=discover_only
         )
+        stage = "complete"
+        built["stage"] = stage
         built["http"] = {
             "allowed_methods": list(slice1l._ALLOWED_HTTP_METHODS),
             "executed_methods": list(slice1l._HTTP_METHODS_EXECUTED),
@@ -426,10 +519,15 @@ async def async_main(
         print(json.dumps(built, indent=2, ensure_ascii=False))
         return 0 if built.get("ok") else 1
     except Exception as exc:  # noqa: BLE001 — sanitized exit only
-        report["error"] = slice1l._sanitize_exc(exc)
-        report["blocker"] = "probe_runtime_error"
-        print(json.dumps(report, indent=2))
-        return 1
+        fail = failure_report(
+            slice1l=slice1l,
+            stage=stage,
+            exc=exc,
+            mode=mode,
+            so_number=so_number or None,
+        )
+        print(json.dumps(fail, indent=2))
+        return 1 if stage not in {"load_config"} else 2
 
 
 def main() -> int:
