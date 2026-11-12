@@ -111,22 +111,43 @@ export function attachColumnResize(
 ): ColumnWidthMap {
   if (!table) return {};
   const widths = loadColumnWidths(opts.storageKey);
+  const applyPair = (key: string, w: number) => {
+    const sel = `th[data-column="${CSS.escape(key)}"], td[data-column="${CSS.escape(key)}"]`;
+    table.querySelectorAll(sel).forEach((el) => {
+      const node = el as HTMLElement;
+      node.style.width = w + "px";
+      node.style.minWidth = w + "px";
+      node.style.maxWidth = w + "px";
+      node.style.boxSizing = "border-box";
+    });
+  };
+  const syncSticky = () => {
+    const idW =
+      widths.id ||
+      Math.round(
+        (
+          table.querySelector('th[data-column="id"]') as HTMLElement | null
+        )?.getBoundingClientRect().width || minWidthFor("id"),
+      );
+    widths.id = clampColumnWidth("id", idW);
+    const nameEls = table.querySelectorAll(
+      'th[data-column="name"], td[data-column="name"]',
+    );
+    nameEls.forEach((el) => {
+      (el as HTMLElement).style.left = widths.id + "px";
+    });
+  };
   const heads = table.querySelectorAll("thead th[data-column]");
   heads.forEach((th) => {
     const key = th.getAttribute("data-column") || "";
     if (!key) return;
+    // Hidden columns keep width prefs but do not render spacer chrome.
+    if ((th as HTMLElement).classList.contains("v40-col-hidden")) return;
     const kind = opts.kindOf ? opts.kindOf(key) : null;
     if (widths[key] != null) {
       const w = clampColumnWidth(key, widths[key], kind);
       widths[key] = w;
-      (th as HTMLElement).style.width = w + "px";
-      (th as HTMLElement).style.minWidth = w + "px";
-      (th as HTMLElement).style.maxWidth = w + "px";
-      table.querySelectorAll(`td[data-column="${CSS.escape(key)}"]`).forEach((td) => {
-        (td as HTMLElement).style.width = w + "px";
-        (td as HTMLElement).style.minWidth = w + "px";
-        (td as HTMLElement).style.maxWidth = w + "px";
-      });
+      applyPair(key, w);
     }
     if (th.querySelector("[data-col-resize]")) return;
     const handle = document.createElement("span");
@@ -152,33 +173,15 @@ export function attachColumnResize(
       const onMove = (e: PointerEvent) => {
         const next = clampColumnWidth(key, startW + (e.clientX - startX), kind);
         widths[key] = next;
-        (th as HTMLElement).style.width = next + "px";
-        (th as HTMLElement).style.minWidth = next + "px";
-        (th as HTMLElement).style.maxWidth = next + "px";
-        table
-          .querySelectorAll(`td[data-column="${CSS.escape(key)}"]`)
-          .forEach((td) => {
-            (td as HTMLElement).style.width = next + "px";
-            (td as HTMLElement).style.minWidth = next + "px";
-            (td as HTMLElement).style.maxWidth = next + "px";
-          });
-        // Sticky name offset follows id width when resizing id.
-        if (key === "id") {
-          const nameTh = table.querySelector(
-            'th[data-column="name"]',
-          ) as HTMLElement | null;
-          const nameTds = table.querySelectorAll('td[data-column="name"]');
-          if (nameTh) nameTh.style.left = next + "px";
-          nameTds.forEach((td) => {
-            (td as HTMLElement).style.left = next + "px";
-          });
-        }
+        applyPair(key, next);
+        if (key === "id") syncSticky();
       };
       const onUp = () => {
         handle.removeEventListener("pointermove", onMove);
         handle.removeEventListener("pointerup", onUp);
         handle.removeEventListener("pointercancel", onUp);
         saveColumnWidths(opts.storageKey, widths);
+        syncSticky();
         if (opts.onChange) opts.onChange({ ...widths });
       };
       handle.addEventListener("pointermove", onMove);
@@ -187,5 +190,6 @@ export function attachColumnResize(
     });
     th.appendChild(handle);
   });
+  syncSticky();
   return widths;
 }

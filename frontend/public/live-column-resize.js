@@ -91,6 +91,7 @@
       th.style.width = w + "px";
       th.style.minWidth = w + "px";
       th.style.maxWidth = w + "px";
+      th.style.boxSizing = "border-box";
     }
     table
       .querySelectorAll('td[data-column="' + escapeAttr(key) + '"]')
@@ -98,6 +99,7 @@
         td.style.width = w + "px";
         td.style.minWidth = w + "px";
         td.style.maxWidth = w + "px";
+        td.style.boxSizing = "border-box";
       });
     if (key === "id") {
       var nameTh = table.querySelector('th[data-column="name"]');
@@ -112,9 +114,18 @@
   function attachColumnResize(table, opts) {
     if (!table || !opts || !opts.storageKey) return {};
     var widths = loadColumnWidths(opts.storageKey);
+    function syncSticky() {
+      var idTh = table.querySelector('th[data-column="id"]');
+      var idW = widths.id || (idTh ? Math.round(idTh.getBoundingClientRect().width) : minWidthFor("id"));
+      widths.id = clampColumnWidth("id", idW);
+      table.querySelectorAll('th[data-column="name"], td[data-column="name"]').forEach(function (el) {
+        el.style.left = widths.id + "px";
+      });
+    }
     table.querySelectorAll("thead th[data-column]").forEach(function (th) {
       var key = th.getAttribute("data-column") || "";
       if (!key) return;
+      if (th.classList && th.classList.contains("v40-col-hidden")) return;
       var kind = opts.kindOf ? opts.kindOf(key) : null;
       if (widths[key] != null) {
         widths[key] = clampColumnWidth(key, widths[key], kind);
@@ -144,12 +155,14 @@
           var next = clampColumnWidth(key, startW + (e.clientX - startX), kind);
           widths[key] = next;
           applyWidth(table, key, next);
+          if (key === "id") syncSticky();
         }
         function onUp() {
           handle.removeEventListener("pointermove", onMove);
           handle.removeEventListener("pointerup", onUp);
           handle.removeEventListener("pointercancel", onUp);
           saveColumnWidths(opts.storageKey, widths);
+          syncSticky();
           if (opts.onChange) opts.onChange(Object.assign({}, widths));
         }
         handle.addEventListener("pointermove", onMove);
@@ -158,6 +171,7 @@
       });
       th.appendChild(handle);
     });
+    syncSticky();
     return widths;
   }
 

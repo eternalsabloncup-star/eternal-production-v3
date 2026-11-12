@@ -2142,18 +2142,24 @@
       status.setAttribute("role", "status");
       status.className = "v50-source-status flat-notice";
     }
-    status.textContent = loading
-      ? "Membaca pesanan Accurate…"
-      : lastSync
-        ? "Sumber: Gateway Accurate • Sinkron: " +
-          lastSync +
-          " • halaman " +
-          inboxPage +
-          " • menampilkan " +
-          (Array.isArray(window.orders) ? window.orders.length : 0) +
-          (inboxTotal != null ? " dari total Accurate " + inboxTotal : "") +
-          " (KPI halaman ≠ total Accurate)"
-        : "Sumber belum terhubung: " + fetchError;
+    status.textContent = isPreviewFixture()
+      ? "PREVIEW SIMULASI/FIXTURE — bukan Accurate Live • halaman " +
+        inboxPage +
+        " • " +
+        (Array.isArray(window.orders) ? window.orders.length : 0) +
+        " PO fixture"
+      : loading
+        ? "Membaca pesanan Accurate…"
+        : lastSync
+          ? "Sumber: Gateway Accurate • Sinkron: " +
+            lastSync +
+            " • halaman " +
+            inboxPage +
+            " • menampilkan " +
+            (Array.isArray(window.orders) ? window.orders.length : 0) +
+            (inboxTotal != null ? " dari total Accurate " + inboxTotal : "") +
+            " (KPI halaman ≠ total Accurate)"
+          : "Sumber belum terhubung: " + fetchError;
     const content = root.querySelector(".content");
     if (content && !status.parentElement) content.prepend(status);
 
@@ -2191,7 +2197,9 @@
 
     root.querySelectorAll(".demo").forEach((x) => x.remove());
     root.querySelectorAll(".v36-sectionhead small").forEach((x) => {
-      x.textContent = "Data hanya dari API Accurate; bukan fixture";
+      x.textContent = isPreviewFixture()
+        ? "DATA SIMULASI/FIXTURE — bukan Accurate Live"
+        : "Data hanya dari API Accurate; bukan fixture";
     });
     root
       .querySelectorAll('button[onclick*="v36SimulateReceipt"]')
@@ -2657,7 +2665,7 @@
         banner.style.cssText =
           "position:sticky;top:0;z-index:50;background:#fff3df;border-bottom:1px solid #f0d8ae;color:#8c622b;padding:8px 14px;font-size:12px;font-weight:700";
         banner.textContent =
-          "PREVIEW CURSOR · DATA SIMULASI/FIXTURE — bukan Accurate Live · Step 158 UI only";
+          "PREVIEW CURSOR · DATA SIMULASI/FIXTURE — bukan Accurate Live · Step 159 UI only";
         document.body.prepend(banner);
       }
     }
