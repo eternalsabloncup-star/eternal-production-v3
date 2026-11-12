@@ -28,6 +28,7 @@ def test_metadata_contains_auth_and_work_order_tables() -> None:
         "schedule_assignments",
         "sample_versions",
         "production_events",
+        "production_attachments",
         "job_line_qtys",
         "prep_states",
         "prep_events",
