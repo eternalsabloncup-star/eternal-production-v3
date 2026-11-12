@@ -1,0 +1,26 @@
+{
+  "so_number": "SO/SYN/000001",
+  "sales": "Synthetic Salesperson",
+  "expedition": "SYN-COURIER",
+  "delivery_zone": "ZONE-A",
+  "urgent_state": "normal",
+  "buffer_stock": false,
+  "total_quantity": 30,
+  "line_count": 2,
+  "lines": [
+    {
+      "item_code": "SYN-ITEM-001",
+      "qty": 10,
+      "unit": "PCS",
+      "process": "print",
+      "color": "SYN-RED"
+    },
+    {
+      "item_code": "SYN-ITEM-002",
+      "qty": 20,
+      "unit": "PCS",
+      "process": "non_print",
+      "color": "SYN-CLEAR"
+    }
+  ]
+}
