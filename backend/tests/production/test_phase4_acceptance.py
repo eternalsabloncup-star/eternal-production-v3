@@ -456,14 +456,14 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
         json={"approved_qty": "3"},
     )
 
-    # Pack physical cups only (color_pass 1): 30+20-2 correction -3 reject = 45.
-    # Pass-2 output (40) must not inflate packable stock.
+    # Eligible finished = min(pass nets). Pass1: 30+20-2-3reject=45; Pass2: 40 → 40.
+    # Pass-1 alone must never authorize packing beyond completed final passes.
     pack = await client.post(
         f"/api/v1/production/jobs/{jid}/packing",
         headers=h,
         json={
             "so_line_id": "line-1",
-            "qty_physical": "45",
+            "qty_physical": "40",
             "idempotency_key": "pack-pass-1",
         },
     )

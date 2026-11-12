@@ -24,8 +24,11 @@ from app.services.production import permissions as P
 CANONICAL_PACKING_EVENT = "packing_batch"
 PACKING_EVENT_TYPES = frozenset({"packing_batch", "packing_recorded"})
 OUTPUT_EVENT_TYPES = frozenset({"output_confirmed", "output_correction"})
-# Physical cups enter the ledger on color_pass 1. Later passes are work-ops on the same cups.
+REJECT_EVENT_TYPES = frozenset({"reject_verified"})
+# Color pass 1 records cups entering print; later passes are work-ops on the same cups.
+# Packing eligibility requires ALL scheduled required passes (min across passes), not pass 1 alone.
 PHYSICAL_CUP_COLOR_PASS = 1
+_CANCELLED_ASSIGNMENT = frozenset({"cancelled", "canceled", "void", "cancelled_remaining"})
 
 
 def _require(user: User, *perms: str) -> None:
@@ -46,31 +49,87 @@ async def get_job(session: AsyncSession, job_id: int) -> ProductionJob:
     return job
 
 
+def _event_color_pass(event) -> int:
+    pass_no = getattr(event, "color_pass", None)
+    if pass_no is None:
+        return PHYSICAL_CUP_COLOR_PASS
+    return int(pass_no)
+
+
+def required_color_passes_from_assignments(
+    assignments: list,
+    *,
+    so_line_id: str | None = None,
+) -> frozenset[int]:
+    """Required print passes for a line from schedule evidence (not assumed single-color)."""
+    passes: set[int] = set()
+    for a in assignments:
+        status = str(getattr(a, "status", "active") or "active")
+        if status in _CANCELLED_ASSIGNMENT:
+            continue
+        line = getattr(a, "so_line_id", None)
+        if so_line_id is not None and line != so_line_id:
+            continue
+        passes.add(int(getattr(a, "color_pass", None) or PHYSICAL_CUP_COLOR_PASS))
+    return frozenset(passes) if passes else frozenset({PHYSICAL_CUP_COLOR_PASS})
+
+
+def qty_for_color_pass_from_events(
+    events: list,
+    color_pass: int,
+    *,
+    so_line_id: str | None = None,
+) -> Decimal:
+    """Net qty for one color pass: outputs + corrections − verified rejects."""
+    total = Decimal("0")
+    target = int(color_pass)
+    for e in events:
+        line = getattr(e, "so_line_id", None)
+        if so_line_id is not None and line != so_line_id:
+            continue
+        if _event_color_pass(e) != target:
+            continue
+        et = getattr(e, "event_type", None)
+        qty = Decimal(getattr(e, "qty_physical", 0) or 0)
+        if et in OUTPUT_EVENT_TYPES:
+            total += qty
+        elif et in REJECT_EVENT_TYPES:
+            total -= qty
+    return total
+
+
+def eligible_finished_qty_from_events(
+    events: list,
+    required_passes: frozenset[int] | set[int] | list[int],
+    *,
+    so_line_id: str | None = None,
+) -> Decimal:
+    """Physical cups finished through ALL required color passes — never sum passes.
+
+    Eligible = min(net qty per required pass). Pass 1 alone is never finished proof
+    when a higher pass is scheduled for the line.
+    """
+    passes = frozenset(int(p) for p in required_passes) or frozenset(
+        {PHYSICAL_CUP_COLOR_PASS}
+    )
+    return min(
+        qty_for_color_pass_from_events(events, p, so_line_id=so_line_id) for p in passes
+    )
+
+
 def physical_cup_qty_from_events(
     events: list,
     *,
     so_line_id: str | None = None,
 ) -> Decimal:
-    """Finished physical cups from append-only events — never sum multi-color passes.
+    """Cups that entered print (color_pass 1 ledger) — not packing eligibility.
 
-    Rule: color_pass == 1 (or missing/legacy null treated as pass 1) contributes cups.
-    Corrections adjust the same pass. Higher color_pass values are operator work-ops only.
+    Higher color_pass values are operator work-ops on the same cups and must not
+    inflate this total. For packable finished qty use eligible_finished_qty_from_events.
     """
-    total = Decimal("0")
-    for e in events:
-        et = getattr(e, "event_type", None)
-        if et not in OUTPUT_EVENT_TYPES:
-            continue
-        line = getattr(e, "so_line_id", None)
-        if so_line_id is not None and line != so_line_id:
-            continue
-        pass_no = getattr(e, "color_pass", None)
-        if pass_no is None:
-            pass_no = PHYSICAL_CUP_COLOR_PASS
-        if int(pass_no) != PHYSICAL_CUP_COLOR_PASS:
-            continue
-        total += Decimal(getattr(e, "qty_physical", 0) or 0)
-    return total
+    return qty_for_color_pass_from_events(
+        events, PHYSICAL_CUP_COLOR_PASS, so_line_id=so_line_id
+    )
 
 
 def packing_qty_from_events(
@@ -996,26 +1055,40 @@ async def record_packing(
     _branch(user, job.branch_id)
     if qty_physical <= 0:
         raise HTTPException(422, "Qty packing harus > 0")
-    # Physical cups only from color_pass 1 — never sum all multi-color passes.
-    produced = await session.scalar(
-        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
-            ProductionEvent.event_type.in_(list(OUTPUT_EVENT_TYPES)),
-            ProductionEvent.so_line_id == so_line_id,
-            func.coalesce(ProductionEvent.color_pass, PHYSICAL_CUP_COLOR_PASS)
-            == PHYSICAL_CUP_COLOR_PASS,
+    # Required passes from schedule for this SO line (default pass 1 if none).
+    asg_rows = (
+        await session.scalars(
+            select(ScheduleAssignment).where(
+                ScheduleAssignment.job_id == job.id,
+                ScheduleAssignment.so_line_id == so_line_id,
+            )
         )
-    )
-    # Only authorized verified rejects reduce packable physical qty.
-    rejected = await session.scalar(
-        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
-            ProductionEvent.event_type == "reject_verified",
-            ProductionEvent.so_line_id == so_line_id,
-            func.coalesce(ProductionEvent.color_pass, PHYSICAL_CUP_COLOR_PASS)
-            == PHYSICAL_CUP_COLOR_PASS,
+    ).all()
+    required = required_color_passes_from_assignments(asg_rows, so_line_id=so_line_id)
+    # Eligible finished = min(net qty per required pass). Never pass-1-only when
+    # a higher pass is scheduled; never sum multi-color work into packable stock.
+    pass_nets: list[Decimal] = []
+    for pass_no in sorted(required):
+        produced = await session.scalar(
+            select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+                ProductionEvent.job_id == job.id,
+                ProductionEvent.event_type.in_(list(OUTPUT_EVENT_TYPES)),
+                ProductionEvent.so_line_id == so_line_id,
+                func.coalesce(ProductionEvent.color_pass, PHYSICAL_CUP_COLOR_PASS)
+                == pass_no,
+            )
         )
-    )
+        rejected = await session.scalar(
+            select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+                ProductionEvent.job_id == job.id,
+                ProductionEvent.event_type.in_(list(REJECT_EVENT_TYPES)),
+                ProductionEvent.so_line_id == so_line_id,
+                func.coalesce(ProductionEvent.color_pass, PHYSICAL_CUP_COLOR_PASS)
+                == pass_no,
+            )
+        )
+        pass_nets.append(Decimal(produced or 0) - Decimal(rejected or 0))
+    eligible = min(pass_nets) if pass_nets else Decimal("0")
     packed = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
             ProductionEvent.job_id == job.id,
@@ -1023,9 +1096,15 @@ async def record_packing(
             ProductionEvent.so_line_id == so_line_id,
         )
     )
-    available = Decimal(produced or 0) - Decimal(rejected or 0) - Decimal(packed or 0)
+    available = eligible - Decimal(packed or 0)
+    if available < 0:
+        available = Decimal("0")
     if qty_physical > available:
-        raise HTTPException(409, "Overpacking: melebihi qty fisik tersedia")
+        raise HTTPException(
+            409,
+            "Overpacking: melebihi qty fisik selesai semua warna "
+            f"(eligible={available})",
+        )
     event = ProductionEvent(
         job_id=job.id,
         event_type=CANONICAL_PACKING_EVENT,
@@ -1578,8 +1657,11 @@ def derive_team_tasks_for_job(
         s for s in samples if getattr(s, "status", None) in {"approved", "bypassed"}
     ]
     sample_uploaded = bool(samples)
-    # Physical finished cups (pass 1 only) — never inflate with multi-color work-ops.
+    # Cups that entered print (pass 1 ledger) — progress signal, not pack eligibility.
     print_qty = physical_cup_qty_from_events(events)
+    # Packable finished cups = min across required scheduled color passes.
+    required_passes = required_color_passes_from_assignments(active_assignments)
+    finished_qty = eligible_finished_qty_from_events(events, required_passes)
     pack_qty = packing_qty_from_events(events)
 
     tasks: list[dict] = []
@@ -1657,11 +1739,21 @@ def derive_team_tasks_for_job(
                     tasks.append(_task_row(job, "print", "done"))
                 else:
                     tasks.append(_task_row(job, "print", "actionable"))
-                if print_qty > 0:
+                # Packing only when cups completed ALL required color passes.
+                if finished_qty > 0:
                     if pack_qty > 0:
                         tasks.append(_task_row(job, "packing", "done"))
                     else:
                         tasks.append(_task_row(job, "packing", "actionable"))
+                elif print_qty > 0:
+                    tasks.append(
+                        _task_row(
+                            job,
+                            "packing",
+                            "blocked",
+                            reason="Menunggu seluruh warna/pass selesai sebelum packing",
+                        )
+                    )
 
     if has_non_print:
         # Non-cetak: no fake screen/sample/print. Payment opens visibility.

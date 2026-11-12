@@ -31,4 +31,18 @@ describe("Slice 1I capability registry", () => {
     expect(capabilityStatusClass("SELESAI")).toBe("ok");
     expect(capabilityStatusClass("BLOCKED")).toBe("blocked");
   });
+
+  it("marks finished-all-passes eligibility as SELESAI (Slice 1J)", () => {
+    const fin = CAPABILITY_REGISTRY.find((c) => c.id === "qty.finished_all_passes");
+    expect(fin?.status).toBe("SELESAI");
+    expect(fin?.tests).toContain("slice1j");
+    expect(fin?.nextAction).toBeTruthy();
+  });
+
+  it("keeps screen size and SLA blocked or partial without schema", () => {
+    const scr = CAPABILITY_REGISTRY.find((c) => c.id === "screener.after_schedule");
+    const sla = CAPABILITY_REGISTRY.find((c) => c.id === "sla.working_days");
+    expect(scr?.status).toBe("PARSIAL");
+    expect(sla?.status).toBe("BLOCKED");
+  });
 });
