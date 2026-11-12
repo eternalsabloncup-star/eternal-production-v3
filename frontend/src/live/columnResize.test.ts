@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach } from "vitest";
 import {
   clampColumnWidth,
   clearColumnWidths,
+  ensureColumnKeys,
   isResizeHandleEvent,
   loadColumnWidths,
   minWidthFor,
@@ -18,6 +19,18 @@ describe("columnResize", () => {
     expect(clampColumnWidth("id", 10)).toBe(minWidthFor("id"));
     expect(clampColumnWidth("qty", 10, "number")).toBe(minWidthFor("qty", "number"));
     expect(clampColumnWidth("notes", 200, "text")).toBe(200);
+    expect(clampColumnWidth("notes", 900, "text")).toBe(720);
+    expect(minWidthFor("item")).toBe(160);
+  });
+
+  it("assigns stable data-column keys when missing", () => {
+    const table = document.createElement("table");
+    table.innerHTML =
+      "<thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody>";
+    const keys = ensureColumnKeys(table);
+    expect(keys).toEqual(["c0", "c1"]);
+    expect(table.querySelector("th")?.getAttribute("data-column")).toBe("c0");
+    expect(table.querySelector("td")?.getAttribute("data-column")).toBe("c0");
   });
 
   it("persists widths per storage key", () => {
