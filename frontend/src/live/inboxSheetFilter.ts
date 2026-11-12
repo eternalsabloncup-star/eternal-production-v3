@@ -43,7 +43,7 @@ export const INBOX_FILTERABLE_COLUMNS: ReadonlyArray<{
   { key: "paymentTerms", label: "Syarat Pembayaran", kind: "text" },
   { key: "createdByUser", label: "User Pembuat", kind: "text" },
   { key: "salesName", label: "Sales", kind: "text" },
-  { key: "expedition", label: "Ekspedisi", kind: "text" },
+  { key: "expedition", label: "Pengiriman", kind: "text" },
   { key: "ship", label: "Estimasi Kirim", kind: "date" },
   { key: "deliveryZone", label: "Zona", kind: "text" },
   { key: "branch", label: "Cabang", kind: "text" },

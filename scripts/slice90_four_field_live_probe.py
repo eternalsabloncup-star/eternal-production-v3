@@ -129,6 +129,38 @@ def discover_sales_paths(raw: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(paths))
 
 
+def _shipment_shape(raw: dict[str, Any]) -> dict[str, Any] | None:
+    """Describe shipment candidate shape without leaking values (Step 133).
+
+    Live audit found `shipment` present but not proven as Pengiriman method.
+    Next Live proof needed: whether shipment is a string method name, or an
+    object whose `name`/`number` equals UI Pengiriman (e.g. DIAMBIL).
+    """
+    if "shipment" not in raw:
+        return None
+    val = raw.get("shipment")
+    if val is None:
+        return {"present": False, "value_type": "null"}
+    if isinstance(val, str):
+        return {
+            "present": bool(val.strip()),
+            "value_type": "str",
+            "nonempty": bool(val.strip()),
+        }
+    if isinstance(val, dict):
+        # Key names only — never values.
+        keys = sorted(str(k) for k in val.keys())
+        return {
+            "present": _present(val),
+            "value_type": "dict",
+            "dict_keys": keys,
+            "has_name_key": "name" in val,
+            "has_number_key": "number" in val or "no" in val,
+            "has_id_key": "id" in val,
+        }
+    return {"present": True, "value_type": type(val).__name__}
+
+
 def discover_pengiriman_paths(raw: dict[str, Any]) -> dict[str, Any]:
     mapped_present: list[str] = []
     candidate_present: list[str] = []
@@ -142,6 +174,9 @@ def discover_pengiriman_paths(raw: dict[str, Any]) -> dict[str, Any]:
         "mapped_native_paths_present": mapped_present,
         "unproven_candidate_paths_present": candidate_present,
         "proven_json_path": mapped_present[0] if mapped_present else "UNKNOWN",
+        # Shape metadata for Live follow-up — not a mapping decision.
+        "shipment_shape": _shipment_shape(raw),
+        "shipment_mapped_to_expedition": False,
     }
 
 

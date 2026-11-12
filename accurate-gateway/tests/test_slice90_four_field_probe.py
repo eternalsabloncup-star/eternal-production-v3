@@ -116,6 +116,33 @@ def test_pengiriman_candidate_path_reported_as_unknown_not_mapped():
     assert "DIAMBIL" not in json.dumps(report)
 
 
+def test_shipment_dict_candidate_shape_not_mapped():
+    """Live audit candidate `shipment:{...}` — report shape, never map to expedition."""
+    mod = _load()
+    raw = {
+        "id": 93,
+        "number": SYN_SO,
+        "shipment": {"id": 1, "name": "DIAMBIL"},
+        "charField4": "Normal",
+        "charField5": "Non - Buffer",
+        "detailItem": [
+            {"salesmanList": [{"salesman": {"name": "Synthetic Penjual"}}]},
+        ],
+    }
+    ship = mod.discover_pengiriman_paths(raw)
+    assert "shipment" in ship["unproven_candidate_paths_present"]
+    assert ship["proven_json_path"] == "UNKNOWN"
+    assert ship["shipment_mapped_to_expedition"] is False
+    assert ship["shipment_shape"]["value_type"] == "dict"
+    assert ship["shipment_shape"]["has_name_key"] is True
+    blob = json.dumps(ship)
+    assert "DIAMBIL" not in blob
+    mapped = __import__("app.normalize", fromlist=["normalize_sales_order"]).normalize_sales_order(
+        raw
+    )
+    assert mapped["expedition"] is None
+
+
 def test_sales_absent_and_cf_absent():
     mod = _load()
     raw = {"id": 92, "number": SYN_SO, "detailItem": [{"id": 1, "quantity": 1}]}

@@ -1811,7 +1811,7 @@
         escapeHtml(detail.address || "—") +
         "</p><p>Syarat bayar: " +
         escapeHtml(detail.payment_terms || "—") +
-        " · Ekspedisi: " +
+        " · Pengiriman: " +
         escapeHtml(detail.expedition || "—") +
         " · Zona: " +
         escapeHtml(detail.delivery_zone || "—") +
@@ -1828,11 +1828,18 @@
           detail.buffer_stock === true
             ? "Buffer"
             : detail.buffer_stock === false
-              ? "Non Buffer"
-              : "Unknown",
+              ? "Non-Buffer"
+              : "Belum terverifikasi",
         ) +
-        " · Urgent: " +
-        escapeHtml(detail.urgent_state || "Unknown") +
+        " · Status Pesanan: " +
+        escapeHtml(
+          detail.urgent_state === "approved_urgent" ||
+            detail.urgent_state === "legacy_urgent"
+            ? "Urgent"
+            : detail.urgent_state === "normal"
+              ? "Normal"
+              : "Belum terverifikasi",
+        ) +
         '</p><p>Keterangan:</p><div class="po-notes" style="white-space:pre-wrap">' +
         escapeHtml(detail.notes || "—") +
         "</div><p>Total qty: <b>" +
