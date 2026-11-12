@@ -576,18 +576,36 @@
 
   async function fetchOrderDetail(number, opts) {
     const force = !!(opts && opts.force);
-    if (!force && detailCache[number]) return detailCache[number];
-    if (!force && detailInflight[number]) return detailInflight[number];
-    const pending = request(
-      API + "/production/orders/" + encodeURIComponent(number),
-    )
+    const dedupe =
+      (typeof window !== "undefined" &&
+        window.V3QtyIntegrity &&
+        window.V3QtyIntegrity.fetchDetailDeduped) ||
+      null;
+    const runRequest = function () {
+      return request(
+        API + "/production/orders/" + encodeURIComponent(number),
+      );
+    };
+    if (dedupe) {
+      // force clears cache but still joins inflight — never duplicate in-flight SO fetch.
+      return dedupe(
+        number,
+        { cache: detailCache, inflight: detailInflight },
+        runRequest,
+        { force: force },
+      );
+    }
+    // Fallback if helper script missing (should not happen in Live shell).
+    if (force) delete detailCache[number];
+    else if (detailCache[number]) return detailCache[number];
+    if (detailInflight[number]) return detailInflight[number];
+    const pending = runRequest()
       .then(function (detail) {
         detailCache[number] = detail;
         delete detailInflight[number];
         return detail;
       })
       .catch(function (err) {
-        // Do not permanently cache failures — allow retry.
         delete detailInflight[number];
         delete detailCache[number];
         throw err;
@@ -646,7 +664,7 @@
 
   window.retryInboxDetail = function (so) {
     if (!so) return;
-    delete detailCache[so];
+    // Single-PO retry; force refresh but inflight dedupe still applies.
     enrichInboxPage([so], { force: true });
   };
 
