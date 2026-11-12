@@ -99,6 +99,8 @@ export type AttachColumnResizeOpts = {
   storageKey: string;
   kindOf?: (key: string) => string | null | undefined;
   onChange?: (widths: ColumnWidthMap) => void;
+  /** Called after each move/up so group headers / sticky can remeasure. */
+  onGeometry?: () => void;
 };
 
 /**
@@ -112,9 +114,19 @@ export function attachColumnResize(
   if (!table) return {};
   const widths = loadColumnWidths(opts.storageKey);
   const applyPair = (key: string, w: number) => {
-    const sel = `th[data-column="${CSS.escape(key)}"], td[data-column="${CSS.escape(key)}"]`;
+    const col = table.querySelector(
+      `col[data-column="${CSS.escape(key)}"]`,
+    ) as HTMLElement | null;
+    if (col) {
+      col.style.width = w + "px";
+      col.style.minWidth = w + "px";
+    }
+    const sel = `th[data-column="${CSS.escape(key)}"]:not([colspan]), th[data-column="${CSS.escape(key)}"][colspan="1"], td[data-column="${CSS.escape(key)}"]`;
     table.querySelectorAll(sel).forEach((el) => {
       const node = el as HTMLElement;
+      // Skip multi-colspan group headers — width comes from children.
+      const cs = node.getAttribute("colspan");
+      if (cs && Number(cs) > 1) return;
       node.style.width = w + "px";
       node.style.minWidth = w + "px";
       node.style.maxWidth = w + "px";
@@ -175,6 +187,7 @@ export function attachColumnResize(
         widths[key] = next;
         applyPair(key, next);
         if (key === "id") syncSticky();
+        if (opts.onGeometry) opts.onGeometry();
       };
       const onUp = () => {
         handle.removeEventListener("pointermove", onMove);
@@ -182,6 +195,7 @@ export function attachColumnResize(
         handle.removeEventListener("pointercancel", onUp);
         saveColumnWidths(opts.storageKey, widths);
         syncSticky();
+        if (opts.onGeometry) opts.onGeometry();
         if (opts.onChange) opts.onChange({ ...widths });
       };
       handle.addEventListener("pointermove", onMove);

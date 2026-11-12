@@ -86,27 +86,22 @@
   }
 
   function applyWidth(table, key, w) {
-    var th = table.querySelector('th[data-column="' + escapeAttr(key) + '"]');
-    if (th) {
-      th.style.width = w + "px";
-      th.style.minWidth = w + "px";
-      th.style.maxWidth = w + "px";
-      th.style.boxSizing = "border-box";
+    var col = table.querySelector('col[data-column="' + escapeAttr(key) + '"]');
+    if (col) {
+      col.style.width = w + "px";
+      col.style.minWidth = w + "px";
     }
-    table
-      .querySelectorAll('td[data-column="' + escapeAttr(key) + '"]')
-      .forEach(function (td) {
-        td.style.width = w + "px";
-        td.style.minWidth = w + "px";
-        td.style.maxWidth = w + "px";
-        td.style.boxSizing = "border-box";
-      });
+    table.querySelectorAll('th[data-column="' + escapeAttr(key) + '"], td[data-column="' + escapeAttr(key) + '"]').forEach(function (el) {
+      var cs = el.getAttribute("colspan");
+      if (cs && Number(cs) > 1) return;
+      el.style.width = w + "px";
+      el.style.minWidth = w + "px";
+      el.style.maxWidth = w + "px";
+      el.style.boxSizing = "border-box";
+    });
     if (key === "id") {
-      var nameTh = table.querySelector('th[data-column="name"]');
-      var nameTds = table.querySelectorAll('td[data-column="name"]');
-      if (nameTh) nameTh.style.left = w + "px";
-      nameTds.forEach(function (td) {
-        td.style.left = w + "px";
+      table.querySelectorAll('th[data-column="name"]:not([colspan]), th[data-column="name"][colspan="1"], td[data-column="name"]').forEach(function (el) {
+        el.style.left = w + "px";
       });
     }
   }
@@ -156,6 +151,7 @@
           widths[key] = next;
           applyWidth(table, key, next);
           if (key === "id") syncSticky();
+          if (opts.onGeometry) opts.onGeometry();
         }
         function onUp() {
           handle.removeEventListener("pointermove", onMove);
@@ -163,6 +159,7 @@
           handle.removeEventListener("pointercancel", onUp);
           saveColumnWidths(opts.storageKey, widths);
           syncSticky();
+          if (opts.onGeometry) opts.onGeometry();
           if (opts.onChange) opts.onChange(Object.assign({}, widths));
         }
         handle.addEventListener("pointermove", onMove);
@@ -172,6 +169,7 @@
       th.appendChild(handle);
     });
     syncSticky();
+    if (opts.onGeometry) opts.onGeometry();
     return widths;
   }
 
