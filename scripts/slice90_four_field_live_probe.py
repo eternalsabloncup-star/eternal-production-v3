@@ -65,8 +65,8 @@ _EXPEDITION_MAPPED_KEYS = (
 )
 
 # Unproven Pengiriman UI candidates — report presence only; never auto-map.
+# Note: top-level `shipment` is proven via shipment.name (Step 135) when present.
 _PENGIRIMAN_CANDIDATE_KEYS = (
-    "shipment",
     "shipmentName",
     "shipVia",
     "shipViaName",
@@ -130,11 +130,10 @@ def discover_sales_paths(raw: dict[str, Any]) -> list[str]:
 
 
 def _shipment_shape(raw: dict[str, Any]) -> dict[str, Any] | None:
-    """Describe shipment candidate shape without leaking values (Step 133).
+    """Describe shipment shape without leaking values (Step 133/135).
 
-    Live audit found `shipment` present but not proven as Pengiriman method.
-    Next Live proof needed: whether shipment is a string method name, or an
-    object whose `name`/`number` equals UI Pengiriman (e.g. DIAMBIL).
+    Step 135 Live: shipment dict + name is the proven Pengiriman method path.
+    Logistics sibling keys (picName, shipAddress, …) are never mapped.
     """
     if "shipment" not in raw:
         return None
@@ -157,8 +156,22 @@ def _shipment_shape(raw: dict[str, Any]) -> dict[str, Any] | None:
             "has_name_key": "name" in val,
             "has_number_key": "number" in val or "no" in val,
             "has_id_key": "id" in val,
+            "has_pic_name_key": "picName" in val,
+            "has_ship_address_key": "shipAddress" in val,
         }
     return {"present": True, "value_type": type(val).__name__}
+
+
+def _shipment_name_mapped(raw: dict[str, Any]) -> str | None:
+    """Return proven JSON path when shipment.name (or scalar) is mappable."""
+    val = raw.get("shipment")
+    if isinstance(val, str) and val.strip():
+        return "shipment"
+    if isinstance(val, dict):
+        name = val.get("name")
+        if isinstance(name, str) and name.strip():
+            return "shipment.name"
+    return None
 
 
 def discover_pengiriman_paths(raw: dict[str, Any]) -> dict[str, Any]:
@@ -167,6 +180,9 @@ def discover_pengiriman_paths(raw: dict[str, Any]) -> dict[str, Any]:
     for key in _EXPEDITION_MAPPED_KEYS:
         if key in raw and _present(raw.get(key)):
             mapped_present.append(key)
+    shipment_path = _shipment_name_mapped(raw)
+    if shipment_path:
+        mapped_present.append(shipment_path)
     for key in _PENGIRIMAN_CANDIDATE_KEYS:
         if key in raw and _present(raw.get(key)):
             candidate_present.append(key)
@@ -174,9 +190,8 @@ def discover_pengiriman_paths(raw: dict[str, Any]) -> dict[str, Any]:
         "mapped_native_paths_present": mapped_present,
         "unproven_candidate_paths_present": candidate_present,
         "proven_json_path": mapped_present[0] if mapped_present else "UNKNOWN",
-        # Shape metadata for Live follow-up — not a mapping decision.
         "shipment_shape": _shipment_shape(raw),
-        "shipment_mapped_to_expedition": False,
+        "shipment_mapped_to_expedition": bool(shipment_path),
     }
 
 

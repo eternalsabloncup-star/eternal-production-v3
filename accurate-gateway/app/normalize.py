@@ -149,6 +149,26 @@ def _custom_field_by_label(raw: dict[str, Any], aliases: tuple[str, ...]) -> str
     return None
 
 
+def _expedition_from_shipment(raw: dict[str, Any]) -> str | None:
+    """Step 135 — Pengiriman from Accurate Shipment Info `shipment.name` only.
+
+    Live (PO/12/11/2026/000017): `shipment` is a dict with method `name` plus
+    logistics keys (picName, picPhoneNumber, shipAddress, …). Owner UI
+    Pengiriman = DIAMBIL matches `shipment.name`. Never treat PIC, address,
+    or id as the Pengiriman method.
+    """
+    val = raw.get("shipment")
+    if isinstance(val, str):
+        text = val.strip()
+        return text or None
+    if isinstance(val, dict):
+        name = val.get("name")
+        if isinstance(name, str):
+            text = name.strip()
+            return text or None
+    return None
+
+
 _EXPEDITION_LABELS = (
     "ekspedisi",
     "expedition",
@@ -637,6 +657,7 @@ def normalize_sales_order(raw: dict[str, Any]) -> dict[str, Any]:
         raw.get("shippingMethod"),
         raw.get("shippingMethodName"),
         raw.get("deliveryMethod"),
+        _expedition_from_shipment(raw),
         _custom_field_by_label(raw, _EXPEDITION_LABELS),
     )
     base["estimated_delivery"] = (

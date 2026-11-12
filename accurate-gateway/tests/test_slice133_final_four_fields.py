@@ -1,10 +1,10 @@
-"""Step 133 — final four-field lock from Live audit (offline, no network).
+"""Step 133/135 — four-field lock from Live audit (offline, no network).
 
 Live audit (Owner SO):
   Sales   → detailItem[].salesmanList (alt salesmanName)
   Status  → charField4
   Buffer  → charField5
-  Pengiriman → candidate `shipment` NOT proven as shipping method
+  Pengiriman → shipment.name (Step 135 VERIFIED; logistics siblings ignored)
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ def test_status_buffer_cf4_cf5_owner_tokens():
     assert urgent["buffer_stock"] is True
 
 
-def test_pengiriman_shipment_candidate_not_auto_mapped():
+def test_pengiriman_shipment_name_maps_diambil():
     mapped = normalize_sales_order(
         {
             "id": 3,
@@ -107,8 +107,8 @@ def test_pengiriman_shipment_candidate_not_auto_mapped():
             "detailItem": [],
         }
     )
-    # Live: shipment present but NOT proven → must stay unknown.
-    assert mapped["expedition"] is None
+    # Step 135: shipment.name is proven Pengiriman.
+    assert mapped["expedition"] == "DIAMBIL"
     assert mapped["urgent_state"] == "normal"
     assert mapped["buffer_stock"] is False
 
@@ -127,13 +127,12 @@ def test_probe_reports_shipment_shape_without_values():
     }
     report = mod.build_discovery_report(raw, "SO/SYN/133D")
     peng = next(r for r in report["four_field_matrix"] if r["field"] == "Pengiriman")
-    # Discovery attaches shape on discover_pengiriman_paths; surface via rebuild
     ship = mod.discover_pengiriman_paths(raw)
-    assert ship["shipment_mapped_to_expedition"] is False
+    assert ship["shipment_mapped_to_expedition"] is True
     assert ship["shipment_shape"]["value_type"] == "dict"
     assert ship["shipment_shape"]["has_name_key"] is True
     assert "name" in ship["shipment_shape"]["dict_keys"]
-    assert peng["resolved"] is False
+    assert peng["resolved"] is True
     blob = json.dumps(report) + json.dumps(ship)
     assert "DIAMBIL" not in blob
     assert "Penjual" not in blob

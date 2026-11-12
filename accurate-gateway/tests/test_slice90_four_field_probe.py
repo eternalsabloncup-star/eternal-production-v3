@@ -116,8 +116,8 @@ def test_pengiriman_candidate_path_reported_as_unknown_not_mapped():
     assert "DIAMBIL" not in json.dumps(report)
 
 
-def test_shipment_dict_candidate_shape_not_mapped():
-    """Live audit candidate `shipment:{...}` — report shape, never map to expedition."""
+def test_shipment_dict_name_mapped_as_pengiriman():
+    """Step 135 — shipment.name is proven Pengiriman; shape still sanitized."""
     mod = _load()
     raw = {
         "id": 93,
@@ -130,9 +130,9 @@ def test_shipment_dict_candidate_shape_not_mapped():
         ],
     }
     ship = mod.discover_pengiriman_paths(raw)
-    assert "shipment" in ship["unproven_candidate_paths_present"]
-    assert ship["proven_json_path"] == "UNKNOWN"
-    assert ship["shipment_mapped_to_expedition"] is False
+    assert "shipment" not in ship["unproven_candidate_paths_present"]
+    assert ship["proven_json_path"] == "shipment.name"
+    assert ship["shipment_mapped_to_expedition"] is True
     assert ship["shipment_shape"]["value_type"] == "dict"
     assert ship["shipment_shape"]["has_name_key"] is True
     blob = json.dumps(ship)
@@ -140,11 +140,11 @@ def test_shipment_dict_candidate_shape_not_mapped():
     mapped = __import__("app.normalize", fromlist=["normalize_sales_order"]).normalize_sales_order(
         raw
     )
-    assert mapped["expedition"] is None
-    # Live matrix must surface shape for Step 134 Owner review.
+    assert mapped["expedition"] == "DIAMBIL"
     report = mod.build_discovery_report(raw, SYN_SO)
     peng = next(r for r in report["four_field_matrix"] if r["field"] == "Pengiriman")
-    assert peng["shipment_mapped_to_expedition"] is False
+    assert peng["shipment_mapped_to_expedition"] is True
+    assert peng["resolved"] is True
     assert peng["shipment_shape"]["value_type"] == "dict"
     assert "DIAMBIL" not in json.dumps(report)
 

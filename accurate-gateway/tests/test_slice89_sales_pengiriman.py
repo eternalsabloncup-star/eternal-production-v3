@@ -78,11 +78,7 @@ def test_header_salesman_plus_line_penjual_merged_unique():
 
 
 def test_pengiriman_diambil_via_known_native_keys():
-    """Value DIAMBIL maps only when carried by already-supported expedition keys.
-
-    Owner UI proves Shipment Info → Pengiriman = DIAMBIL, but the Accurate JSON
-    property name is not yet Live-verified. Do not invent shipVia/shipment*.
-    """
+    """DIAMBIL via native expedition keys + Step 135 shipment.name."""
     for key in (
         "expedition",
         "expeditionName",
@@ -94,6 +90,16 @@ def test_pengiriman_diambil_via_known_native_keys():
         payload[key] = "DIAMBIL"
         mapped = normalize_sales_order(payload)
         assert mapped["expedition"] == "DIAMBIL", key
+    # Step 135 Live: Shipment Info → shipment.name
+    mapped = normalize_sales_order(
+        {
+            "id": 3,
+            "number": "SO/SYN/89/SHIP2",
+            "shipment": {"id": 1, "name": "DIAMBIL", "picName": "PIC"},
+            "detailItem": [],
+        }
+    )
+    assert mapped["expedition"] == "DIAMBIL"
 
 
 def test_pengiriman_absent_stays_none_not_from_zone_or_branch():
@@ -113,14 +119,13 @@ def test_pengiriman_absent_stays_none_not_from_zone_or_branch():
 
 
 def test_unproven_shipment_keys_not_auto_mapped():
-    # Candidates for Live verification — must NOT invent until proven.
+    # shipmentName / shipViaName remain unproven — only shipment.name is Live-proven.
     mapped = normalize_sales_order(
         {
             "id": 5,
             "number": "SO/SYN/89/CAND",
             "shipmentName": "DIAMBIL",
             "shipViaName": "DIAMBIL",
-            "shipment": {"name": "DIAMBIL"},
             "detailItem": [],
         }
     )
