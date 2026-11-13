@@ -26,6 +26,10 @@ POD_PURPOSES = frozenset(
     }
 )
 
+# Physical Loading return evidence (not POD; not a free-text placeholder).
+LOADING_RETURN_PURPOSES = frozenset({"loading_return_photo"})
+UPLOAD_PURPOSES = POD_PURPOSES | LOADING_RETURN_PURPOSES
+
 
 class ProductionAttachment(Base):
     __tablename__ = "production_attachments"

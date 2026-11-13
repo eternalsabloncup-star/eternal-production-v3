@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.auth import router as auth_router
+from app.api.customer_portal import router as customer_portal_router
 from app.api.health import router as health_router
 from app.api.production.payroll import router as production_payroll_router
 from app.api.production.workflow import router as production_workflow_router
@@ -47,6 +48,8 @@ def create_app() -> FastAPI:
     application.include_router(
         production_payroll_router, prefix=settings.api_prefix
     )
+    # Local customer portal (/t/...) — isolated; not a public deploy in this task.
+    application.include_router(customer_portal_router)
     return application
 
 

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import (
     PERM_INBOX_READ,
     PERM_ORDER_READ,
+    get_current_user,
     require_permissions,
     user_can_access_branch,
 )
@@ -20,6 +21,7 @@ from app.services.accurate_read_gateway import (
     get_sales_order,
     list_sales_orders,
 )
+from app.services.production import permissions as P
 
 router = APIRouter(prefix="/production", tags=["production-intake"])
 
@@ -90,3 +92,12 @@ async def order_detail(
     statuses = await _status_map(session, [str(detail["po_number"])])
     detail["production_status"] = statuses.get(detail["po_number"], "Baru")
     return detail
+
+
+@router.get("/permissions/catalog")
+async def permissions_catalog(
+    user: User = Depends(get_current_user),
+):
+    """Permission catalog + stable role-default mapping (config only; not live grants)."""
+    _ = user
+    return P.permission_catalog_payload()

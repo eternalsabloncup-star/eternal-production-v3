@@ -64,13 +64,39 @@
 
   function markAuthOk(me) {
     authStatus = "ok";
+    const perms = Array.isArray(me && me.permissions)
+      ? me.permissions.map(String)
+      : [];
     window.__V3_AUTH__ = {
       status: "ok",
+      user_id: me && me.user_id != null ? Number(me.user_id) : null,
       username: me && me.username ? String(me.username) : null,
       role: me && me.role ? String(me.role) : null,
+      permissions: perms,
+      branch_ids: Array.isArray(me && me.branch_ids)
+        ? me.branch_ids.map(String)
+        : [],
     };
     document.documentElement.classList.remove("v3-auth-pending", "v3-auth-failed");
     document.documentElement.classList.add("v3-auth-ok");
+  }
+
+  function authPermissions() {
+    const a = window.__V3_AUTH__;
+    return (a && Array.isArray(a.permissions) ? a.permissions : []).map(String);
+  }
+
+  function authUserId() {
+    const a = window.__V3_AUTH__;
+    return a && a.user_id != null ? Number(a.user_id) : null;
+  }
+
+  function canPerm(code) {
+    const L = window.V3LoadingLedger;
+    if (L && typeof L.hasPermission === "function") {
+      return L.hasPermission(authPermissions(), code);
+    }
+    return authPermissions().indexOf(code) !== -1;
   }
 
   function isPreviewFixture() {
@@ -290,7 +316,13 @@
       try {
         localStorage.setItem(TOKEN_KEY, "preview-fixture-token");
       } catch (_) {}
-      markAuthOk({ username: "preview-fixture", role: "viewer" });
+      markAuthOk({
+        username: "preview-fixture",
+        role: "viewer",
+        user_id: 0,
+        permissions: [],
+        branch_ids: [],
+      });
       return true;
     }
     const token = localStorage.getItem(TOKEN_KEY) || "";
@@ -1118,13 +1150,17 @@
     if (!job) return null;
     if (!force && boardCache[so]) return boardCache[so];
     const board = await request(API + "/production/jobs/" + job.id + "/board");
+    board.sj_line_authority = mergeAuthorityRows(
+      board.sj_line_authority || [],
+      authorityOverlay[so] || [],
+    );
     boardCache[so] = board;
     jobCache[so] = board.job;
     applyBoardToOrder(so, board);
     return board;
   }
 
-  async function mutate(lockKey, fn) {
+  async function mutate(lockKey, fn, opts) {
     if (inFlight.has(lockKey)) {
       toast("Transaksi masih diproses — tunggu selesai");
       return null;
@@ -1132,10 +1168,14 @@
     inFlight.add(lockKey);
     try {
       const result = await fn();
+      // Soft actions (lookup / field-select) must not wipe Delivery form inputs.
+      if (opts && opts.soft) return result;
       if (selectedSo) {
+        const draft = snapshotDeliveryDraft();
         delete boardCache[selectedSo];
         await loadBoard(selectedSo, true);
         renderWorkflowDrawer(selectedSo);
+        restoreDeliveryDraft(draft);
       }
       if (typeof window.render === "function") window.render();
       return result;
@@ -1145,6 +1185,115 @@
     } finally {
       inFlight.delete(lockKey);
     }
+  }
+
+  const DELIVERY_DRAFT_IDS = [
+    "v3-sj-id",
+    "v3-sj-no",
+    "v3-sj-line",
+    "v3-load-so-line",
+    "v3-load-qty",
+    "v3-cancel-event",
+    "v3-cancel-qty",
+    "v3-cancel-reason",
+    "v3-ret-event",
+    "v3-ret-qty",
+    "v3-ret-reason",
+    "v3-pod-qty",
+    "v3-pod-recv",
+    "v3-sj-cancel-reason",
+  ];
+
+  function snapshotDeliveryDraft() {
+    const out = {};
+    DELIVERY_DRAFT_IDS.forEach(function (id) {
+      const el = document.getElementById(id);
+      if (el) out[id] = el.value;
+    });
+    const auth = document.getElementById("v3-load-auth-status");
+    if (auth) out.__authStatus = auth.textContent || "";
+    const designLink = document.getElementById("v3-design-link-status");
+    if (designLink) out.__designLinkStatus = designLink.textContent || "";
+    const designPath = document.getElementById("v3-design-link-status");
+    if (designPath && designPath.dataset && designPath.dataset.path) {
+      out.__designLinkPath = designPath.dataset.path;
+    }
+    return out;
+  }
+
+  function restoreDeliveryDraft(draft) {
+    if (!draft) return;
+    DELIVERY_DRAFT_IDS.forEach(function (id) {
+      if (draft[id] == null) return;
+      const el = document.getElementById(id);
+      if (el) el.value = draft[id];
+    });
+    const auth = document.getElementById("v3-load-auth-status");
+    if (auth && draft.__authStatus != null) auth.textContent = draft.__authStatus;
+    if (draft.__designLinkStatus != null || draft.__designLinkPath) {
+      applyDesignLinkStatus(
+        draft.__designLinkStatus || "",
+        draft.__designLinkPath || "",
+      );
+    }
+    syncLoadButtonEnabled();
+  }
+
+  function applyDesignLinkStatus(text, path) {
+    const el = document.getElementById("v3-design-link-status");
+    const copyBtn = document.getElementById("v3-design-link-copy");
+    if (el) {
+      el.textContent = text || "";
+      if (path) el.dataset.path = path;
+      else if (text) {
+        const m = String(text).match(/(\/t\/[^\s]+)/);
+        if (m) el.dataset.path = m[1];
+      }
+    }
+    if (copyBtn) {
+      const p = (el && el.dataset.path) || path || "";
+      copyBtn.hidden = !p;
+      copyBtn.onclick = function () {
+        const value = p || (el && el.dataset.path) || "";
+        if (!value) return;
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(value).then(
+            function () {
+              toast("Approval link disalin");
+            },
+            function () {
+              toast("Gagal menyalin link");
+            },
+          );
+        } else {
+          toast(value);
+        }
+      };
+    }
+  }
+
+  function syncLoadButtonEnabled() {
+    const loadBtn = document.getElementById("v3-load-btn");
+    if (!loadBtn) return;
+    if (!canPerm("production.delivery.manage")) {
+      loadBtn.disabled = true;
+      return;
+    }
+    const so = selectedSo;
+    const sjId = field("v3-sj-id");
+    const sjLine = field("v3-sj-line");
+    const soLine = field("v3-load-so-line");
+    const L = ledgerApi();
+    const view =
+      L && L.findLineAuthority && so
+        ? L.findLineAuthority(
+            authorityRows(boardCache[so], so),
+            sjId,
+            sjLine,
+            soLine,
+          )
+        : null;
+    loadBtn.disabled = !(view && view.actionsEnabled);
   }
 
   function requireJob(so) {
@@ -1173,6 +1322,340 @@
     );
   }
 
+  function ledgerApi() {
+    return window.V3LoadingLedger || null;
+  }
+
+  /** Client overlay so Lookup Qty SJ survives board refresh before first Loading event. */
+  const authorityOverlay = Object.create(null);
+
+  function mergeAuthorityRows(serverRows, overlayRows) {
+    const out = [];
+    const seen = Object.create(null);
+    function key(r) {
+      return (
+        String(r.accurate_sj_id || "") +
+        "::" +
+        String(r.accurate_sj_line_id || "") +
+        "::" +
+        String(r.so_line_id || "")
+      );
+    }
+    (overlayRows || []).concat(serverRows || []).forEach(function (r) {
+      if (!r) return;
+      const k = key(r);
+      if (!k || seen[k]) {
+        if (seen[k] && r.verification === "VERIFIED") {
+          // Prefer verified overlay/server row.
+          const idx = out.findIndex(function (x) {
+            return key(x) === k;
+          });
+          if (idx >= 0) out[idx] = r;
+        }
+        return;
+      }
+      seen[k] = true;
+      out.push(r);
+    });
+    return out;
+  }
+
+  function authorityRows(board, so) {
+    const server = (board && board.sj_line_authority) || [];
+    const overlay = so ? authorityOverlay[so] || [] : [];
+    return mergeAuthorityRows(server, overlay);
+  }
+
+  function buildAuthoritySummaryHtml(board, events, so) {
+    const L = ledgerApi();
+    const auth = authorityRows(board, so);
+    if (!auth.length && !(events || []).some((e) => e.event_type === "loading")) {
+      return (
+        '<p class="v49-quiet" id="v3-sj-authority">Qty SJ: isi identitas SJ line lalu Lookup. Packing monitoring only.</p>'
+      );
+    }
+    const views = auth.map(function (row) {
+      return L && L.viewSjLineAuthority
+        ? L.viewSjLineAuthority(row)
+        : {
+            accurateSjId: row.accurate_sj_id,
+            accurateSjNumber: row.accurate_sj_number,
+            accurateSjLineId: row.accurate_sj_line_id,
+            soLineId: row.so_line_id,
+            displayQtySj: "UNKNOWN",
+            displayRemaining: "UNKNOWN",
+            loadingConfirmed: row.loading_confirmed,
+            loadingCancelled: row.loading_cancelled,
+            loadingNet: row.loading_net,
+            verification: "UNKNOWN",
+            actionsEnabled: false,
+          };
+    });
+    if (!views.length) {
+      return '<p class="v49-quiet" id="v3-sj-authority">Qty SJ: UNKNOWN (belum terverifikasi)</p>';
+    }
+    return (
+      '<div id="v3-sj-authority" class="v3-sj-authority">' +
+      views
+        .map(function (v) {
+          return (
+            '<div class="v3-auth-row" data-sj="' +
+            escapeHtml(v.accurateSjId) +
+            '" data-sj-line="' +
+            escapeHtml(v.accurateSjLineId) +
+            '" data-so-line="' +
+            escapeHtml(v.soLineId) +
+            '">' +
+            "<div><b>SJ " +
+            escapeHtml(v.accurateSjNumber || v.accurateSjId) +
+            "</b> · SJ-line " +
+            escapeHtml(v.accurateSjLineId) +
+            " · SO-line " +
+            escapeHtml(v.soLineId) +
+            " · <b>" +
+            escapeHtml(v.verification) +
+            "</b></div>" +
+            "<div>Qty SJ " +
+            escapeHtml(v.displayQtySj) +
+            " · Loading Confirmed " +
+            escapeHtml(v.loadingConfirmed) +
+            " · Loading Cancelled " +
+            escapeHtml(v.loadingCancelled) +
+            " · Loading Net " +
+            escapeHtml(v.loadingNet) +
+            " · Remaining Loading " +
+            escapeHtml(v.displayRemaining) +
+            "</div></div>"
+          );
+        })
+        .join("") +
+      '<p class="v49-quiet">Packing monitoring only — tidak membatasi Loading.</p></div>'
+    );
+  }
+
+  function buildLoadingLedgerHtml(events, board, so) {
+    const L = ledgerApi();
+    const rows = L ? L.summarizeLoadingEvents(events || []) : [];
+    const authHtml = buildAuthoritySummaryHtml(board, events, so);
+    if (!rows.length) {
+      return (
+        authHtml +
+        '<p class="v49-quiet">Belum ada konfirmasi Loading.</p>'
+      );
+    }
+    const canCancel = canPerm(
+      (L && L.PERM_DELIVERY_MANAGE) || "production.delivery.manage",
+    );
+    const canRequest = canPerm(
+      (L && L.PERM_LOADING_RETURN_REQUEST) ||
+        "production.delivery.loading_return.request",
+    );
+    return (
+      authHtml +
+      '<div class="v3-load-ledger">' +
+      rows
+        .map(function (r) {
+          const auth =
+            L && L.findLineAuthority
+              ? L.findLineAuthority(
+                  authorityRows(board, so),
+                  r.accurateSjId,
+                  r.accurateSjLineId,
+                  r.soLineId,
+                )
+              : null;
+          const remSj = auth ? auth.displayRemaining : "UNKNOWN";
+          const qtySj = auth ? auth.displayQtySj : "UNKNOWN";
+          const actions =
+            (canCancel
+              ? '<button type="button" class="btn sm" data-v3="load-cancel" data-event-id="' +
+                escapeHtml(r.eventId) +
+                '">Batalkan Konfirmasi</button>'
+              : "") +
+            (canRequest && r.remainingOnEvent > 0
+              ? '<button type="button" class="btn sm" data-v3="load-return-req" data-event-id="' +
+                escapeHtml(r.eventId) +
+                '">Ajukan Pengembalian</button>'
+              : "");
+          return (
+            '<div class="v3-load-row" data-load-event="' +
+            escapeHtml(r.eventId) +
+            '">' +
+            "<div><b>#" +
+            escapeHtml(r.eventId) +
+            "</b> · SJ " +
+            escapeHtml(r.accurateSjNumber || r.accurateSjId) +
+            " · line " +
+            escapeHtml(r.accurateSjLineId) +
+            " · SO " +
+            escapeHtml(r.soLineId) +
+            "</div>" +
+            "<div>Qty SJ " +
+            escapeHtml(qtySj) +
+            " · Loading Confirmed " +
+            escapeHtml(r.confirmedQty) +
+            " · Loading Cancelled " +
+            escapeHtml(r.cancelledQty) +
+            " · Loading Net " +
+            escapeHtml(r.netLoadedQty) +
+            " · Remaining Loading " +
+            escapeHtml(remSj) +
+            " · Remaining event " +
+            escapeHtml(r.remainingOnEvent) +
+            "</div>" +
+            (actions
+              ? '<div class="row" style="margin-top:6px;gap:6px">' +
+                actions +
+                "</div>"
+              : "") +
+            "</div>"
+          );
+        })
+        .join("") +
+      "</div>"
+    );
+  }
+
+  function buildReturnRequestPanelHtml(events) {
+    const L = ledgerApi();
+    if (!L) return "";
+    const pending = L.pendingReturnRequests(events || []);
+    const requests = (events || []).filter(function (e) {
+      return e.event_type === "loading_return_requested";
+    });
+    const canApprove = canPerm(L.PERM_LOADING_RETURN_APPROVE);
+    const meId = authUserId();
+    const pendingHtml = pending.length
+      ? pending
+          .map(function (ev) {
+            const payload = L.parsePayload(ev);
+            const self =
+              meId != null &&
+              ev.actor_user_id != null &&
+              Number(ev.actor_user_id) === meId;
+            const actions =
+              canApprove && !self
+                ? '<button type="button" class="btn sm primary" data-v3="load-return-approve" data-request-id="' +
+                  escapeHtml(ev.id) +
+                  '">Approve</button>' +
+                  '<button type="button" class="btn sm danger" data-v3="load-return-reject" data-request-id="' +
+                  escapeHtml(ev.id) +
+                  '">Reject</button>'
+                : canApprove && self
+                  ? '<span class="muted">Self-approval diblokir</span>'
+                  : "";
+            return (
+              '<div class="v3-return-pending">' +
+              "<div><b>Request #" +
+              escapeHtml(ev.id) +
+              "</b> · qty " +
+              escapeHtml(ev.qty_physical) +
+              " · SJ " +
+              escapeHtml(ev.accurate_sj_number || ev.accurate_sj_id || "") +
+              " · line " +
+              escapeHtml(ev.accurate_sj_line_id || "") +
+              " · actor " +
+              escapeHtml(ev.actor_user_id == null ? "—" : ev.actor_user_id) +
+              "</div>" +
+              "<div>Alasan: " +
+              escapeHtml(ev.reason || "") +
+              " · foto att #" +
+              escapeHtml(
+                payload.evidence_attachment_id != null
+                  ? payload.evidence_attachment_id
+                  : ev.evidence_ref || "—",
+              ) +
+              " · reverses #" +
+              escapeHtml(
+                payload.reverses_event_id != null
+                  ? payload.reverses_event_id
+                  : "—",
+              ) +
+              "</div>" +
+              (actions
+                ? '<div class="row" style="margin-top:6px;gap:6px">' +
+                  actions +
+                  "</div>"
+                : "") +
+              "</div>"
+            );
+          })
+          .join("")
+      : '<p class="v49-quiet">Tidak ada pending physical return.</p>';
+    const histHtml = requests.length
+      ? requests
+          .map(function (ev) {
+            const st = L.returnRequestStatus(events, ev.id);
+            const hist = L.returnApprovalHistory(events, ev.id)
+              .map(function (h) {
+                return (
+                  "#" +
+                  h.id +
+                  " " +
+                  h.event_type +
+                  (h.actor_user_id != null ? " by " + h.actor_user_id : "")
+                );
+              })
+              .join("; ");
+            return (
+              "<div>#" +
+              escapeHtml(ev.id) +
+              " · <b>" +
+              escapeHtml(st) +
+              "</b> · qty " +
+              escapeHtml(ev.qty_physical) +
+              (hist ? " · " + escapeHtml(hist) : "") +
+              "</div>"
+            );
+          })
+          .join("")
+      : "<p>Belum ada pengajuan pengembalian.</p>";
+    return (
+      '<div class="v3-return-panel">' +
+      '<p class="sectionlabel" style="margin-top:10px">Pending Physical Return</p>' +
+      pendingHtml +
+      historyList("Status & approval history", histHtml) +
+      "</div>"
+    );
+  }
+
+  function buildReturnRequestFormHtml() {
+    const canRequest = canPerm(
+      (ledgerApi() && ledgerApi().PERM_LOADING_RETURN_REQUEST) ||
+        "production.delivery.loading_return.request",
+    );
+    if (!canRequest) return "";
+    return (
+      '<div class="v3-return-form" style="margin-top:10px">' +
+      '<p class="sectionlabel">Ajukan Pengembalian Fisik</p>' +
+      '<label>Loading event id<input id="v3-ret-event" type="number" min="1"/></label>' +
+      '<label>Qty pengembalian<input id="v3-ret-qty" type="number" min="1" value="1"/></label>' +
+      '<label>Alasan<input id="v3-ret-reason"/></label>' +
+      '<label>Foto pengembalian (wajib)<input id="v3-ret-photo" type="file" accept="image/*"/></label>' +
+      '<button type="button" class="btn sm" data-v3="load-return-submit">Submit pengajuan</button>' +
+      '<p class="v49-quiet">Request tidak melepaskan qty. Approval melepaskan net Loading yang diotorisasi saja.</p>' +
+      "</div>"
+    );
+  }
+
+  function buildCancelFormHtml() {
+    const canCancel = canPerm(
+      (ledgerApi() && ledgerApi().PERM_DELIVERY_MANAGE) ||
+        "production.delivery.manage",
+    );
+    if (!canCancel) return "";
+    return (
+      '<div class="v3-cancel-form" style="margin-top:10px">' +
+      '<p class="sectionlabel">Batalkan Konfirmasi Loading</p>' +
+      '<label>Loading event id<input id="v3-cancel-event" type="number" min="1"/></label>' +
+      '<label>Qty batal<input id="v3-cancel-qty" type="number" min="1" value="1"/></label>' +
+      '<label>Alasan<input id="v3-cancel-reason"/></label>' +
+      '<button type="button" class="btn sm" data-v3="load-cancel-submit">Batalkan Konfirmasi</button>' +
+      '<p class="v49-quiet">Hanya confirmation cancel · terbatas sisa qty event · POD tidak bisa dibalik.</p>' +
+      "</div>"
+    );
+  }
+
   function renderWorkflowDrawer(so) {
     selectedSo = so;
     const order = orderBySo(so);
@@ -1188,6 +1671,14 @@
     const prepStates = (board && board.prep_states) || [];
     const events = (board && board.events) || [];
     const pendingDesign = designs.find((d) => d.status === "pending");
+    const linkableDesign =
+      pendingDesign ||
+      designs.find(
+        (d) =>
+          d.status === "approved" &&
+          !d.bypass &&
+          !d.customer_approval,
+      );
     const activeBypass = bypasses.find((b) => b.active);
     const pendingSample = samples.find((s) => s.status === "pending");
 
@@ -1338,16 +1829,26 @@
           '<label>Storage key<input id="v3-design-key" value="designs/' +
           escapeHtml(so) +
           '.pdf"/></label>' +
+          '<label>SO line (print)<input id="v3-design-line" value="' +
+          escapeHtml(firstLineId(order)) +
+          '"/></label>' +
           '<button type="button" class="btn sm" data-v3="design-upload">Upload versi</button>' +
           (pendingDesign
-            ? '<button type="button" class="btn sm" data-v3="design-approve">Approve #' +
+            ? '<button type="button" class="btn sm" data-v3="design-approve">Staff review #' +
               escapeHtml(pendingDesign.id) +
               "</button>" +
               '<button type="button" class="btn sm" data-v3="design-reject">Reject</button>' +
-              '<button type="button" class="btn sm" data-v3="design-customer">Customer approval</button>' +
               '<label>Bypass reason<input id="v3-design-bypass-reason"/></label>' +
               '<button type="button" class="btn sm" data-v3="design-bypass">Authorized bypass</button>'
-            : "<p class=\"v49-quiet\">Tidak ada versi pending</p>") +
+            : "<p class=\"v49-quiet\">Tidak ada versi pending (staff)</p>") +
+          (linkableDesign
+            ? '<button type="button" class="btn sm" data-v3="design-link">Generate approval link #' +
+              escapeHtml(linkableDesign.id) +
+              "</button>"
+            : "") +
+          '<pre id="v3-design-link-status" class="v49-quiet"></pre>' +
+          '<button type="button" class="btn sm" id="v3-design-link-copy" hidden>Copy Link</button>' +
+          '<p class="v49-quiet">Gate cetak: tautan pelanggan /t/... atau bypass. Staff review saja tidak membuka jadwal.</p>' +
           historyList("Riwayat design", designHist),
       ) +
       section(
@@ -1429,6 +1930,9 @@
           '<label>Color pass<input id="v3-out-pass" type="number" min="1" value="1"/></label>' +
           '<label>Lot<input id="v3-out-lot"/></label>' +
           '<button type="button" class="btn sm" data-v3="out-confirm">Confirm output</button>' +
+          '<label>Output event id (helper verify)<input id="v3-hv-src" type="number"/></label>' +
+          '<label>Helper verify qty<input id="v3-hv-qty" type="number" min="1" value="1"/></label>' +
+          '<button type="button" class="btn sm" data-v3="out-helper-verify">Helper verify output</button>' +
           '<label>Source output event id<input id="v3-out-src" type="number"/></label>' +
           '<label>Correction delta<input id="v3-out-delta" type="number"/></label>' +
           '<label>Correction reason<input id="v3-out-creason"/></label>' +
@@ -1446,25 +1950,43 @@
           '"/></label>' +
           '<label>Qty<input id="v3-pack-qty" type="number" min="1" value="1"/></label>' +
           '<label>Lot<input id="v3-pack-lot"/></label>' +
-          '<button type="button" class="btn sm" data-v3="pack">Confirm packing batch</button>',
+          '<button type="button" class="btn sm" data-v3="pack">Confirm packing batch</button>' +
+          '<p class="v49-quiet">Packing dari qty helper-verified (bukan operator saja). Loading tetap otoritas SJ-line.</p>',
       ) +
       section(
         "Delivery / POD",
         '<label>Accurate SJ id<input id="v3-sj-id"/></label>' +
           '<label>Accurate SJ number<input id="v3-sj-no"/></label>' +
+          '<label>Accurate SJ line id<input id="v3-sj-line"/></label>' +
+          '<label>SO line id<input id="v3-load-so-line" value="' +
+          escapeHtml(firstLineId(order)) +
+          '"/></label>' +
           '<label>Loading qty<input id="v3-load-qty" type="number" min="1" value="1"/></label>' +
-          '<button type="button" class="btn sm" data-v3="load">Loading</button>' +
+          '<button type="button" class="btn sm" data-v3="load-authority">Lookup Qty SJ</button>' +
+          (canPerm("production.delivery.manage")
+            ? '<button type="button" class="btn sm" data-v3="load" id="v3-load-btn" disabled>Loading</button>'
+            : "") +
+          '<pre id="v3-load-auth-status" class="v49-quiet"></pre>' +
+          '<p class="sectionlabel" style="margin-top:10px">Riwayat Loading (per event / SJ line)</p>' +
+          buildLoadingLedgerHtml(events, board, so) +
+          buildCancelFormHtml() +
+          buildReturnRequestFormHtml() +
+          buildReturnRequestPanelHtml(events) +
           '<label>POD qty (parsial OK)<input id="v3-pod-qty" type="number" min="1" value="1"/></label>' +
           '<label>Nama penerima<input id="v3-pod-recv"/></label>' +
           '<label>Foto 1<input id="v3-pod-photo1" type="file" accept="image/*"/></label>' +
           '<label>Foto 2<input id="v3-pod-photo2" type="file" accept="image/*"/></label>' +
           '<label>TTD pengirim<input id="v3-pod-sig-s" type="file" accept="image/*"/></label>' +
           '<label>TTD penerima<input id="v3-pod-sig-r" type="file" accept="image/*"/></label>' +
-          '<button type="button" class="btn sm" data-v3="pod">Konfirmasi POD</button>' +
+          (canPerm("production.delivery.manage")
+            ? '<button type="button" class="btn sm" data-v3="pod">Konfirmasi POD</button>'
+            : "") +
           '<pre id="v3-pod-status" class="v49-quiet"></pre>' +
           '<label>Cancel SJ reason<input id="v3-sj-cancel-reason"/></label>' +
-          '<button type="button" class="btn sm" data-v3="sj-cancel">Cancel/supersede SJ</button>' +
-          '<p class="v49-quiet">POD resmi butuh Loading + 2 foto + 2 TTD + nama penerima. Tanpa itu server menolak — tidak ada status delivered palsu.</p>',
+          (canPerm("production.delivery.manage")
+            ? '<button type="button" class="btn sm" data-v3="sj-cancel">Cancel/supersede SJ</button>'
+            : "") +
+          '<p class="v49-quiet">Loading max = Accurate SJ-line PCS. Packing monitoring only. POD resmi butuh Loading + 2 foto + 2 TTD + nama penerima.</p>',
       ) +
       section(
         "Tracking",
@@ -1530,6 +2052,20 @@
         handleAction(btn.getAttribute("data-v3"), so, order);
       });
     });
+    ["v3-sj-id", "v3-sj-no", "v3-sj-line", "v3-load-so-line"].forEach(function (id) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener("input", syncLoadButtonEnabled);
+      el.addEventListener("change", syncLoadButtonEnabled);
+    });
+    syncLoadButtonEnabled();
+    const designStatus = document.getElementById("v3-design-link-status");
+    if (designStatus && designStatus.textContent) {
+      applyDesignLinkStatus(
+        designStatus.textContent,
+        designStatus.dataset.path || "",
+      );
+    }
   }
 
   function section(title, body) {
@@ -1544,7 +2080,14 @@
 
   async function handleAction(action, so, order) {
     const lock = action + ":" + so;
-    await mutate(lock, async function () {
+    const soft =
+      action === "load-authority" ||
+      action === "load-cancel" ||
+      action === "load-return-req" ||
+      action === "design-link";
+    await mutate(
+      lock,
+      async function () {
       const job = action === "track-refresh" || action.indexOf("rate") === 0 || action.indexOf("payroll") === 0
         ? jobCache[so]
         : requireJob(so);
@@ -1555,18 +2098,57 @@
           body: {
             file_name: field("v3-design-file") || "design.pdf",
             storage_key: field("v3-design-key") || "designs/" + so + ".pdf",
+            so_line_id: field("v3-design-line") || firstLineId(order),
           },
         });
         toast("Design version uploaded");
         return;
       }
-      if (action.indexOf("design-") === 0 && action !== "design-upload") {
+      if (action === "design-link") {
+        const board = boardCache[so] || (await loadBoard(so, true));
+        const target =
+          (board.design_versions || []).find((d) => d.status === "pending") ||
+          (board.design_versions || []).find(
+            (d) => d.status === "approved" && !d.bypass && !d.customer_approval,
+          );
+        if (!target) throw new Error("Tidak ada design untuk approval link");
+        const minted = await request(
+          API +
+            "/production/jobs/" +
+            jid +
+            "/design/versions/" +
+            target.id +
+            "/approval-links",
+          {
+            method: "POST",
+            body: {
+              so_line_id: field("v3-design-line") || target.so_line_id || null,
+            },
+          },
+        );
+        const path = minted.path || minted.url || "";
+        applyDesignLinkStatus(
+          "Approval link: " +
+            path +
+            " · expires " +
+            (minted.expires_at || "") +
+            " · " +
+            (minted.disclaimer || ""),
+          path,
+        );
+        toast("Customer approval link dibuat");
+        return;
+      }
+      if (
+        action.indexOf("design-") === 0 &&
+        action !== "design-upload" &&
+        action !== "design-link"
+      ) {
         const board = boardCache[so] || (await loadBoard(so, true));
         const pending = (board.design_versions || []).find((d) => d.status === "pending");
         if (!pending) throw new Error("Tidak ada design pending");
         const body = { decision: "approved", reason: null, bypass: false, customer_approval: false };
         if (action === "design-reject") body.decision = "rejected";
-        if (action === "design-customer") body.customer_approval = true;
         if (action === "design-bypass") {
           body.bypass = true;
           body.reason = field("v3-design-bypass-reason");
@@ -1576,7 +2158,11 @@
           API + "/production/jobs/design/versions/" + pending.id + "/decision",
           { method: "POST", body: body },
         );
-        toast("Design decision tersimpan");
+        toast(
+          body.bypass
+            ? "Design bypass tersimpan"
+            : "Staff review tersimpan — butuh approval link pelanggan untuk membuka gate",
+        );
         return;
       }
       if (action === "pay-receipt") {
@@ -1736,19 +2322,56 @@
         return;
       }
       if (action === "out-confirm") {
-        const asg = field("v3-out-asg");
+        let asg = field("v3-out-asg");
+        const passNo = Number(field("v3-out-pass") || 1);
+        if (!asg) {
+          const board = boardCache[so] || (await loadBoard(so, true));
+          const match = ((board && board.assignments) || []).find(function (a) {
+            return (
+              Number(a.color_pass) === passNo &&
+              (a.status === "active" || a.status === "completed")
+            );
+          });
+          if (match) {
+            asg = String(match.id);
+            const el = document.getElementById("v3-out-asg");
+            if (el) el.value = asg;
+          }
+        }
         if (!asg) throw new Error("Assignment id wajib");
         await request(API + "/production/jobs/" + jid + "/outputs", {
           method: "POST",
           body: {
             assignment_id: Number(asg),
             qty_physical: field("v3-out-qty") || "1",
-            color_pass: Number(field("v3-out-pass") || 1),
+            color_pass: passNo,
             lot_code: field("v3-out-lot") || null,
             idempotency_key: idemKey("out"),
           },
         });
         toast("Output confirmed");
+        return;
+      }
+      if (action === "out-helper-verify") {
+        const src = field("v3-hv-src");
+        if (!src) throw new Error("Output event id wajib untuk helper verify");
+        await request(
+          API +
+            "/production/jobs/" +
+            jid +
+            "/outputs/" +
+            Number(src) +
+            "/helper-verifications",
+          {
+            method: "POST",
+            body: {
+              source_output_event_id: Number(src),
+              qty_physical: field("v3-hv-qty") || "1",
+              idempotency_key: idemKey("hv"),
+            },
+          },
+        );
+        toast("Helper verification tersimpan");
         return;
       }
       if (action === "out-correct") {
@@ -1809,20 +2432,248 @@
         toast("Packing batch tersimpan");
         return;
       }
-      if (action === "load") {
+      if (action === "load-authority") {
         const sjId = field("v3-sj-id");
         const sjNo = field("v3-sj-no");
-        if (!sjId || !sjNo) throw new Error("Identitas SJ Accurate wajib");
+        const sjLine = field("v3-sj-line");
+        const soLine = field("v3-load-so-line") || firstLineId(order);
+        if (!sjId || !sjNo || !sjLine || !soLine) {
+          throw new Error("SJ id, nomor, line id, dan SO line wajib untuk lookup");
+        }
+        const auth = await request(
+          API +
+            "/production/jobs/" +
+            jid +
+            "/loading-authority?" +
+            new URLSearchParams({
+              accurate_sj_id: sjId,
+              accurate_sj_number: sjNo,
+              accurate_sj_line_id: sjLine,
+              so_line_id: soLine,
+            }).toString(),
+        );
+        const L = ledgerApi();
+        const view =
+          L && L.viewSjLineAuthority
+            ? L.viewSjLineAuthority(auth)
+            : { displayQtySj: "UNKNOWN", displayRemaining: "UNKNOWN", actionsEnabled: false };
+        const statusEl = document.getElementById("v3-load-auth-status");
+        if (statusEl) {
+          statusEl.textContent =
+            "Qty SJ " +
+            view.displayQtySj +
+            " · Confirmed " +
+            (auth.loading_confirmed || "0") +
+            " · Cancelled " +
+            (auth.loading_cancelled || "0") +
+            " · Net " +
+            (auth.loading_net || "0") +
+            " · Remaining " +
+            view.displayRemaining +
+            (view.actionsEnabled ? " · Loading OK" : " · Loading DISABLED (UNKNOWN)");
+        }
+        const loadBtn = document.getElementById("v3-load-btn");
+        if (loadBtn) loadBtn.disabled = !view.actionsEnabled;
+        if (!boardCache[so]) boardCache[so] = { events: [] };
+        const list = authorityRows(boardCache[so], so).slice();
+        const idx = list.findIndex(function (r) {
+          return (
+            String(r.accurate_sj_id) === String(auth.accurate_sj_id) &&
+            String(r.accurate_sj_line_id) === String(auth.accurate_sj_line_id) &&
+            String(r.so_line_id) === String(auth.so_line_id)
+          );
+        });
+        if (idx >= 0) list[idx] = auth;
+        else list.push(auth);
+        authorityOverlay[so] = list;
+        if (!boardCache[so]) boardCache[so] = { events: [] };
+        boardCache[so].sj_line_authority = list;
+        toast(
+          view.actionsEnabled
+            ? "Qty SJ terverifikasi: " + view.displayQtySj
+            : "Qty SJ UNKNOWN — aksi Loading dinonaktifkan",
+        );
+        return;
+      }
+      if (action === "load") {
+        if (!canPerm("production.delivery.manage")) {
+          throw new Error("Tidak berwenang Loading");
+        }
+        const sjId = field("v3-sj-id");
+        const sjNo = field("v3-sj-no");
+        const sjLine = field("v3-sj-line");
+        const soLine = field("v3-load-so-line") || firstLineId(order);
+        if (!sjId || !sjNo || !sjLine || !soLine) {
+          throw new Error("SJ id, nomor, line id, dan SO line wajib");
+        }
+        const L = ledgerApi();
+        let authView =
+          L && L.findLineAuthority
+            ? L.findLineAuthority(authorityRows(boardCache[so], so), sjId, sjLine, soLine)
+            : null;
+        if (!authView || !authView.actionsEnabled) {
+          const auth = await request(
+            API +
+              "/production/jobs/" +
+              jid +
+              "/loading-authority?" +
+              new URLSearchParams({
+                accurate_sj_id: sjId,
+                accurate_sj_number: sjNo,
+                accurate_sj_line_id: sjLine,
+                so_line_id: soLine,
+              }).toString(),
+          );
+          authView = L && L.viewSjLineAuthority ? L.viewSjLineAuthority(auth) : null;
+        }
+        if (!authView || !authView.actionsEnabled) {
+          throw new Error(
+            "Qty SJ UNKNOWN/unverified — Loading diblokir (tidak mengada-ada qty)",
+          );
+        }
         await request(API + "/production/jobs/" + jid + "/loading", {
           method: "POST",
           body: {
             accurate_sj_id: sjId,
             accurate_sj_number: sjNo,
+            accurate_sj_line_id: sjLine,
+            so_line_id: soLine,
             qty_physical: field("v3-load-qty") || "1",
             idempotency_key: idemKey("load"),
           },
         });
         toast("Loading tersimpan");
+        return;
+      }
+      if (action === "load-cancel") {
+        const eid = btn.getAttribute("data-event-id");
+        const cancelEl = document.getElementById("v3-cancel-event");
+        if (cancelEl && eid) cancelEl.value = eid;
+        toast("Event #" + eid + " dipilih — isi qty/alasan lalu Batalkan Konfirmasi");
+        return;
+      }
+      if (action === "load-return-req") {
+        const eid = btn.getAttribute("data-event-id");
+        const retEl = document.getElementById("v3-ret-event");
+        if (retEl && eid) retEl.value = eid;
+        toast("Event #" + eid + " dipilih — isi qty/alasan/foto lalu Submit pengajuan");
+        return;
+      }
+      if (action === "load-cancel-submit") {
+        if (!canPerm("production.delivery.manage")) {
+          throw new Error("Tidak berwenang batalkan konfirmasi Loading");
+        }
+        const eid = field("v3-cancel-event");
+        const reason = field("v3-cancel-reason");
+        if (!eid || !reason) throw new Error("Event id dan alasan wajib");
+        await request(
+          API + "/production/jobs/" + jid + "/loading/" + eid + "/cancel",
+          {
+            method: "POST",
+            body: {
+              qty_physical: field("v3-cancel-qty") || "1",
+              reason: reason,
+              cancel_kind: "confirmation_cancel",
+              idempotency_key: idemKey("lcxl"),
+            },
+          },
+        );
+        toast("Konfirmasi Loading dibatalkan (append-only)");
+        return;
+      }
+      if (action === "load-return-submit") {
+        if (
+          !canPerm(
+            (ledgerApi() && ledgerApi().PERM_LOADING_RETURN_REQUEST) ||
+              "production.delivery.loading_return.request",
+          )
+        ) {
+          throw new Error("Tidak berwenang ajukan pengembalian");
+        }
+        const eid = field("v3-ret-event");
+        const reason = field("v3-ret-reason");
+        if (!eid || !reason) throw new Error("Event id dan alasan wajib");
+        const photoEl = document.getElementById("v3-ret-photo");
+        const file = photoEl && photoEl.files && photoEl.files[0];
+        if (!file) throw new Error("Foto pengembalian wajib");
+        const boardEv = ((boardCache[so] && boardCache[so].events) || []).find(
+          function (e) {
+            return String(e.id) === String(eid);
+          },
+        );
+        const sjId =
+          field("v3-sj-id") ||
+          (boardEv && boardEv.accurate_sj_id) ||
+          "";
+        if (!sjId) throw new Error("Accurate SJ id wajib (isi form atau pilih event Loading)");
+        const fd = new FormData();
+        fd.append("accurate_sj_id", sjId);
+        fd.append("purpose", "loading_return_photo");
+        fd.append("file", file, file.name || "return.png");
+        const uploaded = await request(
+          API + "/production/jobs/" + jid + "/attachments",
+          { method: "POST", formData: fd },
+        );
+        await request(
+          API +
+            "/production/jobs/" +
+            jid +
+            "/loading/" +
+            eid +
+            "/return-requests",
+          {
+            method: "POST",
+            body: {
+              qty_physical: field("v3-ret-qty") || "1",
+              reason: reason,
+              evidence_attachment_id: uploaded.id,
+              idempotency_key: idemKey("lret"),
+            },
+          },
+        );
+        toast("Pengajuan physical return terkirim (qty belum dilepas)");
+        return;
+      }
+      if (action === "load-return-approve" || action === "load-return-reject") {
+        if (
+          !canPerm(
+            (ledgerApi() && ledgerApi().PERM_LOADING_RETURN_APPROVE) ||
+              "production.delivery.loading_return.approve",
+          )
+        ) {
+          throw new Error("Tidak berwenang approve/reject physical return");
+        }
+        const rid = btn.getAttribute("data-request-id");
+        if (!rid) throw new Error("Request id wajib");
+        const isReject = action === "load-return-reject";
+        let reason = null;
+        if (isReject) {
+          reason = window.prompt("Alasan penolakan physical return:");
+          if (!reason || !String(reason).trim()) {
+            throw new Error("Alasan penolakan wajib");
+          }
+        }
+        await request(
+          API +
+            "/production/jobs/" +
+            jid +
+            "/loading/return-requests/" +
+            rid +
+            "/" +
+            (isReject ? "reject" : "approve"),
+          {
+            method: "POST",
+            body: {
+              idempotency_key: idemKey(isReject ? "lrej" : "lapr"),
+              reason: reason,
+            },
+          },
+        );
+        toast(
+          isReject
+            ? "Physical return ditolak"
+            : "Physical return disetujui — qty Loading dilepas",
+        );
         return;
       }
       if (action === "pod") {
@@ -1932,7 +2783,9 @@
         return;
       }
       throw new Error("Aksi tidak dikenali: " + action);
-    }).catch(function () {
+    },
+      { soft: soft },
+    ).catch(function () {
       /* toast already shown */
     });
   }

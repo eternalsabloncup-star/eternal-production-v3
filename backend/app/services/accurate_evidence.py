@@ -156,6 +156,60 @@ async def require_valid_receipt(
     }
 
 
+def _normalize_sj_line_items(raw_lines) -> list[dict]:
+    """Pass through gateway line contract; never invent ids from SKU/index."""
+    if not isinstance(raw_lines, list):
+        return []
+    out: list[dict] = []
+    for row in raw_lines:
+        if not isinstance(row, dict):
+            continue
+        out.append(dict(row))
+    return out
+
+
+def resolve_sj_loading_line(
+    evidence: dict,
+    *,
+    accurate_sj_line_id: str,
+    so_line_id: str,
+) -> dict:
+    """Exact SJ-line × SO-line match. Fail closed on missing/ambiguous identity."""
+    sj_line = (accurate_sj_line_id or "").strip()
+    so_line = (so_line_id or "").strip()
+    if not sj_line or not so_line:
+        raise HTTPException(422, "Identitas baris SJ dan SO line wajib")
+    if evidence.get("mode") == "test_skip" or not evidence.get("verified"):
+        raise HTTPException(
+            503,
+            "Verifikasi SJ line Accurate tidak tersedia — loading diblokir",
+        )
+    lines = evidence.get("line_items") or []
+    if not isinstance(lines, list) or not lines:
+        raise HTTPException(409, "Surat Jalan Accurate tidak memuat baris otoritatif")
+    matches = [
+        ln
+        for ln in lines
+        if isinstance(ln, dict)
+        and str(ln.get("accurate_sj_line_id") or "").strip() == sj_line
+        and str(ln.get("so_line_id") or "").strip() == so_line
+    ]
+    if not matches:
+        raise HTTPException(
+            409,
+            "Baris SJ tidak cocok dengan SO line pada bukti Accurate",
+        )
+    if len(matches) > 1:
+        raise HTTPException(409, "Identitas baris SJ ambigu pada bukti Accurate")
+    line = matches[0]
+    if line.get("loading_eligible") is not True:
+        raise HTTPException(
+            409,
+            "Baris SJ tidak eligible untuk Loading (identitas/qty/unit_ratio)",
+        )
+    return line
+
+
 async def require_valid_sj(
     *,
     accurate_sj_id: str,
@@ -173,6 +227,8 @@ async def require_valid_sj(
             "mode": "test_skip",
             "accurate_sj_id": sj_id,
             "accurate_sj_number": sj_no,
+            "line_items": [],
+            "loading_eligible": False,
             "note": "Evidence enforce off (test) — not production authority",
         }
     gateway = ReadGateway()
@@ -244,6 +300,7 @@ async def require_valid_sj(
     if expected_branch_id and branch_id and branch_id != expected_branch_id.strip():
         raise HTTPException(409, "Surat Jalan Accurate tidak cocok dengan cabang job")
 
+    line_items = _normalize_sj_line_items(data.get("line_items"))
     return {
         "verified": True,
         "mode": "gateway",
@@ -253,6 +310,9 @@ async def require_valid_sj(
         "sales_order_number": so_link or None,
         "branch_id": branch_id or None,
         "live_verified": bool(data.get("live_verified")),
+        "line_items": line_items,
+        "loading_eligible": bool(line_items)
+        and all(ln.get("loading_eligible") is True for ln in line_items),
     }
 
 

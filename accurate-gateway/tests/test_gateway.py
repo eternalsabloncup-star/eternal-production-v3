@@ -112,6 +112,14 @@ async def test_delivery_note_ok_cancelled_mismatch(client: AsyncClient):
     assert ok.status_code == 200
     assert ok.json()["number"] == "SJ-OK-1"
     assert ok.json()["verifiable"] is True
+    line = ok.json()["line_items"][0]
+    assert line["sku"] == "BOX-A"
+    assert line["qty"] == 100
+    assert line["accurate_sj_line_id"] == "9001"
+    assert line["so_line_id"] == "8001"
+    assert line["line_identity_complete"] is True
+    assert line["loading_eligible"] is True
+    assert ok.json()["so_line_cross_verified"] is False
 
     cancelled = await client.get("/delivery-notes/SJ-CANCELLED", headers=_auth())
     assert cancelled.json()["cancelled"] is True
@@ -119,6 +127,7 @@ async def test_delivery_note_ok_cancelled_mismatch(client: AsyncClient):
 
     mismatch = await client.get("/delivery-notes/SJ-MISMATCH", headers=_auth())
     assert mismatch.json()["sales_order_number"] == "SO-OTHER"
+    assert mismatch.json()["line_items"][0]["line_identity_complete"] is False
 
 
 @pytest.mark.asyncio

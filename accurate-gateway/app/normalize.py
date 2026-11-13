@@ -796,6 +796,140 @@ def normalize_receipt(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _stable_int_id(value: Any) -> str | None:
+    """Canonical string id from Accurate integer/string ids. Reject bool/blank/garbage."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        value = int(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        s = value.strip()
+        if not s or not s.lstrip("-").isdigit():
+            return None
+        return str(int(s))
+    return None
+
+
+def _parse_unit_ratio(row: dict[str, Any]) -> tuple[float | None, bool]:
+    if "unitRatio" not in row and "unit_ratio" not in row:
+        return None, False
+    raw = row.get("unitRatio") if "unitRatio" in row else row.get("unit_ratio")
+    if raw is None:
+        return None, False
+    if isinstance(raw, str) and not raw.strip():
+        return None, False
+    try:
+        num = float(raw)
+    except (TypeError, ValueError):
+        return None, False
+    if not math.isfinite(num):
+        return None, False
+    return num, True
+
+
+def _sales_order_detail_nested_id(row: dict[str, Any]) -> str | None:
+    nested = row.get("salesOrderDetail")
+    if not isinstance(nested, dict):
+        return None
+    return _stable_int_id(nested.get("id"))
+
+
+def normalize_delivery_note_line(row: dict[str, Any]) -> dict[str, Any]:
+    """SJ detail line contract from Accurate delivery-order detailItem.
+
+    Canonical (Owner-verified field names on Live DO detail):
+      accurate_sj_line_id ← detailItem.id
+      so_line_id          ← detailItem.salesOrderDetailId
+      accurate_so_id      ← detailItem.salesOrderId
+      accurate_item_id    ← detailItem.itemId
+      quantity            ← detailItem.quantity
+      unit_ratio          ← detailItem.unitRatio
+
+    Legacy sku/qty/uom preserved for existing consumers.
+    Never infer so_line_id from SKU, name, or array index.
+    Never use salesOrderDetailId as the SJ line id.
+    """
+    item = row.get("item") if isinstance(row.get("item"), dict) else {}
+    accurate_sj_line_id = _stable_int_id(row.get("id"))
+    so_line_id = _stable_int_id(row.get("salesOrderDetailId"))
+    nested_so_line_id = _sales_order_detail_nested_id(row)
+    accurate_so_id = _stable_int_id(row.get("salesOrderId"))
+    accurate_item_id = _stable_int_id(row.get("itemId") or item.get("id"))
+    qty, qty_verified = _parse_qty(row)
+    unit_ratio, unit_ratio_verified = _parse_unit_ratio(row)
+
+    identity_conflicts: list[str] = []
+    if (
+        so_line_id is not None
+        and nested_so_line_id is not None
+        and so_line_id != nested_so_line_id
+    ):
+        identity_conflicts.append("salesOrderDetailId_ne_salesOrderDetail.id")
+        # Fail closed: conflicting SO-line references are not authoritative.
+        so_line_id = None
+
+    line_identity_complete = bool(
+        accurate_sj_line_id and so_line_id and qty_verified and qty is not None
+    )
+    uom = _uom(row, item)
+    # Packing ledger is physical cups (PCS). Non-PCS / blank UOM cannot be
+    # converted without guessing Accurate inventory base — fail closed.
+    _PCS_UOM = frozenset({"PCS", "PC", "PIECE", "PIECES", "CUP", "CUPS"})
+    uom_packing_compatible = str(uom or "").strip().upper() in _PCS_UOM
+    # Loading must also have a verified unit ratio so qty×unitRatio can be
+    # compared to packing physical cups without silent UOM drift.
+    loading_eligible = bool(
+        line_identity_complete
+        and unit_ratio_verified
+        and unit_ratio is not None
+        and unit_ratio > 0
+        and uom_packing_compatible
+        and not identity_conflicts
+    )
+
+    return {
+        # Legacy fields (preserved).
+        "sku": str(
+            row.get("itemNo") or item.get("no") or row.get("sku") or ""
+        ),
+        "qty": qty if qty is not None else 0,
+        "uom": uom,
+        # Canonical SJ↔SO line contract.
+        "accurate_sj_line_id": accurate_sj_line_id,
+        "so_line_id": so_line_id,
+        "accurate_so_id": accurate_so_id,
+        "accurate_item_id": accurate_item_id,
+        "quantity": qty,
+        "qty_verified": qty_verified,
+        "unit_ratio": unit_ratio,
+        "unit_ratio_verified": unit_ratio_verified,
+        "uom_packing_compatible": uom_packing_compatible,
+        "line_identity_complete": line_identity_complete,
+        "loading_eligible": loading_eligible,
+        "identity_conflicts": identity_conflicts,
+        # Field semantics Owner-proven (CROSS_VERIFICATION=PASS on live DN/SO).
+        # Per-request cross-GET remains optional defense; not claimed here.
+        "so_line_id_source": "detailItem.salesOrderDetailId",
+        "so_line_field_semantics_verified": True,
+        "so_line_cross_verified": False,
+    }
+
+
+def normalize_delivery_note_lines(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    detail = raw.get("detailItem") or raw.get("detailItems") or raw.get("items") or []
+    if not isinstance(detail, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for row in detail:
+        if isinstance(row, dict):
+            out.append(normalize_delivery_note_line(row))
+    return out
+
+
 def normalize_delivery_note(raw: dict[str, Any]) -> dict[str, Any]:
     cancelled = _truthy_cancel(raw)
     so_number = (
@@ -812,6 +946,7 @@ def normalize_delivery_note(raw: dict[str, Any]) -> dict[str, Any]:
     branch = _branch_party(raw)
     status = _status(raw)
     verifiable = not cancelled and status not in {"UNKNOWN", "DRAFT", "UNPOSTED", "CANCELLED"}
+    line_items = normalize_delivery_note_lines(raw)
     return {
         "id": str(raw.get("id") or raw.get("number") or raw.get("no") or ""),
         "number": str(raw.get("number") or raw.get("no") or raw.get("id") or ""),
@@ -822,12 +957,11 @@ def normalize_delivery_note(raw: dict[str, Any]) -> dict[str, Any]:
         "shipped_at": raw.get("shipDate") or raw.get("transDate") or raw.get("shippedAt"),
         "cancelled": cancelled,
         "verifiable": verifiable,
-        "line_items": [
-            {
-                "sku": li.get("sku") or "",
-                "qty": li.get("qty") or 0,
-                "uom": li.get("uom") or "",
-            }
-            for li in _lines(raw)
-        ],
+        "line_items": line_items,
+        "line_identity_complete": bool(line_items)
+        and all(bool(li.get("line_identity_complete")) for li in line_items),
+        "loading_eligible": bool(line_items)
+        and all(bool(li.get("loading_eligible")) for li in line_items),
+        "so_line_field_semantics_verified": True,
+        "so_line_cross_verified": False,
     }

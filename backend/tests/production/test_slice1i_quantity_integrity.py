@@ -74,9 +74,9 @@ def test_derive_pack_done_uses_packing_batch_not_orphan_alias_only():
             qty_physical=Decimal("50"),
         ),
         _ev(
-            event_type="output_confirmed",
+            event_type="output_helper_verified",
             so_line_id="L1",
-            color_pass=2,
+            color_pass=1,
             qty_physical=Decimal("50"),
         ),
         _ev(event_type="packing_batch", so_line_id="L1", qty_physical=Decimal("50")),
@@ -126,6 +126,7 @@ ALL_PERMS = [
     P.JOB_READ,
     P.DESIGN_UPLOAD,
     P.DESIGN_APPROVE,
+    P.DESIGN_BYPASS,
     P.PAYMENT_BYPASS,
     P.SCHEDULE_MANAGE,
     P.PREP_SCREENER,
@@ -133,6 +134,7 @@ ALL_PERMS = [
     P.SAMPLE_UPLOAD,
     P.SAMPLE_DECIDE,
     P.OUTPUT_CONFIRM,
+    P.OUTPUT_HELPER_VERIFY,
     P.PACKING_RECORD,
 ]
 
@@ -202,7 +204,7 @@ async def test_packing_rejects_sum_of_two_color_passes(client_1i: AsyncClient) -
     ).json()
     await client_1i.post(
         f"/api/v1/production/jobs/design/versions/{design['id']}/decision",
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
     await client_1i.post(
         f"/api/v1/production/jobs/{jid}/payment/bypass",
@@ -264,30 +266,32 @@ async def test_packing_rejects_sum_of_two_color_passes(client_1i: AsyncClient) -
     ).json()
     await client_1i.post(
         f"/api/v1/production/jobs/samples/{sample['id']}/decision",
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
-    assert (
-        await client_1i.post(
-            f"/api/v1/production/jobs/{jid}/outputs",
-            json={
-                "assignment_id": asg1["id"],
-                "qty_physical": "5000",
-                "color_pass": 1,
-                "idempotency_key": "out-pass1-5000",
-            },
-        )
-    ).status_code == 200
-    assert (
-        await client_1i.post(
-            f"/api/v1/production/jobs/{jid}/outputs",
-            json={
-                "assignment_id": asg2["id"],
-                "qty_physical": "5000",
-                "color_pass": 2,
-                "idempotency_key": "out-pass2-5000",
-            },
-        )
-    ).status_code == 200
+    o1 = await client_1i.post(
+        f"/api/v1/production/jobs/{jid}/outputs",
+        json={
+            "assignment_id": asg1["id"],
+            "qty_physical": "5000",
+            "color_pass": 1,
+            "idempotency_key": "out-pass1-5000",
+        },
+    )
+    assert o1.status_code == 200
+    o2 = await client_1i.post(
+        f"/api/v1/production/jobs/{jid}/outputs",
+        json={
+            "assignment_id": asg2["id"],
+            "qty_physical": "5000",
+            "color_pass": 2,
+            "idempotency_key": "out-pass2-5000",
+        },
+    )
+    assert o2.status_code == 200
+    from tests.production.helper_verify_helpers import helper_verify_output
+
+    await helper_verify_output(client_1i, jid, o1.json()["id"], "5000", idem="hv-1i-p1")
+    await helper_verify_output(client_1i, jid, o2.json()["id"], "5000", idem="hv-1i-p2")
     over = await client_1i.post(
         f"/api/v1/production/jobs/{jid}/packing",
         json={

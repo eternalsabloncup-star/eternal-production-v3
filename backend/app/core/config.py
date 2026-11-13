@@ -64,6 +64,20 @@ class Settings(BaseSettings):
         default=str(_REPO_ROOT / "backend" / "var" / "attachments"),
         alias="V3_ATTACHMENT_ROOT",
     )
+    # Customer design-approval / live-tracking bearer links (local portal).
+    # Default TTL documented: 72h design approval, 168h live tracking.
+    # Possession of a bearer link is NOT legal identity proof.
+    design_approval_token_ttl_hours: int = Field(
+        default=72, alias="V3_DESIGN_APPROVAL_TOKEN_TTL_HOURS"
+    )
+    live_tracking_token_ttl_hours: int = Field(
+        default=168, alias="V3_LIVE_TRACKING_TOKEN_TTL_HOURS"
+    )
+    # Optional absolute base for minted URLs (e.g. https://eternalorder.id).
+    # Empty = return path-only /t/... for local isolated use; do not publish.
+    customer_portal_public_base: str = Field(
+        default="", alias="V3_CUSTOMER_PORTAL_PUBLIC_BASE"
+    )
 
     @property
     def cors_origin_list(self) -> list[str]:

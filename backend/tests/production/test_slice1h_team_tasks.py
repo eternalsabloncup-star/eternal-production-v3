@@ -304,7 +304,7 @@ async def test_tasks_api_and_sync_ensure(client: AsyncClient) -> None:
     # Approve design + bypass payment → schedule actionable
     await client.post(
         f"/api/v1/production/jobs/design/versions/{up.json()['id']}/decision",
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
     await client.post(
         f"/api/v1/production/jobs/{job_id}/payment/bypass",

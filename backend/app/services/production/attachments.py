@@ -12,11 +12,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.models.production.attachment import POD_PURPOSES, ProductionAttachment
+from app.models.production.attachment import (
+    LOADING_RETURN_PURPOSES,
+    POD_PURPOSES,
+    UPLOAD_PURPOSES,
+    ProductionAttachment,
+)
 from app.models.production.job import ProductionJob
 from app.models.user import User
 from app.services.production import permissions as P
 from app.services.production.engine import _branch, _require
+
+
+def _require_any(user: User, *perms: str) -> None:
+    have = set(user.permissions or [])
+    if not (have & set(perms)):
+        raise HTTPException(403, "Izin tidak mencukupi")
 
 ALLOWED_MIME = frozenset(
     {
@@ -72,11 +83,19 @@ async def store_upload(
     purpose: str,
     upload: UploadFile,
 ) -> ProductionAttachment:
-    _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
     purpose_n = (purpose or "").strip().lower()
-    if purpose_n not in POD_PURPOSES or not _SAFE_PURPOSE.match(purpose_n):
+    if purpose_n not in UPLOAD_PURPOSES or not _SAFE_PURPOSE.match(purpose_n):
         raise HTTPException(422, "purpose attachment tidak valid")
+    if purpose_n in LOADING_RETURN_PURPOSES:
+        # Requester may upload return evidence without full DELIVERY_MANAGE.
+        _require_any(
+            user,
+            P.DELIVERY_LOADING_RETURN_REQUEST,
+            P.DELIVERY_MANAGE,
+        )
+    else:
+        _require(user, P.DELIVERY_MANAGE)
     sj = (accurate_sj_id or "").strip()
     if not sj:
         raise HTTPException(422, "accurate_sj_id wajib")
@@ -182,6 +201,50 @@ async def validate_unbound_pod_attachments(
             raise HTTPException(409, f"File attachment {purpose} hilang")
         out[purpose] = row
     return out
+
+
+async def validate_unbound_loading_return_attachment(
+    session: AsyncSession,
+    *,
+    job: ProductionJob,
+    accurate_sj_id: str,
+    attachment_id: int,
+) -> ProductionAttachment:
+    """Require a real unbound loading_return_photo for physical_return cancels."""
+    sj = (accurate_sj_id or "").strip()
+    if not sj:
+        raise HTTPException(422, "accurate_sj_id wajib untuk bukti return")
+    try:
+        aid = int(attachment_id)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, "evidence_attachment_id tidak valid") from exc
+    if aid <= 0:
+        raise HTTPException(422, "evidence_attachment_id tidak valid")
+    row = await session.get(ProductionAttachment, aid)
+    if row is None:
+        raise HTTPException(404, "Attachment return tidak ditemukan")
+    if row.job_id != job.id:
+        raise HTTPException(409, "Attachment return beda job")
+    if row.branch_id != job.branch_id:
+        raise HTTPException(409, "Attachment return beda cabang")
+    if row.accurate_sj_id.strip() != sj:
+        raise HTTPException(409, "Attachment return beda SJ")
+    if row.purpose not in LOADING_RETURN_PURPOSES:
+        raise HTTPException(
+            409,
+            "Attachment harus purpose loading_return_photo",
+        )
+    if row.production_event_id is not None:
+        raise HTTPException(409, "Attachment return sudah terikat event lain")
+    if int(row.byte_size or 0) <= 0:
+        raise HTTPException(409, "Attachment return kosong")
+    path = resolve_storage_path(row.storage_key)
+    if not path.is_file():
+        raise HTTPException(409, "File attachment return hilang")
+    # Reject zero-byte files on disk even if metadata was wrong.
+    if path.stat().st_size <= 0:
+        raise HTTPException(409, "File attachment return kosong")
+    return row
 
 
 async def bind_attachments_to_event(
