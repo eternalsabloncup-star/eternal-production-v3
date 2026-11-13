@@ -36,6 +36,14 @@ def test_metadata_contains_auth_and_work_order_tables() -> None:
         "operator_rates",
         "payroll_runs",
         "payroll_lines",
+        # Settings & Permission (0011) and task ownership (0012).
+        "access_state",
+        "access_groups",
+        "access_memberships",
+        "access_grants",
+        "access_audit",
+        "access_account_credentials",
+        "task_ownerships",
     }
 
 

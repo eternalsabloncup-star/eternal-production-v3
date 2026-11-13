@@ -1,5 +1,12 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useState, useMemo } from "react";
 import { getApiBaseUrl } from "./api/client";
+
+import { SettingsPanel, PasswordChangeForm } from "./settings/SettingsPanel";
+import { createSettingsApi } from "./settings/api";
+
+import { WorkflowTasks } from "./settings/WorkflowTasks";
+
+type Session = { workflow_authorization?: string; settings_enabled?: boolean; system_director?: boolean; must_change_password?: boolean; permissions?: string[]; username?: string };
 
 const TOKEN_KEY = "epv3_access_token";
 
@@ -13,6 +20,18 @@ export default function App() {
   const [password, setPassword] = useState("");
   const [state, setState] = useState<LoginState>({ kind: "idle" });
 
+  const [session, setSession] = useState<Session | null>(null);
+  const api = useMemo(() => createSettingsApi(getApiBaseUrl(), () => localStorage.getItem(TOKEN_KEY) || ""), []);
+  function acceptSession(data: Session) {
+    if (data.settings_enabled && (data.workflow_authorization === "enforced" || data.must_change_password || data.system_director || !data.permissions?.length)) {
+      setSession(data);
+    } else {
+      window.location.replace("/production.html");
+    }
+  }
+  function logout() {
+    localStorage.removeItem(TOKEN_KEY); setSession(null); setPassword(""); setState({kind:"idle"});
+  }
   useEffect(() => {
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) return;
@@ -29,7 +48,7 @@ export default function App() {
         });
         if (cancelled) return;
         if (response.ok) {
-          window.location.replace("/production.html");
+          acceptSession(await response.json());
           return;
         }
         localStorage.removeItem(TOKEN_KEY);
@@ -37,7 +56,7 @@ export default function App() {
         if (!cancelled) localStorage.removeItem(TOKEN_KEY);
       }
     })();
-    return () => {
+  return () => {
       cancelled = true;
     };
   }, []);
@@ -60,9 +79,10 @@ export default function App() {
               : "Login gagal"),
         );
       }
-      const data = (await response.json()) as { access_token: string };
+      const data = (await response.json()) as Session & { access_token: string };
       localStorage.setItem(TOKEN_KEY, data.access_token);
-      window.location.href = "/production.html";
+      setPassword("");
+      acceptSession(data);
     } catch (err) {
       setState({
         kind: "error",
@@ -70,6 +90,13 @@ export default function App() {
       });
     }
   }
+
+  if (session) return <>
+    <header className="shell__header" style={{padding:"1rem"}}><span>{session.username}</span> <button onClick={logout}>Logout</button></header>
+    {session.must_change_password ? <main className="shell"><h1>Ganti password awal</h1><PasswordChangeForm api={api} onChanged={logout} /></main>
+      : session.system_director ? <><a href="/production.html">Kembali ke Production / Settings existing</a><SettingsPanel api={api} runtime />{session.workflow_authorization === "enforced" && <WorkflowTasks />}</>
+      : session.workflow_authorization === "enforced" ? <WorkflowTasks /> : <main className="shell"><h1>Akun aktif</h1><p>Permission produksi baru belum diaktifkan. Hubungi Direktur untuk akses yang sesuai.</p></main>}
+  </>;
 
   return (
     <div className="shell">

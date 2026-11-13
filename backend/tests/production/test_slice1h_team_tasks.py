@@ -215,6 +215,10 @@ async def test_gates_skip_design_for_non_print_only_with_session():
         with pytest.raises(Exception) as exc:
             await gates_open_for_schedule(job)
         assert "Design" in str(exc.value.detail)
+        # Explicit active bypass, not the stale payment mirror, opens payment.
+        from app.models.production.payment import PaymentBypass
+        session.add(PaymentBypass(job_id=job.id, reason="Non-print test authorization", authorized_by=1, active=True))
+        await session.flush()
         # With session → non-print-only skips design
         await gates_open_for_schedule(job, session)
 

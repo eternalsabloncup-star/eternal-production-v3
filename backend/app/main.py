@@ -23,7 +23,16 @@ async def lifespan(_: FastAPI):
 
 
 def create_app() -> FastAPI:
+    # Register additive metadata even when Settings is disabled. This performs
+    # no DB access and keeps ORM schema management aware of foreign keys.
+    from app.authorization import models as access_models  # noqa: F401
+    from app.authorization.ownership import TaskOwnership  # noqa: F401
+    from app.authorization.accounts import AccountCredential  # noqa: F401
     settings = get_settings()
+    if settings.v3_workflow_authorization not in {"legacy", "enforced"}:
+        raise RuntimeError("Unknown workflow authorization mode")
+    if settings.v3_workflow_authorization == "enforced" and (not settings.v3_settings_enabled or settings.app_env != "test"):
+        raise RuntimeError("Workflow cutover is restricted to Settings-enabled test sandbox")
     application = FastAPI(
         title=settings.app_name,
         version="0.2.0",
@@ -38,6 +47,12 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    if settings.v3_settings_enabled:
+        from app.authorization.api import router as settings_router
+        application.include_router(settings_router, prefix=settings.api_prefix)
+    if settings.v3_settings_enabled and settings.v3_workflow_authorization == "enforced":
+        from app.authorization.workflow_api import router as workflow_access_router
+        application.include_router(workflow_access_router, prefix=settings.api_prefix)
     register_exception_handlers(application)
     application.include_router(health_router, prefix=settings.api_prefix)
     application.include_router(auth_router, prefix=settings.api_prefix)

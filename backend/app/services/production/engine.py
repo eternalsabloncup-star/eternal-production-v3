@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.production.attachment import ProductionAttachment  # noqa: F401
@@ -36,13 +36,14 @@ _CANCELLED_ASSIGNMENT = frozenset({"cancelled", "canceled", "void", "cancelled_r
 
 
 def _require(user: User, *perms: str) -> None:
-    have = set(user.permissions or [])
-    if not set(perms).issubset(have):
+    from app.authorization.workflow import legacy_allowed
+    if not legacy_allowed(user, perms):
         raise HTTPException(403, "Izin tidak mencukupi")
 
 
 def _branch(user: User, branch_id: str) -> None:
-    if branch_id not in list(user.branch_ids or []):
+    from app.authorization.workflow import branch_allowed
+    if not branch_allowed(user, branch_id):
         raise HTTPException(403, "Cabang di luar lingkup akses")
 
 
@@ -229,8 +230,12 @@ async def ensure_job(
     buffer_stock: bool | None = None,
     urgent_state: str | None = None,
     line_items: list[dict] | None = None,
+    commit: bool = True,
 ) -> ProductionJob:
-    """Create or refresh job. Classifications stay null/unknown unless explicit."""
+    """Create or refresh job. Classifications stay null/unknown unless explicit.
+
+    commit=False leaves the write pending in the caller's transaction (bulk sync).
+    """
     from app.services.production.prep import sync_job_lines_from_so_detail
 
     _require(user, P.JOB_CREATE)
@@ -255,6 +260,9 @@ async def ensure_job(
             existing.urgent_state = urgent_v
         if line_items:
             await sync_job_lines_from_so_detail(session, existing, line_items)
+        if not commit:
+            await session.flush()
+            return existing
         await session.commit()
         await session.refresh(existing)
         return existing
@@ -284,6 +292,9 @@ async def ensure_job(
                 processing_status="Baru",
             )
         )
+    if not commit:
+        await session.flush()
+        return job
     await session.commit()
     await session.refresh(job)
     return job
@@ -346,8 +357,27 @@ async def gates_open_for_schedule(
                     )
         else:
             raise HTTPException(409, "Design belum disetujui/bypass")
-    if job.payment_status not in {"approved", "bypassed"}:
+    from app.services.production.payment_gate import effective_status
+    if session is None or await effective_status(session, job.id) not in {"approved", "bypassed"}:
         raise HTTPException(409, "Payment belum disetujui/bypass")
+
+
+async def _lock_payment_job(session: AsyncSession, user: User, job: ProductionJob) -> ProductionJob:
+    """Serialize gate mutations and schedule creation; refresh identity-map state."""
+    _branch(user, job.branch_id)
+    locked = await session.scalar(
+        select(ProductionJob).where(ProductionJob.id == job.id)
+        .with_for_update().execution_options(populate_existing=True)
+    )
+    if locked is None:
+        raise HTTPException(404, "Production job tidak ditemukan")
+    _branch(user, locked.branch_id)
+    return locked
+
+
+async def _refresh_payment_gate(session: AsyncSession, job: ProductionJob) -> None:
+    from app.services.production.payment_gate import effective_status
+    job.payment_status = await effective_status(session, job.id)
 
 
 # ---- Design ----
@@ -467,6 +497,59 @@ async def decide_design(
 # ---- Payment ----
 
 
+async def revalidate_receipt(session, user, receipt_id, *, reason, idempotency_key):
+    """Explicit, fail-closed verification; never revive invalidated evidence."""
+    import hashlib
+    _require(user, P.PAYMENT_RECORD)
+    if not reason.strip() or not 8 <= len(idempotency_key) <= 120:
+        raise HTTPException(422, "Alasan dan idempotency key wajib")
+    row = await session.get(PaymentReceiptRef, receipt_id)
+    if row is None:
+        raise HTTPException(404, "Receipt tidak ditemukan")
+    job = await _lock_payment_job(session, user, await get_job(session, row.job_id))
+    await session.refresh(row)
+    key = "pay-revalidate:" + hashlib.sha256(idempotency_key.encode()).hexdigest()
+    prior = await session.scalar(select(ProductionEvent).where(ProductionEvent.idempotency_key == key))
+    if prior is not None:
+        result = json.loads(prior.payload_json)
+        if prior.job_id != job.id or result["receipt_id"] != row.id or prior.reason != reason.strip():
+            raise HTTPException(409, "Idempotency key dipakai untuk request berbeda")
+        from app.services.production.payment_gate import effective_status
+        active = row.status == "valid" and row.evidence_verified and row.amount is not None and row.amount > 0
+        return {**result, "verified": bool(active),
+                "verification_error": result.get("verification_error") if active or not result["verified"] else "evidence_no_longer_active",
+                "payment_status": await effective_status(session, job.id), "replayed": True}
+    if row.status != "valid":
+        raise HTTPException(409, "Receipt invalidated/reversed tidak dapat diaktifkan ulang")
+    before = {"verified": row.evidence_verified, "amount": str(row.amount)}
+    result = {"receipt_id": row.id, "verified": False, "verification_error": None}
+    from app.services.accurate_evidence import require_valid_receipt
+    try:
+        if not job.accurate_id:
+            raise HTTPException(409, "Identitas SO resmi belum tersedia")
+        evidence = await require_valid_receipt(row.accurate_receipt_id,
+            expected_so_number=job.accurate_so_number, expected_so_id=job.accurate_id,
+            expected_branch_id=job.branch_id)
+        if evidence["accurate_receipt_id"] != row.accurate_receipt_id:
+            raise HTTPException(409, "Identitas receipt berubah; perlu review")
+    except HTTPException as exc:
+        row.evidence_verified = False
+        result["verification_error"] = "source_unavailable" if exc.status_code >= 500 else "evidence_rejected"
+    else:
+        row.evidence_verified = True
+        row.amount = evidence["amount"]
+        row.accurate_receipt_number = evidence.get("accurate_receipt_number")
+        result.update(verified=True, amount=str(row.amount), live_verified=evidence["live_verified"],
+                      source=evidence.get("source"), payload_status=evidence["payload_status"])
+    await session.flush()
+    await _refresh_payment_gate(session, job)
+    result.update(payment_status=job.payment_status, before=before)
+    session.add(ProductionEvent(job_id=job.id, event_type="payment_receipt_revalidated",
+        actor_user_id=user.id, idempotency_key=key, reason=reason.strip(), payload_json=json.dumps(result)))
+    await session.commit()
+    return result
+
+
 async def record_payment_receipt(
     session: AsyncSession,
     user: User,
@@ -476,35 +559,80 @@ async def record_payment_receipt(
     accurate_receipt_number: str | None = None,
     amount: Decimal | None = None,
     note: str | None = None,
+    idempotency_key: str | None = None,
 ) -> PaymentReceiptRef:
+    """Record verified gateway evidence; legacy amount/number inputs are ignored."""
     _require(user, P.PAYMENT_RECORD)
-    _branch(user, job.branch_id)
-    if not accurate_receipt_id.strip():
-        raise HTTPException(422, "Referensi receipt Accurate wajib")
+    job = await _lock_payment_job(session, user, job)
+    if idempotency_key is not None and not 8 <= len(idempotency_key.strip()) <= 120:
+        raise HTTPException(422, "Idempotency key tidak valid")
+    idempotency_key = idempotency_key.strip() if idempotency_key else None
+    if not job.accurate_id:
+        raise HTTPException(409, "Identitas resmi SO belum tersedia untuk verifikasi receipt")
     from app.services.accurate_evidence import require_valid_receipt
 
     evidence = await require_valid_receipt(
         accurate_receipt_id,
         expected_so_number=job.accurate_so_number,
         expected_branch_id=job.branch_id,
+        expected_so_id=job.accurate_id,
     )
+    rid = evidence["accurate_receipt_id"]
+    existing = None
+    if idempotency_key:
+        existing = await session.scalar(select(PaymentReceiptRef).where(
+            PaymentReceiptRef.job_id == job.id,
+            PaymentReceiptRef.idempotency_key == idempotency_key,
+        ))
+        if existing is not None and existing.accurate_receipt_id != rid:
+            raise HTTPException(409, "Idempotency key dipakai untuk receipt berbeda")
+    if existing is None:
+        existing = await session.scalar(select(PaymentReceiptRef).where(
+            PaymentReceiptRef.accurate_receipt_id == rid,
+            PaymentReceiptRef.status == "valid",
+        ))
+    if existing is not None:
+        if existing.job_id != job.id:
+            raise HTTPException(409, "Receipt sudah terhubung ke job lain")
+        if idempotency_key and existing.idempotency_key not in {None, idempotency_key}:
+            raise HTTPException(409, "Receipt sudah memiliki idempotency key berbeda")
+        if idempotency_key and existing.idempotency_key is None:
+            existing.idempotency_key = idempotency_key
+        if existing.status == "valid" and not existing.evidence_verified:
+            existing.amount = evidence["amount"]
+            existing.evidence_verified = True
+            session.add(ProductionEvent(
+                job_id=job.id, event_type="payment_receipt_reverified",
+                idempotency_key=f"pay-reverified:{existing.id}", actor_user_id=user.id,
+                payload_json=json.dumps({"receipt_id": existing.id}),
+            ))
+        await session.flush()
+        # Do not revive invalidated evidence on an idempotent replay.
+        await _refresh_payment_gate(session, job)
+        await session.commit()
+        return existing
     row = PaymentReceiptRef(
-        job_id=job.id,
-        accurate_receipt_id=accurate_receipt_id.strip(),
-        accurate_receipt_number=accurate_receipt_number,
-        amount=amount,
-        status="valid",
-        recorded_by=user.id,
-        note=(note or "")
-        + (
-            f" | evidence:{evidence.get('mode')}:{evidence.get('payload_status', '')}"
-        ),
+        job_id=job.id, accurate_receipt_id=rid,
+        accurate_receipt_number=evidence.get("accurate_receipt_number"),
+        amount=evidence["amount"], evidence_verified=True,
+        idempotency_key=idempotency_key, status="valid", recorded_by=user.id,
+        note=(note or "") + f" | evidence:{evidence['mode']}:{evidence['payload_status']}",
     )
     session.add(row)
-    # Valid receipt opens payment gate (no manual approve without evidence).
-    job.payment_status = "approved"
-    await _mark_terproses(session, job)
-    await session.commit()
+    try:
+        await session.flush()
+        await _refresh_payment_gate(session, job)
+        await _mark_terproses(session, job)
+        session.add(ProductionEvent(
+            job_id=job.id, event_type="payment_receipt_verified",
+            idempotency_key=f"pay-receipt:{row.id}", actor_user_id=user.id,
+            payload_json=json.dumps({"receipt_id": row.id, "accurate_receipt_id": rid,
+                                     "amount": str(row.amount)}),
+        ))
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(409, "Receipt / idempotency key sudah digunakan") from exc
     await session.refresh(row)
     return row
 
@@ -517,7 +645,7 @@ async def bypass_payment(
     reason: str,
 ) -> PaymentBypass:
     _require(user, P.PAYMENT_BYPASS)
-    _branch(user, job.branch_id)
+    job = await _lock_payment_job(session, user, job)
     if not reason.strip():
         raise HTTPException(422, "Bypass payment memerlukan alasan")
     row = PaymentBypass(
@@ -527,7 +655,8 @@ async def bypass_payment(
         active=True,
     )
     session.add(row)
-    job.payment_status = "bypassed"
+    await session.flush()
+    await _refresh_payment_gate(session, job)
     await _mark_terproses(session, job)
     session.add(
         ProductionEvent(
@@ -557,25 +686,22 @@ async def revoke_payment_bypass(
     reason: str,
 ) -> PaymentBypass:
     _require(user, P.PAYMENT_REVOKE)
+    if not reason.strip():
+        raise HTTPException(422, "Alasan pencabutan wajib")
     row = await session.get(PaymentBypass, bypass_id)
     if row is None or not row.active:
         raise HTTPException(404, "Bypass tidak aktif")
     job = await get_job(session, row.job_id)
-    _branch(user, job.branch_id)
+    job = await _lock_payment_job(session, user, job)
+    await session.refresh(row)
+    if not row.active:
+        raise HTTPException(409, "Bypass sudah dicabut")
     row.active = False
     row.revoked_by = user.id
     row.revoke_reason = reason
     row.revoked_at = datetime.now(UTC)
-    # Re-evaluate gate: any valid receipt keeps approval; else pending.
-    valid = await session.scalar(
-        select(func.count())
-        .select_from(PaymentReceiptRef)
-        .where(
-            PaymentReceiptRef.job_id == job.id,
-            PaymentReceiptRef.status == "valid",
-        )
-    )
-    job.payment_status = "approved" if int(valid or 0) > 0 else "pending"
+    await session.flush()
+    await _refresh_payment_gate(session, job)
     session.add(
         ProductionEvent(
             job_id=job.id,
@@ -605,30 +731,22 @@ async def invalidate_receipt(
     reason: str,
 ) -> PaymentReceiptRef:
     _require(user, P.PAYMENT_REVOKE)
+    if not reason.strip():
+        raise HTTPException(422, "Alasan pencabutan wajib")
     row = await session.get(PaymentReceiptRef, receipt_id)
     if row is None:
         raise HTTPException(404, "Receipt tidak ditemukan")
     job = await get_job(session, row.job_id)
-    _branch(user, job.branch_id)
+    job = await _lock_payment_job(session, user, job)
+    await session.refresh(row)
+    if row.status != "valid":
+        await _refresh_payment_gate(session, job)
+        await session.commit()
+        return row
     row.status = "invalidated"
     row.note = (row.note or "") + f" | invalidated: {reason}"
-    # Close gate for unfinished work if no other valid evidence/bypass.
-    valid = await session.scalar(
-        select(func.count())
-        .select_from(PaymentReceiptRef)
-        .where(
-            PaymentReceiptRef.job_id == job.id,
-            PaymentReceiptRef.status == "valid",
-            PaymentReceiptRef.id != row.id,
-        )
-    )
-    active_bypass = await session.scalar(
-        select(func.count())
-        .select_from(PaymentBypass)
-        .where(PaymentBypass.job_id == job.id, PaymentBypass.active.is_(True))
-    )
-    if int(valid or 0) == 0 and int(active_bypass or 0) == 0:
-        job.payment_status = "pending"
+    await session.flush()
+    await _refresh_payment_gate(session, job)
     # Append-only audit event (never silent overwrite).
     session.add(
         ProductionEvent(
@@ -667,7 +785,8 @@ async def create_assignment(
     note: str | None = None,
 ) -> ScheduleAssignment:
     _require(user, P.SCHEDULE_MANAGE)
-    _branch(user, job.branch_id)
+    job = await _lock_payment_job(session, user, job)
+    await _refresh_payment_gate(session, job)
     await gates_open_for_schedule(job, session)
     if qty_planned <= 0:
         raise HTTPException(422, "Qty rencana harus > 0")
@@ -1056,6 +1175,24 @@ async def correct_output(
     src = await session.get(ProductionEvent, source_event_id)
     if src is None or src.job_id != job.id or src.event_type != "output_confirmed":
         raise HTTPException(404, "Output event sumber tidak ditemukan")
+    payload_json = f'{{"source_output_id":{src.id}}}'
+
+    def _same(row: ProductionEvent) -> bool:
+        return (
+            row.job_id == job.id
+            and row.event_type == "output_correction"
+            and row.qty_physical == qty_physical_delta
+            and (row.reason or "") == reason.strip()
+            and row.payload_json == payload_json
+        )
+
+    prior = await session.scalar(
+        select(ProductionEvent).where(ProductionEvent.idempotency_key == idempotency_key)
+    )
+    if prior is not None:
+        if not _same(prior):
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return prior
     event = ProductionEvent(
         job_id=job.id,
         assignment_id=src.assignment_id,
@@ -1068,20 +1205,33 @@ async def correct_output(
         idempotency_key=idempotency_key,
         actor_user_id=user.id,
         reason=reason.strip(),
-        payload_json=f'{{"source_output_id":{src.id}}}',
+        payload_json=payload_json,
     )
     session.add(event)
-    if src.assignment_id:
-        assignment = await session.get(ScheduleAssignment, src.assignment_id)
-        if assignment:
-            assignment.qty_confirmed = assignment.qty_confirmed + qty_physical_delta
-            if assignment.qty_confirmed < 0:
-                raise HTTPException(409, "Koreksi membuat qty confirmed negatif")
     try:
+        if src.assignment_id:
+            assignment = await session.get(ScheduleAssignment, src.assignment_id)
+            if assignment:
+                assignment.qty_confirmed = assignment.qty_confirmed + qty_physical_delta
+                if assignment.qty_confirmed < 0:
+                    raise HTTPException(409, "Koreksi membuat qty confirmed negatif")
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        raise HTTPException(409, "Idempotency key duplikat") from exc
+        orig = exc.orig
+        if (
+            getattr(orig, "sqlstate", None) != "23505"
+            or "uq_production_events_idempotency" not in str(orig)
+        ):
+            raise
+        raced = await session.scalar(
+            select(ProductionEvent).where(ProductionEvent.idempotency_key == idempotency_key)
+        )
+        if raced is None:
+            raise
+        if not _same(raced):
+            raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+        return raced
     await session.refresh(event)
     return event
 
@@ -2775,6 +2925,8 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
     _branch(user, job.branch_id)
     from app.models.production.prep import JobLineQty, PrepEvent, PrepState
 
+    from app.services.production.payment_gate import effective_status
+    payment_status = await effective_status(session, job.id)
     designs = (
         await session.scalars(
             select(DesignVersion)
@@ -2835,7 +2987,7 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
             .order_by(ProductionEvent.created_at.asc(), ProductionEvent.id.asc())
         )
     ).all()
-    return {
+    payload = {
         "job": {
             "id": job.id,
             "accurate_so_number": job.accurate_so_number,
@@ -2845,7 +2997,7 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
             "buffer_stock": job.buffer_stock,
             "urgent_state": job.urgent_state,
             "design_status": job.design_status,
-            "payment_status": job.payment_status,
+            "payment_status": payment_status,
             "sample_status": job.sample_status,
             "processing_status": job.processing_status,
         },
@@ -2970,6 +3122,9 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
             session, user, job, list(events)
         ),
     }
+    from app.authorization.workflow import redact_board
+    return redact_board(user,payload)
+
 
 
 # ---- Team tasks read-model (Slice 1H) ----
@@ -3098,6 +3253,7 @@ def derive_team_tasks_for_job(
     prep_states: list,
     samples: list,
     events: list,
+    payment_status: str | None = None,
 ) -> list[dict]:
     """Pure derivation of official Tugas Tim from existing V3 tables.
 
@@ -3109,7 +3265,9 @@ def derive_team_tasks_for_job(
     has_non_print = any(
         (getattr(ln, "production_process", None) or "") == "non_print" for ln in lines
     )
-    payment_ok = job.payment_status in {"approved", "bypassed"}
+    # Pure-call compatibility; DB-backed callers always pass the effective status.
+    payment_status = payment_status if payment_status is not None else job.payment_status
+    payment_ok = payment_status in {"approved", "bypassed"}
     design_ok = job.design_status in {"approved", "bypassed"}
     pending_design = [d for d in designs if getattr(d, "status", None) == "pending"]
     uploaded_design = [
@@ -3353,6 +3511,8 @@ def derive_team_tasks_for_job(
     # Unknown-only: no fake print/non-print task chain — classification lives on Jadwal/Inbox.
     # (empty list on purpose)
 
+    for task in tasks:
+        task["payment_status"] = payment_status
     return tasks
 
 
@@ -3369,25 +3529,53 @@ async def list_team_tasks(
     synced: list[str] = []
     if sync_ensure and sync_payloads:
         _require(user, P.JOB_CREATE)
-        for payload in sync_payloads:
+        from app.authorization.workflow import branch_allowed, branch_allowed_for
+        # One transaction for the whole page: any failure leaves no partial sync.
+        # Rows are written in sorted SO order so concurrent syncs take unique-index
+        # locks in the same order (no lock-order deadlock); the response keeps input order.
+        indexed = []
+        for position, payload in enumerate(sync_payloads):
             so = str(payload.get("accurate_so_number") or "").strip()
             branch_id = str(payload.get("branch_id") or "").strip()
-            if not so or not branch_id:
-                continue
-            if branch_id not in list(user.branch_ids or []):
-                continue
-            await ensure_job(
-                session,
-                user,
-                accurate_so_number=so,
-                branch_id=branch_id,
-                accurate_id=payload.get("accurate_id"),
-                customer_name=payload.get("customer_name"),
-                buffer_stock=payload.get("buffer_stock"),
-                urgent_state=payload.get("urgent_state"),
-                line_items=payload.get("line_items"),
-            )
-            synced.append(so)
+            if so and branch_id:
+                indexed.append((so, position, branch_id, payload))
+        done: dict[int, str] = {}
+        try:
+            for so, position, branch_id, payload in sorted(indexed, key=lambda t: (t[0], t[1])):
+                if not branch_allowed(user, branch_id) or not branch_allowed_for(
+                    user, "job.create", branch_id
+                ):
+                    continue
+                await ensure_job(
+                    session,
+                    user,
+                    accurate_so_number=so,
+                    branch_id=branch_id,
+                    accurate_id=payload.get("accurate_id"),
+                    customer_name=payload.get("customer_name"),
+                    buffer_stock=payload.get("buffer_stock"),
+                    urgent_state=payload.get("urgent_state"),
+                    line_items=payload.get("line_items"),
+                    commit=False,
+                )
+                done[position] = so
+            await session.commit()
+            synced.extend(done[k] for k in sorted(done))
+        except (IntegrityError, DBAPIError) as exc:
+            await session.rollback()
+            # Only concurrency outcomes are retryable: unique violation from a racing
+            # insert, deadlock, serialization failure. Anything else is a real fault.
+            if getattr(exc.orig, "sqlstate", None) not in {"23505", "40P01", "40001"}:
+                raise
+            from app.core.errors import AppError
+            raise AppError(
+                "Sinkronisasi bersamaan terdeteksi; tidak ada data tertulis, coba lagi",
+                code="sync_conflict_nothing_written",
+                status_code=409,
+            ) from exc
+        except BaseException:
+            await session.rollback()
+            raise
 
     from app.models.production.prep import JobLineQty, PrepState
 
@@ -3397,9 +3585,11 @@ async def list_team_tasks(
         if cleaned:
             q = q.where(ProductionJob.accurate_so_number.in_(cleaned))
     jobs = (await session.scalars(q.order_by(ProductionJob.id.asc()))).all()
-    allowed_branches = set(user.branch_ids or [])
-    jobs = [j for j in jobs if j.branch_id in allowed_branches]
+    from app.authorization.workflow import branch_allowed
+    jobs = [j for j in jobs if branch_allowed(user, j.branch_id)]
 
+    from app.services.production.payment_gate import effective_statuses
+    payment_states = await effective_statuses(session, [job.id for job in jobs])
     tasks: list[dict] = []
     job_summaries: list[dict] = []
     for job in jobs:
@@ -3443,6 +3633,7 @@ async def list_team_tasks(
             prep_states=list(prep_states),
             samples=list(samples),
             events=list(events),
+            payment_status=payment_states[job.id],
         )
         tasks.extend(derived)
         job_summaries.append(
@@ -3452,7 +3643,7 @@ async def list_team_tasks(
                 "branch_id": job.branch_id,
                 "customer_name": job.customer_name,
                 "design_status": job.design_status,
-                "payment_status": job.payment_status,
+                "payment_status": payment_states[job.id],
                 "processing_status": job.processing_status,
                 "has_print": any(
                     (ln.production_process or "") == "print" for ln in lines

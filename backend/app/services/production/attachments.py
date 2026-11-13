@@ -25,8 +25,8 @@ from app.services.production.engine import _branch, _require
 
 
 def _require_any(user: User, *perms: str) -> None:
-    have = set(user.permissions or [])
-    if not (have & set(perms)):
+    from app.authorization.workflow import legacy_allowed
+    if not any(legacy_allowed(user, [p]) for p in perms):
         raise HTTPException(403, "Izin tidak mencukupi")
 
 ALLOWED_MIME = frozenset(
@@ -142,8 +142,8 @@ async def get_attachment_for_user(
     user: User,
     attachment_id: int,
 ) -> ProductionAttachment:
-    have = set(user.permissions or [])
-    if not ({P.DELIVERY_MANAGE, P.JOB_READ} & have):
+    from app.authorization.workflow import legacy_allowed
+    if not any(legacy_allowed(user, [p]) for p in (P.DELIVERY_MANAGE, P.JOB_READ)):
         raise HTTPException(403, "Izin tidak mencukupi")
     row = await session.get(ProductionAttachment, attachment_id)
     if row is None:

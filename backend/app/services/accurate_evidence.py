@@ -1,12 +1,13 @@
 """Authoritative Accurate evidence checks for payment receipts and Surat Jalan.
 
 Fail closed when the read gateway is unconfigured, unreachable, or the
-document is missing/invalid. Test env skips unless V3_ACCURATE_EVIDENCE_ENFORCE
-is enabled — never invents success.
+document is missing/invalid. Receipts always require evidence, including tests;
+the older test-only skip remains limited to Surat Jalan verification.
 """
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from urllib.parse import quote
 
 from fastapi import HTTPException
@@ -14,17 +15,9 @@ from fastapi import HTTPException
 from app.core.config import get_settings
 from app.services.accurate_read_gateway import ReadGateway
 
-_INVALID_RECEIPT_STATUS = {
-    "void",
-    "voided",
-    "cancelled",
-    "canceled",
-    "reversed",
-    "invalid",
-    "draft",
-    "unposted",
-    "unknown",
-}
+# Only the posted contract is currently established by the gateway tests.
+# Unmapped upstream statuses require explicit contract verification.
+_VALID_RECEIPT_STATUS = {"posted"}
 _INVALID_SJ_STATUS = {
     "void",
     "voided",
@@ -63,17 +56,11 @@ async def require_valid_receipt(
     expected_so_number: str | None = None,
     expected_branch_id: str | None = None,
     expected_customer_id: str | None = None,
+    expected_so_id: str | None = None,
 ) -> dict:
     rid = (accurate_receipt_id or "").strip()
     if not rid:
         raise HTTPException(422, "Referensi receipt Accurate wajib")
-    if not _enforce():
-        return {
-            "verified": False,
-            "mode": "test_skip",
-            "accurate_receipt_id": rid,
-            "note": "Evidence enforce off (test) — not production authority",
-        }
     gateway = ReadGateway()
     try:
         data = await gateway.get(f"/receipts/{quote(rid, safe='')}")
@@ -103,14 +90,41 @@ async def require_valid_receipt(
 
     if data.get("cancelled") is True or data.get("reversed") is True:
         raise HTTPException(409, "Receipt Accurate tidak valid / sudah dibatalkan")
-    if data.get("verifiable") is False:
+    if data.get("verifiable") is not True:
         raise HTTPException(409, "Receipt Accurate tidak dapat diverifikasi")
 
     status = str(
         data.get("status") or data.get("receipt_status") or data.get("state") or ""
-    ).lower()
-    if status in _INVALID_RECEIPT_STATUS:
+    ).strip().lower()
+    if status not in _VALID_RECEIPT_STATUS:
         raise HTTPException(409, "Receipt Accurate tidak valid / sudah dibatalkan")
+
+    # Fixture evidence is restricted to isolated tests. Never infer authority
+    # from a successful HTTP response or a caller-supplied amount.
+    if data.get("live_verified") is not True and not (
+        get_settings().app_env == "test" and data.get("source") == "fixture"
+    ):
+        raise HTTPException(409, "Sumber receipt Accurate belum terverifikasi")
+    canonical_id = str(data.get("id") or "").strip()
+    if (
+        not canonical_id or len(canonical_id) > 120
+        or isinstance(data.get("id"), (bool, dict, list))
+        or (data.get("live_verified") is True and not canonical_id.isdigit())
+    ):
+        raise HTTPException(409, "Identitas receipt Accurate tidak valid")
+    try:
+        raw_amount = data["amount_decimal"] if "amount_decimal" in data else data.get("amount")
+        if isinstance(raw_amount, bool):
+            raise ValueError
+        effective_amount = Decimal(str(raw_amount))
+        if not effective_amount.is_finite() or effective_amount <= 0:
+            raise ValueError
+        # Match storage precision without turning a tiny positive into zero.
+        effective_amount = effective_amount.quantize(Decimal("0.01"))
+        if effective_amount <= 0 or effective_amount >= Decimal("1e16"):
+            raise ValueError
+    except (InvalidOperation, ValueError):
+        raise HTTPException(409, "Nilai efektif receipt Accurate harus positif")
 
     # SO link only from receipt→SO fields — never treat customer PO / missing link
     # as verification against the job.
@@ -123,15 +137,19 @@ async def require_valid_receipt(
                 409,
                 "Receipt Accurate tidak menautkan Sales Order — verifikasi ditolak",
             )
+
         if so_link != expected_so_number.strip():
             raise HTTPException(
                 409,
                 "Receipt Accurate tidak cocok dengan Sales Order job",
             )
 
+    if expected_so_id and str(data.get("sales_order_id") or "").strip() != expected_so_id.strip():
+        raise HTTPException(409, "Identitas Sales Order receipt tidak cocok / ambigu")
+
     branch = data.get("branch")
     branch_id = _party_id(branch) or str(data.get("branch_id") or "").strip()
-    if expected_branch_id and branch_id and branch_id != expected_branch_id.strip():
+    if expected_branch_id and branch_id != expected_branch_id.strip():
         raise HTTPException(409, "Receipt Accurate tidak cocok dengan cabang job")
 
     customer = data.get("customer")
@@ -146,13 +164,15 @@ async def require_valid_receipt(
     return {
         "verified": True,
         "mode": "gateway",
-        "accurate_receipt_id": rid,
+        "accurate_receipt_id": canonical_id,
+        "accurate_receipt_number": str(data.get("number") or "").strip() or None,
         "payload_status": status or "unknown",
         "sales_order_number": so_link or None,
         "branch_id": branch_id or None,
         "customer_id": customer_id or None,
-        "amount": data.get("amount"),
+        "amount": effective_amount,
         "live_verified": bool(data.get("live_verified")),
+        "source": data.get("source"),
     }
 
 

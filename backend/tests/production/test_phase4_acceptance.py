@@ -64,6 +64,8 @@ class _Gw:
         self.receipts = {
             "/receipts/RCP-OK-1": {
                 "id": "RCP-OK-1",
+                "source": "fixture",
+                "sales_order_id": "4000",
                 "status": "POSTED",
                 "cancelled": False,
                 "reversed": False,
@@ -296,7 +298,7 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
         await client.post(
             "/api/v1/production/jobs",
             headers=h,
-            json={"accurate_so_number": so, "branch_id": "branch-a"},
+            json={"accurate_so_number": so, "accurate_id": "4000", "branch_id": "branch-a"},
         )
     ).json()
     jid = job["id"]

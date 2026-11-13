@@ -10,9 +10,11 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Integer,
+    Index,
     Numeric,
     String,
     Text,
+    text,
     func,
 )
 from sqlalchemy.orm import Mapped, mapped_column
@@ -22,12 +24,19 @@ from app.db.base import Base
 
 class PaymentReceiptRef(Base):
     __tablename__ = "payment_receipt_refs"
+    __table_args__ = (
+        Index("uq_payment_receipt_active", "accurate_receipt_id", unique=True,
+              postgresql_where=text("status = 'valid'")),
+        Index("uq_payment_receipt_request", "job_id", "idempotency_key", unique=True),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     job_id: Mapped[int] = mapped_column(ForeignKey("production_jobs.id"), index=True)
     accurate_receipt_id: Mapped[str] = mapped_column(String(120))
+    idempotency_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
     accurate_receipt_number: Mapped[str | None] = mapped_column(String(120), nullable=True)
     amount: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    evidence_verified: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     status: Mapped[str] = mapped_column(String(32), default="valid")
     # valid|invalidated|reversed
     recorded_by: Mapped[int] = mapped_column(Integer)

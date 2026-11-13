@@ -97,6 +97,11 @@ async def _token(client: AsyncClient) -> str:
 async def test_full_happy_path_and_guards(
     client: AsyncClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from tests.production.payment_helpers import mock_receipts
+    mock_receipts(monkeypatch, {"/receipts/RCV-1": {
+        "id": "2101", "sales_order_number": "SO/PHASE2/001", "sales_order_id": "2100",
+        "branch": {"id": "branch-a"}, "amount": "1500000",
+    }})
     from tests.production.sj_line_helpers import sj_line_item
 
     async def _valid_sj(**kwargs):
@@ -130,6 +135,7 @@ async def test_full_happy_path_and_guards(
         headers=h,
         json={
             "accurate_so_number": "SO/PHASE2/001",
+            "accurate_id": "2100",
             "branch_id": "branch-a",
             "customer_name": "Customer A",
         },
@@ -373,14 +379,21 @@ async def test_full_happy_path_and_guards(
 
 
 @pytest.mark.asyncio
-async def test_cancel_remaining_preserves_confirmed(client: AsyncClient) -> None:
+async def test_cancel_remaining_preserves_confirmed(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.production.payment_helpers import mock_receipts
+    mock_receipts(monkeypatch, {
+        "/receipts/RCV-late": {"id": "2201", "sales_order_number": "SO/PHASE2/002",
+                              "sales_order_id": "2200", "branch": {"id": "branch-a"}, "amount": "1000"},
+        "/receipts/RCV-only": {"id": "2301", "sales_order_number": "SO/PHASE2/003",
+                              "sales_order_id": "2300", "branch": {"id": "branch-a"}, "amount": "1000"},
+    })
     token = await _token(client)
     h = {"Authorization": f"Bearer {token}"}
     job = (
         await client.post(
             "/api/v1/production/jobs",
             headers=h,
-            json={"accurate_so_number": "SO/PHASE2/002", "branch_id": "branch-a"},
+            json={"accurate_so_number": "SO/PHASE2/002", "accurate_id": "2200", "branch_id": "branch-a"},
         )
     ).json()
     job_id = job["id"]
@@ -446,7 +459,7 @@ async def test_cancel_remaining_preserves_confirmed(client: AsyncClient) -> None
         await client.post(
             "/api/v1/production/jobs",
             headers=h,
-            json={"accurate_so_number": "SO/PHASE2/003", "branch_id": "branch-a"},
+            json={"accurate_so_number": "SO/PHASE2/003", "accurate_id": "2300", "branch_id": "branch-a"},
         )
     ).json()
     d3 = (

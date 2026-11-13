@@ -222,8 +222,11 @@ async def test_design_payment_gates_independent_of_classification():
         await gates_open_for_schedule(job)
     assert "Payment" in str(exc2.value.detail)
 
+    # Payment P0: the legacy flag alone never opens the gate; only the ledger can.
     job.payment_status = "approved"
-    await gates_open_for_schedule(job)
+    with pytest.raises(Exception) as exc3:
+        await gates_open_for_schedule(job)
+    assert "Payment" in str(exc3.value.detail)
 
 
 @pytest.mark.asyncio

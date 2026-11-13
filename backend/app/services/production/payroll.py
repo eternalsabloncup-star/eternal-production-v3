@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from app.authorization.workflow import branch_allowed
+
 import json
 from datetime import date
 from decimal import Decimal
@@ -209,7 +211,7 @@ async def compute_run(
         asg = assignments[e.assignment_id]
         if branch_id and asg.branch_id != branch_id:
             continue
-        if asg.branch_id not in list(user.branch_ids or []):
+        if not branch_allowed(user, asg.branch_id):
             continue
         b = _acc(asg.operator_name, asg.branch_id)
         bucket = COLOR_BUCKET.get(int(e.color_pass or 1), "one")
@@ -234,7 +236,7 @@ async def compute_run(
         asg = assignments[e.assignment_id]
         if branch_id and asg.branch_id != branch_id:
             continue
-        if asg.branch_id not in list(user.branch_ids or []):
+        if not branch_allowed(user, asg.branch_id):
             continue
         b = _acc(asg.operator_name, asg.branch_id)
         bucket = COLOR_BUCKET.get(int(e.color_pass or 1), "one")
@@ -255,7 +257,7 @@ async def compute_run(
         asg = assignments[e.assignment_id]
         if branch_id and asg.branch_id != branch_id:
             continue
-        if asg.branch_id not in list(user.branch_ids or []):
+        if not branch_allowed(user, asg.branch_id):
             continue
         b = _acc(asg.operator_name, asg.branch_id)
         b["qty_screen"] = b["qty_screen"] + Decimal("1")
@@ -325,6 +327,5 @@ async def get_run(
         )
     ).all()
     # Filter lines to user's branches.
-    allowed = set(user.branch_ids or [])
-    lines = [ln for ln in lines if ln.branch_id in allowed]
+    lines = [ln for ln in lines if branch_allowed(user, ln.branch_id)]
     return run, list(lines)

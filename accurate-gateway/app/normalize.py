@@ -768,7 +768,9 @@ def normalize_receipt(raw: dict[str, Any]) -> dict[str, Any]:
         or raw.get("soNumber")
         or ""
     )
+    so_id = None
     if isinstance(so_number, dict):
+        so_id = _stable_int_id(so_number.get("id"))
         so_number = so_number.get("number") or so_number.get("no") or ""
     customer = raw.get("customer")
     if not isinstance(customer, dict):
@@ -780,12 +782,18 @@ def normalize_receipt(raw: dict[str, Any]) -> dict[str, Any]:
         "DRAFT",
         "UNPOSTED",
     }
+    # Do not fall through from an explicit zero to another positive field.
+    raw_amount = next((raw[k] for k in ("totalAmount", "amount", "paymentAmount")
+                       if raw.get(k) is not None), "0")
     return {
-        "id": str(raw.get("id") or raw.get("number") or raw.get("no") or ""),
+        "id": _stable_int_id(raw.get("id")) or "",
         "number": str(raw.get("number") or raw.get("no") or raw.get("id") or ""),
         "status": status,
         "sales_order_number": str(so_number or ""),
-        "amount": float(raw.get("totalAmount") or raw.get("amount") or raw.get("paymentAmount") or 0),
+        "sales_order_id": so_id,
+        # Preserve the numeric public contract; exact decimal is additive.
+        "amount": float(raw_amount),
+        "amount_decimal": str(raw_amount),
         "currency": str(raw.get("currency") or raw.get("currencyCode") or "IDR"),
         "paid_at": raw.get("transDate") or raw.get("chequeDate") or raw.get("paidAt"),
         "customer": _party(customer),

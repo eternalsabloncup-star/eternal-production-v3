@@ -30,6 +30,9 @@
   let inboxTotal = null; // Accurate total — never use as current-page KPI
   let inboxPageSize = 50;
   let selectedSo = null;
+  let paymentEpoch = 0;
+  let taskRequestSequence = 0;
+  const boardRequestSequence = Object.create(null);
   let boardCache = Object.create(null); // so -> board
   let jobCache = Object.create(null); // so -> job summary
   const inFlight = new Set();
@@ -63,12 +66,15 @@
   }
 
   function markAuthOk(me) {
+    if (me && me.must_change_password) { window.location.replace("/?view=password"); return; }
     authStatus = "ok";
     const perms = Array.isArray(me && me.permissions)
       ? me.permissions.map(String)
       : [];
     window.__V3_AUTH__ = {
       status: "ok",
+      settings_enabled: !!(me && me.settings_enabled),
+      system_director: !!(me && me.system_director),
       user_id: me && me.user_id != null ? Number(me.user_id) : null,
       username: me && me.username ? String(me.username) : null,
       role: me && me.role ? String(me.role) : null,
@@ -656,13 +662,33 @@
     }
     if (!response.ok) {
       let detail = "";
+      let errCode = "";
       try {
         const errBody = await response.json();
+        errCode = (errBody && errBody.error && errBody.error.code) || "";
         detail =
           (errBody && errBody.error && errBody.error.message) ||
           (typeof errBody.detail === "string" ? errBody.detail : "") ||
           "";
       } catch (_) {}
+      if (response.status === 409 && errCode === "access_changed_reconcile") {
+        // An earlier step was already saved: never present this as a plain failure.
+        Object.keys(boardCache).forEach(function (so) {
+          delete boardCache[so];
+        });
+        throw new Error(
+          "PERLU REKONSILIASI: akses berubah setelah satu langkah tersimpan. Data dimuat ulang — periksa hasilnya sebelum mengulang.",
+        );
+      }
+      if (
+        response.status === 409 &&
+        (errCode === "access_changed_nothing_written" ||
+          errCode === "sync_conflict_nothing_written")
+      ) {
+        throw new Error(
+          "Tidak ada data yang tersimpan (akses/sinkronisasi berubah). Aman untuk dicoba lagi setelah memuat ulang.",
+        );
+      }
       if (response.status === 503) {
         throw new Error("Gateway Accurate belum siap / tidak berwenang");
       }
@@ -1004,15 +1030,18 @@
   }
 
   async function lookupJob(so) {
+    const epoch = paymentEpoch;
     try {
       const job = await request(
         API + "/production/jobs/by-so/" + encodeURIComponent(so),
       );
+      if (epoch !== paymentEpoch) return null;
       jobCache[so] = job;
       const o = orderBySo(so);
       if (o) syncOrderGatesFromJob(o, job);
       return job;
     } catch (err) {
+      if (epoch !== paymentEpoch) return null;
       if (String(err.message || "").includes("belum dibuat") || String(err.message || "").includes("404")) {
         delete jobCache[so];
         return null;
@@ -1145,11 +1174,14 @@
   }
 
   async function loadBoard(so, force) {
+    const epoch = paymentEpoch;
+    const sequence = boardRequestSequence[so] = (boardRequestSequence[so] || 0) + 1;
     let job = jobCache[so];
     if (!job) job = await lookupJob(so);
     if (!job) return null;
     if (!force && boardCache[so]) return boardCache[so];
     const board = await request(API + "/production/jobs/" + job.id + "/board");
+    if (epoch !== paymentEpoch || sequence !== boardRequestSequence[so]) return null;
     board.sj_line_authority = mergeAuthorityRows(
       board.sj_line_authority || [],
       authorityOverlay[so] || [],
@@ -1160,26 +1192,58 @@
     return board;
   }
 
+  function invalidatePaymentView(so) {
+    const paymentDraft = selectedSo === so ? snapshotDeliveryDraft() : null;
+    paymentEpoch++;
+    taskRequestSequence++;
+    delete boardCache[so];
+    delete jobCache[so];
+    window.__V3_OFFICIAL_TASKS__ = [];
+    window.__V3_OFFICIAL_TASK_SOURCE__ = null;
+    const order = orderBySo(so);
+    if (order) syncOrderGatesFromJob(order, { id: order.v3JobId, design_status: order.design_status, payment_status: "pending" });
+    if (selectedSo === so) {
+      renderWorkflowDrawer(so);
+      restoreDeliveryDraft(paymentDraft);
+    }
+    if (typeof window.render === "function") window.render();
+  }
+
   async function mutate(lockKey, fn, opts) {
     if (inFlight.has(lockKey)) {
       toast("Transaksi masih diproses — tunggu selesai");
       return null;
     }
     inFlight.add(lockKey);
+    const affectedSo = opts && opts.so ? opts.so : selectedSo;
     try {
       const result = await fn();
       // Soft actions (lookup / field-select) must not wipe Delivery form inputs.
       if (opts && opts.soft) return result;
-      if (selectedSo) {
+      if (opts && opts.payment) {
+        invalidatePaymentView(affectedSo);
+        try {
+          await refreshOfficialTasks(undefined, true);
+          if (!boardCache[affectedSo]) await loadBoard(affectedSo, true);
+        } catch (refreshError) {
+          toast("Payment tersimpan; refresh gagal. Muat ulang sebelum tindakan berikutnya.");
+          throw refreshError;
+        }
+      }
+      if (selectedSo === affectedSo && selectedSo) {
         const draft = snapshotDeliveryDraft();
-        delete boardCache[selectedSo];
-        await loadBoard(selectedSo, true);
+        if (!(opts && opts.payment)) {
+          delete boardCache[selectedSo];
+          await loadBoard(selectedSo, true);
+        }
         renderWorkflowDrawer(selectedSo);
         restoreDeliveryDraft(draft);
       }
       if (typeof window.render === "function") window.render();
       return result;
     } catch (err) {
+      // A failed response can follow a committed payment write: fail closed.
+      if (opts && opts.payment) invalidatePaymentView(affectedSo);
       toast(err.message || "Transaksi gagal");
       throw err;
     } finally {
@@ -1866,6 +1930,7 @@
             : "") +
           '<label>Invalidate receipt id<input id="v3-pay-inv-id" type="number" placeholder="receipt row id"/></label>' +
           '<label>Invalidate reason<input id="v3-pay-inv-reason" placeholder="alasan wajib"/></label>' +
+          '<button type="button" class="btn sm" data-v3="pay-revalidate">Revalidasi receipt</button>' +
           '<button type="button" class="btn sm" data-v3="pay-invalidate">Invalidate receipt</button>' +
           historyList("Riwayat payment + audit", payHist),
       ) +
@@ -2199,6 +2264,16 @@
         );
         toast("Bypass dicabut");
         return;
+      }
+      if (action === "pay-revalidate") {
+        const rid = Number(field("v3-pay-inv-id"));
+        const reason = field("v3-pay-inv-reason");
+        if (!rid || !reason.trim()) throw new Error("Receipt row id dan alasan wajib");
+        const result = await request(API + "/production/jobs/payment/receipts/" + rid + "/revalidate", {
+          method: "POST", body: { reason: reason, idempotency_key: idemKey("revalidate") },
+        });
+        toast(result.verified ? "Receipt terverifikasi" : "Receipt tidak terverifikasi: " + result.verification_error);
+        return result;
       }
       if (action === "pay-invalidate") {
         const rid = field("v3-pay-inv-id");
@@ -2779,12 +2854,13 @@
         );
         const out = document.getElementById("v3-payroll-out");
         if (out) out.textContent = JSON.stringify(detail, null, 2);
+        window.v3LastPayrollRunId = run.id;
         toast("Payroll run #" + run.id);
         return;
       }
       throw new Error("Aksi tidak dikenali: " + action);
     },
-      { soft: soft },
+      { soft: soft, so: so, payment: action.indexOf("pay-") === 0 },
     ).catch(function () {
       /* toast already shown */
     });
@@ -3207,7 +3283,9 @@
     });
   }
 
-  async function refreshOfficialTasks(pageOrders) {
+  async function refreshOfficialTasks(pageOrders, readOnly) {
+    const epoch = paymentEpoch;
+    const sequence = ++taskRequestSequence;
     const rows = Array.isArray(pageOrders) ? pageOrders : window.orders || [];
     const jobs = rows
       .filter(function (o) {
@@ -3250,8 +3328,8 @@
         method: "POST",
         body: {
           so_numbers: soNumbers.length ? soNumbers : null,
-          sync_ensure: jobs.length > 0,
-          jobs: jobs.length ? jobs : null,
+          sync_ensure: !readOnly && jobs.length > 0,
+          jobs: !readOnly && jobs.length ? jobs : null,
         },
       });
     } catch (err) {
@@ -3265,6 +3343,7 @@
             : "");
         body = await request(q);
       } catch (err2) {
+        if (epoch !== paymentEpoch || sequence !== taskRequestSequence) return null;
         window.__V3_OFFICIAL_TASK_SOURCE__ = null;
         window.__V3_OFFICIAL_TASKS__ = [];
         window.__V3_OFFICIAL_TASK_ERROR__ =
@@ -3275,15 +3354,33 @@
         throw err2;
       }
     }
+    if (epoch !== paymentEpoch || sequence !== taskRequestSequence) return null;
     window.__V3_OFFICIAL_TASK_SOURCE__ = body && body.source;
     window.__V3_OFFICIAL_TASKS__ = mapOfficialTaskRows((body && body.tasks) || []);
     window.__V3_OFFICIAL_TASK_ERROR__ = null;
+    let selectedPaymentChanged = false;
     (body && body.jobs ? body.jobs : []).forEach(function (job) {
       if (!job) return;
+      const previous = jobCache[job.accurate_so_number];
+      if (!previous || previous.payment_status !== job.payment_status) {
+        delete boardCache[job.accurate_so_number];
+        if (selectedSo === job.accurate_so_number) selectedPaymentChanged = true;
+      }
       jobCache[job.accurate_so_number] = job;
       const o = orderBySo(job.accurate_so_number);
       if (o) syncOrderGatesFromJob(o, job);
     });
+    if (selectedPaymentChanged && selectedSo) {
+      const so = selectedSo;
+      const draft = snapshotDeliveryDraft();
+      renderWorkflowDrawer(so);
+      restoreDeliveryDraft(draft);
+      await loadBoard(so, true);
+      if (selectedSo === so && epoch === paymentEpoch && sequence === taskRequestSequence) {
+        renderWorkflowDrawer(so);
+        restoreDeliveryDraft(draft);
+      }
+    }
     if (typeof window.render === "function") window.render();
     return body;
   }
