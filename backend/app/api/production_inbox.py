@@ -71,6 +71,9 @@ async def inbox(
     for row in scoped:
         row["production_status"] = statuses.get(row["po_number"], "Baru")
     data["rows"] = scoped
+    from app.authorization.workflow import context
+    if context(user) and not context(user).access.director:
+        gateway_total = len(scoped)  # Never disclose totals from inaccessible branches.
     data["gateway_total"] = gateway_total
     # Preserve gateway server-side total for pagination; page length is len(rows).
     data["total"] = gateway_total

@@ -72,6 +72,7 @@ class PaymentReceiptBody(BaseModel):
     accurate_receipt_number: str | None = None
     amount: Decimal | None = None
     note: str | None = None
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class PaymentBypassBody(BaseModel):
@@ -217,7 +218,8 @@ class PrepBody(BaseModel):
     screen_size: str | None = None
 
 
-def _job_summary(job) -> dict:
+async def _job_summary(job, session) -> dict:
+    from app.services.production.payment_gate import effective_status
     return {
         "id": job.id,
         "accurate_so_number": job.accurate_so_number,
@@ -227,7 +229,7 @@ def _job_summary(job) -> dict:
         "buffer_stock": getattr(job, "buffer_stock", None),
         "urgent_state": getattr(job, "urgent_state", None),
         "design_status": job.design_status,
-        "payment_status": job.payment_status,
+        "payment_status": await effective_status(session, job.id),
         "sample_status": job.sample_status,
         "processing_status": job.processing_status,
     }
@@ -253,7 +255,7 @@ async def create_job(
         urgent_state=body.urgent_state,
         line_items=lines_payload,
     )
-    return _job_summary(job)
+    return await _job_summary(job, session)
 
 
 @router.get("/evidence/capability")
@@ -342,7 +344,7 @@ async def get_job_by_so(
     job = await engine.find_job_by_so(session, user, so_number)
     if job is None:
         raise HTTPException(404, "Production job belum dibuat untuk SO ini")
-    return _job_summary(job)
+    return await _job_summary(job, session)
 
 
 @router.get("/{job_id}/board")
@@ -385,11 +387,12 @@ async def get_job(
     user: User = Depends(require_permissions(P.JOB_READ)),
 ):
     job = await engine.get_job(session, job_id)
-    if job.branch_id not in list(user.branch_ids or []):
+    from app.authorization.workflow import branch_allowed
+    if not branch_allowed(user, job.branch_id):
         from fastapi import HTTPException
 
         raise HTTPException(403, "Cabang di luar lingkup akses")
-    return _job_summary(job)
+    return await _job_summary(job, session)
 
 
 @router.post("/{job_id}/design/versions")
@@ -497,8 +500,23 @@ async def payment_receipt(
         accurate_receipt_number=body.accurate_receipt_number,
         amount=body.amount,
         note=body.note,
+        idempotency_key=body.idempotency_key,
     )
     return {"id": row.id, "status": row.status}
+
+
+class RevalidateReceiptBody(RevokeBody):
+    idempotency_key: str = Field(min_length=8, max_length=120)
+
+
+@router.post("/payment/receipts/{receipt_id}/revalidate")
+async def payment_receipt_revalidate(
+    receipt_id: int, body: RevalidateReceiptBody,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    return await engine.revalidate_receipt(session, user, receipt_id,
+        reason=body.reason, idempotency_key=body.idempotency_key)
 
 
 @router.post("/{job_id}/payment/bypass")
@@ -1062,7 +1080,8 @@ async def list_attachments(
     user: User = Depends(require_permissions(P.JOB_READ)),
 ):
     job = await engine.get_job(session, job_id)
-    if job.branch_id not in list(user.branch_ids or []):
+    from app.authorization.workflow import branch_allowed
+    if not branch_allowed(user, job.branch_id):
         from fastapi import HTTPException
 
         raise HTTPException(403, "Cabang di luar lingkup akses")

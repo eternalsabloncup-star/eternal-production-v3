@@ -167,13 +167,19 @@ async def test_evidence_capability_and_enforce_blocks_receipt(
 @pytest.mark.asyncio
 async def test_invalidate_receipt_audits_and_closes_gate(
     client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from tests.production.payment_helpers import mock_receipts
+    mock_receipts(monkeypatch, {"/receipts/RCV-INV": {
+        "id": "3101", "sales_order_number": "SO/H31/INV", "sales_order_id": "3100",
+        "branch": {"id": "branch-a"}, "amount": "1000",
+    }})
     h = await _login(client)
     job = (
         await client.post(
             "/api/v1/production/jobs",
             headers=h,
-            json={"accurate_so_number": "SO/H31/INV", "branch_id": "branch-a"},
+            json={"accurate_so_number": "SO/H31/INV", "accurate_id": "3100", "branch_id": "branch-a"},
         )
     ).json()
     d = (

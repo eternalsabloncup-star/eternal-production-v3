@@ -531,7 +531,9 @@ def test_alembic_upgrade_downgrade_isolated():
         conn.execute(text("DROP TABLE IF EXISTS customer_access_tokens CASCADE"))
         conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
     command.stamp(cfg, "20261112_0006")
-    command.upgrade(cfg, "head")
+    # This reconstructed fixture removes only 0007–0009 objects. Later
+    # migrations have dedicated disposable-database tests from real baselines.
+    command.upgrade(cfg, "20261113_0009")
     with eng.connect() as conn:
         cols = {
             r[0]
@@ -565,5 +567,7 @@ def test_alembic_upgrade_downgrade_isolated():
             )
         }
         assert "screen_size" not in cols
-    command.upgrade(cfg, "head")
+    # This reconstructed fixture removes only 0007–0009 objects. Later
+    # migrations have dedicated disposable-database tests from real baselines.
+    command.upgrade(cfg, "20261113_0009")
     eng.dispose()

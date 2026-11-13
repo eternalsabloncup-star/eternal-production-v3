@@ -70,14 +70,15 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(
-        _: Request, exc: RequestValidationError
+        request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         return JSONResponse(
             status_code=422,
             content=_error_body(
                 code="validation_error",
                 message="Request validation failed",
-                details=exc.errors(),
+                details=[{k: v for k, v in e.items() if k in {"loc", "msg", "type"}} for e in exc.errors()]
+                if "/auth/" in request.url.path or "/settings/" in request.url.path else exc.errors(),
             ),
         )
 

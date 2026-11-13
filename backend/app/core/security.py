@@ -11,7 +11,7 @@ from typing import Any
 import jwt
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select
+from sqlalchemy import select, inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, get_settings
@@ -130,13 +130,36 @@ def decode_access_token(
         raise HTTPException(401, "Sesi tidak valid atau kedaluwarsa") from exc
 
 
+async def assert_legacy_auth_available(session: AsyncSession) -> None:
+    """Never resurrect pre-cutover sessions by disabling the Settings flag."""
+    from app.authorization.models import AccessState
+    connection = await session.connection()
+    schema = connection.sync_connection.get_execution_options().get("schema_translate_map", {}).get(None)
+    exists = await connection.run_sync(lambda conn: inspect(conn).has_table("access_state", schema=schema))
+    if exists and await session.scalar(select(AccessState.bootstrapped).where(AccessState.id == 1)):
+        raise HTTPException(503, "Settings authentication is initialized; V3_SETTINGS_ENABLED must remain enabled")
+
+
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
     session: AsyncSession = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
 ) -> User:
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(401, "Autentikasi diperlukan")
+    if settings.v3_settings_enabled:
+        from app.authorization.accounts import session_user, AccountCredential
+        access = await session_user(session, credentials.credentials,
+            allow_password_change=request.url.path.endswith('/auth/me'))
+        user = await session.get(User, access.user_id, populate_existing=True)
+        user._managed_access = access
+        if settings.v3_workflow_authorization == 'enforced':
+            from app.authorization.workflow import authorize_request
+            await authorize_request(session,user,request)
+        user._must_change_password = (await session.get(AccountCredential, user.id)).must_change_password
+        return user
+    await assert_legacy_auth_available(session)
     payload = decode_access_token(credentials.credentials, settings=settings)
     user_id = payload.get("sub")
     if not user_id:
@@ -154,8 +177,8 @@ def require_permissions(*needed: str):
         user: User = Depends(get_current_user),
         session: AsyncSession = Depends(get_db_session),
     ) -> User:
-        have = set(user.permissions or [])
-        if not set(needed).issubset(have):
+        from app.authorization.workflow import legacy_allowed
+        if not legacy_allowed(user, needed):
             from app.services.audit import record_auth_event
 
             await record_auth_event(
@@ -174,9 +197,5 @@ def require_permissions(*needed: str):
 
 
 def user_can_access_branch(user: User, branch_id: str | None) -> bool:
-    allowed = list(user.branch_ids or [])
-    if not allowed:
-        return False
-    if branch_id is None or branch_id == "":
-        return False
-    return branch_id in allowed
+    from app.authorization.workflow import branch_allowed
+    return bool(branch_id) and branch_allowed(user, branch_id)

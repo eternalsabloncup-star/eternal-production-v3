@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db_session
 from app.models.production.design import DesignVersion
 from app.services.production import customer_tokens as CT
+from app.services.production.payment_gate import effective_status
 
 router = APIRouter(tags=["customer-portal"])
 
@@ -78,14 +79,14 @@ async def customer_token_json(
         raw_token=token,
     )
     if row.scope == CT.SCOPE_LIVE_TRACKING:
-        return {
+        return JSONResponse({
             "scope": row.scope,
             "po_ref": job.accurate_so_number,
             "processing_status": job.processing_status,
             "design_status": job.design_status,
-            "payment_status": job.payment_status,
+            "payment_status": await effective_status(session, job.id),
             "disclaimer": "Bearer link is not legal identity proof.",
-        }
+        }, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
     if row.design_version_id is None:
         raise HTTPException(410, "Revisi design tidak terikat")
     ver = await session.get(DesignVersion, row.design_version_id)
@@ -116,12 +117,13 @@ async def customer_token_page(
             headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
         )
     if row.scope == CT.SCOPE_LIVE_TRACKING:
+        payment_status = await effective_status(session, job.id)
         body = (
             f"<h1>Eternal Packaging</h1>"
             f"<p class='sub'>Pelacakan pesanan (read-only)</p>"
             f"<div class='card'><p>PO: {_esc(job.accurate_so_number)}</p>"
             f"<p>Status proses: {_esc(job.processing_status)}</p>"
-            f"<p>Design: {_esc(job.design_status)} · Payment: {_esc(job.payment_status)}</p></div>"
+            f"<p>Design: {_esc(job.design_status)} · Payment: {_esc(payment_status)}</p></div>"
             "<p class='note'>Tautan ini tidak membuktikan identitas hukum pemegangnya.</p>"
         )
         return HTMLResponse(

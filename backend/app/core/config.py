@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     # Dedicated V3 secrets only — never copy ERP V1 JWT_SECRET / Accurate tokens.
     v3_jwt_secret: str = Field(default="", alias="V3_JWT_SECRET")
     v3_password_pepper: str = Field(default="", alias="V3_PASSWORD_PEPPER")
+    v3_workflow_authorization: str = Field(default="legacy", alias="V3_WORKFLOW_AUTHORIZATION")
+    v3_settings_enabled: bool = Field(default=False, alias="V3_SETTINGS_ENABLED")
     v3_jwt_hours: int = Field(default=12, alias="V3_JWT_HOURS")
     accurate_read_gateway_url: str = Field(
         default="", alias="V3_ACCURATE_READ_GATEWAY_URL"

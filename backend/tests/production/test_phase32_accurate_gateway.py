@@ -113,6 +113,8 @@ async def test_receipt_so_and_branch_mismatch(enforce, monkeypatch):
                 "cancelled": False,
                 "reversed": False,
                 "verifiable": True,
+                "source": "fixture",
+                "amount": 1000,
                 "sales_order_number": "SO-OTHER",
                 "branch": {"id": "BR-SBY", "name": "Surabaya"},
                 "customer": {"id": "C-1", "name": "A"},
@@ -178,9 +180,10 @@ async def test_receipt_missing_so_link_fails_closed(enforce, monkeypatch):
                 "cancelled": False,
                 "reversed": False,
                 "verifiable": True,
+                "source": "fixture",
+                "amount": 1000,
                 "sales_order_number": "",
                 "branch": {"id": "BR-JKT", "name": "Jakarta"},
-                "amount": 1000,
             }
         }
     )
@@ -202,9 +205,10 @@ async def test_receipt_ok_passes(enforce, monkeypatch):
                 "cancelled": False,
                 "reversed": False,
                 "verifiable": True,
+                "source": "fixture",
+                "amount": 1000,
                 "sales_order_number": "SO-1",
                 "branch": {"id": "BR-JKT", "name": "Jakarta"},
-                "amount": 1000,
                 "live_verified": False,
             }
         }
@@ -227,6 +231,8 @@ async def test_concurrent_evidence_reads(enforce, monkeypatch):
                 "cancelled": False,
                 "reversed": False,
                 "verifiable": True,
+                "source": "fixture",
+                "amount": 1000,
                 "sales_order_number": "SO-1",
                 "branch": {"id": "BR-JKT"},
             }
