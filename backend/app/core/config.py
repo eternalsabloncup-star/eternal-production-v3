@@ -38,8 +38,31 @@ class Settings(BaseSettings):
     database_echo: bool = Field(default=False, alias="DATABASE_ECHO")
 
     cors_origins: str = Field(
-        default="http://localhost:5173",
+        default="http://localhost:5173,http://127.0.0.1:5173",
         alias="CORS_ORIGINS",
+    )
+
+    # Dedicated V3 secrets only — never copy ERP V1 JWT_SECRET / Accurate tokens.
+    v3_jwt_secret: str = Field(default="", alias="V3_JWT_SECRET")
+    v3_password_pepper: str = Field(default="", alias="V3_PASSWORD_PEPPER")
+    v3_jwt_hours: int = Field(default=12, alias="V3_JWT_HOURS")
+    accurate_read_gateway_url: str = Field(
+        default="", alias="V3_ACCURATE_READ_GATEWAY_URL"
+    )
+    accurate_read_gateway_token: str = Field(
+        default="", alias="V3_ACCURATE_READ_GATEWAY_TOKEN"
+    )
+    # When true, payment receipts + SJ loading require live gateway verification.
+    # Default false only so APP_ENV=test can skip; non-test always enforces via
+    # accurate_evidence._enforce() even if this flag is false.
+    accurate_evidence_enforce: bool = Field(
+        default=False, alias="V3_ACCURATE_EVIDENCE_ENFORCE"
+    )
+    # Private local attachment root (POD photos/signatures). No public URLs.
+    # Never point this at ERP V1 storage paths.
+    attachment_root: str = Field(
+        default=str(_REPO_ROOT / "backend" / "var" / "attachments"),
+        alias="V3_ATTACHMENT_ROOT",
     )
 
     @property

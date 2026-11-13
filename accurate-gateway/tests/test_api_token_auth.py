@@ -1,0 +1,332 @@
+"""Focused tests for Accurate API Token 1.0.3 auth (fake credentials only)."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import hmac
+from datetime import datetime
+from typing import Callable
+from zoneinfo import ZoneInfo
+
+import httpx
+import pytest
+
+from app.accurate_auth import api_signature, api_timestamp, auth_headers, normalize_host
+from app.accurate_client import AccurateClient, AccurateUpstreamError
+from app.config import GatewaySettings
+
+FAKE_TOKEN = "test-api-token-not-real"
+FAKE_SECRET = "test-signature-secret-not-real"
+
+
+def test_timestamp_format_wib():
+    dt = datetime(2026, 3, 20, 10, 5, 9, tzinfo=ZoneInfo("Asia/Jakarta"))
+    assert api_timestamp(dt) == "20/03/2026 10:05:09"
+
+
+def test_signature_hmac_sha256_base64():
+    ts = "20/03/2026 10:05:09"
+    expected = base64.b64encode(
+        hmac.new(FAKE_SECRET.encode(), ts.encode(), hashlib.sha256).digest()
+    ).decode()
+    assert api_signature(FAKE_SECRET, ts) == expected
+
+
+def test_auth_headers_contain_bearer_timestamp_signature():
+    headers = auth_headers(
+        api_token=FAKE_TOKEN,
+        signature_secret=FAKE_SECRET,
+        now=datetime(2026, 3, 20, 10, 5, 9, tzinfo=ZoneInfo("Asia/Jakarta")),
+    )
+    assert headers["Authorization"] == f"Bearer {FAKE_TOKEN}"
+    assert headers["X-Api-Timestamp"] == "20/03/2026 10:05:09"
+    assert headers["X-Api-Signature"] == api_signature(
+        FAKE_SECRET, "20/03/2026 10:05:09"
+    )
+    assert FAKE_SECRET not in headers["X-Api-Signature"]
+    assert FAKE_SECRET not in headers["Authorization"]
+
+
+def test_normalize_host():
+    assert normalize_host("https://public.accurate.id/accurate/") == (
+        "https://public.accurate.id"
+    )
+    assert normalize_host("zeus.accurate.id") == "https://zeus.accurate.id"
+
+
+def _settings(**kwargs) -> GatewaySettings:
+    base = {
+        "ACCURATE_API_TOKEN": FAKE_TOKEN,
+        "ACCURATE_SIGNATURE_SECRET": FAKE_SECRET,
+        "ACCURATE_ACCOUNT_BASE": "https://account.accurate.id",
+        "GATEWAY_MODE": "live",
+        "GATEWAY_M2M_TOKEN": "test-m2m",
+    }
+    base.update(kwargs)
+    return GatewaySettings(_env_file=None, **base)
+
+
+def _patch_client(handler: Callable[[httpx.Request], httpx.Response], monkeypatch):
+    """Route AccurateClient httpx calls through an in-memory mock transport."""
+    real_async_client = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs = dict(kwargs)
+        kwargs["transport"] = httpx.MockTransport(handler)
+        kwargs["follow_redirects"] = False
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+
+
+@pytest.mark.asyncio
+async def test_api_token_do_resolves_host_and_lists_so(monkeypatch):
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path = request.url.path
+        host = request.url.host
+        if host == "account.accurate.id" and path.endswith("/api/api-token.do"):
+            assert request.method == "POST"
+            assert request.headers["Authorization"] == f"Bearer {FAKE_TOKEN}"
+            assert "X-Api-Timestamp" in request.headers
+            assert "X-Api-Signature" in request.headers
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": {
+                        "database": {
+                            "id": 99,
+                            "host": "https://public.accurate.id",
+                        }
+                    },
+                },
+            )
+        if host == "public.accurate.id" and "sales-order/list.do" in path:
+            assert request.url.params.get("sp.page") == "1"
+            assert request.url.params.get("sp.pageSize") == "10"
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": [
+                        {
+                            "id": 55,
+                            "number": "SO/TEST/1",
+                            "poNumber": "CUST-PO-9",
+                            "statusName": "OPEN",
+                            "customer": {"id": 1, "name": "X"},
+                            "branch": {"id": 2, "name": "JKT"},
+                            "totalAmount": 1000,
+                        }
+                    ],
+                    "sp": {"page": 1, "pageSize": 10, "rowCount": 42},
+                },
+            )
+        return httpx.Response(404, json={"s": False, "d": "unexpected"})
+
+    _patch_client(handler, monkeypatch)
+    client = AccurateClient(_settings())
+    listed = await client.list_sales_orders(limit=10, page=1)
+    rows = listed["rows"]
+    assert len(rows) == 1
+    assert rows[0]["number"] == "SO/TEST/1"
+    assert rows[0]["accurate_id"] == "55"
+    assert rows[0]["po_number"] == "CUST-PO-9"
+    assert listed["accurate_total"] == 42
+    assert listed["filter_incomplete"] is False
+    assert any(r.url.path.endswith("/api/api-token.do") for r in seen)
+
+
+@pytest.mark.asyncio
+async def test_database_pin_match_allows_traffic(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        path = request.url.path
+        if host == "account.accurate.id" and path.endswith("/api/api-token.do"):
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": {
+                        "database": {
+                            "id": 823960,
+                            "host": "https://public.accurate.id",
+                        }
+                    },
+                },
+            )
+        if "sales-order/list.do" in path:
+            return httpx.Response(
+                200, json={"s": True, "d": [], "sp": {"rowCount": 0}}
+            )
+        return httpx.Response(404, json={"s": False})
+
+    _patch_client(handler, monkeypatch)
+    client = AccurateClient(_settings(**{"ACCURATE_DATABASE_ID": "823960"}))
+    listed = await client.list_sales_orders(limit=5)
+    assert listed["rows"] == []
+
+
+@pytest.mark.asyncio
+async def test_database_pin_mismatch_fails_closed(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "account.accurate.id":
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": {
+                        "database": {
+                            "id": 111,
+                            "host": "https://public.accurate.id",
+                        }
+                    },
+                },
+            )
+        return httpx.Response(500, json={"s": False})
+
+    _patch_client(handler, monkeypatch)
+    client = AccurateClient(_settings(**{"ACCURATE_DATABASE_ID": "823960"}))
+    with pytest.raises(AccurateUpstreamError) as exc:
+        await client.list_sales_orders(limit=5)
+    assert exc.value.code == "accurate_database_mismatch"
+    assert "823960" not in (exc.value.message or "")  # no pin value echoed as secret
+
+
+@pytest.mark.asyncio
+async def test_database_pin_missing_resolved_id_fails_closed(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "account.accurate.id":
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": {"database": {"host": "https://public.accurate.id"}},
+                },
+            )
+        return httpx.Response(500, json={"s": False})
+
+    _patch_client(handler, monkeypatch)
+    client = AccurateClient(_settings(**{"ACCURATE_DATABASE_ID": "823960"}))
+    with pytest.raises(AccurateUpstreamError) as exc:
+        await client.list_sales_orders(limit=5)
+    assert exc.value.code == "accurate_database_id_missing"
+
+
+@pytest.mark.asyncio
+async def test_http_308_resigns_and_updates_host(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        path = request.url.path
+        assert "X-Api-Signature" in request.headers
+        if host == "account.accurate.id":
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": {"database": {"id": 1, "host": "https://old.accurate.id"}},
+                },
+            )
+        # Numeric id path — detail.do?id= only (no number query).
+        if host == "old.accurate.id" and "sales-order/detail.do" in path:
+            assert request.url.params.get("id") == "77"
+            assert request.url.params.get("number") is None
+            return httpx.Response(
+                308,
+                headers={
+                    "Location": (
+                        "https://new.accurate.id/accurate/api/sales-order/detail.do"
+                    )
+                },
+            )
+        if host == "new.accurate.id" and "sales-order/detail.do" in path:
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": {
+                        "id": 77,
+                        "number": "SO/X",
+                        "statusName": "OPEN",
+                        "detailItem": [],
+                        "customer": {"id": 1, "name": "A"},
+                        "branch": {"id": 1, "name": "B"},
+                    },
+                },
+            )
+        return httpx.Response(500, json={"s": False})
+
+    _patch_client(handler, monkeypatch)
+    client = AccurateClient(_settings())
+    detail = await client.get_sales_order("77")
+    assert detail["number"] == "SO/X"
+    assert detail["accurate_id"] == "77"
+    assert client._host == "https://new.accurate.id"
+
+
+@pytest.mark.asyncio
+async def test_receipt_and_delivery_readonly_paths(monkeypatch):
+    def handler(request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        path = request.url.path
+        if host == "account.accurate.id":
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": {
+                        "database": {"id": 1, "host": "https://public.accurate.id"}
+                    },
+                },
+            )
+        if "sales-receipt/detail.do" in path:
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": {
+                        "id": 10,
+                        "number": "RCP-1",
+                        "statusName": "POSTED",
+                        "totalAmount": 100,
+                        "customer": {"id": 1, "name": "A"},
+                    },
+                },
+            )
+        if "delivery-order/detail.do" in path:
+            return httpx.Response(
+                200,
+                json={
+                    "s": True,
+                    "d": {
+                        "id": 20,
+                        "number": "SJ-1",
+                        "statusName": "DELIVERED",
+                        "detailItem": [{"itemNo": "SKU", "quantity": 2}],
+                        "customer": {"id": 1, "name": "A"},
+                    },
+                },
+            )
+        return httpx.Response(404, json={"s": False})
+
+    _patch_client(handler, monkeypatch)
+    client = AccurateClient(_settings())
+    receipt = await client.get_receipt("10")
+    sj = await client.get_delivery_note("20")
+    assert receipt["number"] == "RCP-1"
+    assert sj["number"] == "SJ-1"
+    assert sj["line_items"][0]["qty"] == 2.0
+
+
+@pytest.mark.asyncio
+async def test_missing_signature_secret_fails_closed():
+    client = AccurateClient(_settings(**{"ACCURATE_SIGNATURE_SECRET": ""}))
+    assert client.configured() is False
+    with pytest.raises(AccurateUpstreamError) as exc:
+        await client.list_sales_orders()
+    assert exc.value.code == "accurate_credentials_missing"
+    assert exc.value.status_code == 503

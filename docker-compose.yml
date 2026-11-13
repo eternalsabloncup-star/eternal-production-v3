@@ -19,6 +19,22 @@ services:
       retries: 10
       start_period: 10s
 
+  accurate-gateway:
+    build: ./accurate-gateway
+    container_name: epv3-accurate-gateway-dev
+    restart: unless-stopped
+    environment:
+      GATEWAY_MODE: ${GATEWAY_MODE:-fixture}
+      GATEWAY_M2M_TOKEN: ${GATEWAY_M2M_TOKEN:-dev-gateway-m2m-change-me}
+      GATEWAY_HOST: 0.0.0.0
+      GATEWAY_PORT: 8091
+      ACCURATE_API_TOKEN: ${ACCURATE_API_TOKEN:-}
+      ACCURATE_SIGNATURE_SECRET: ${ACCURATE_SIGNATURE_SECRET:-}
+      ACCURATE_DATABASE_ID: ${ACCURATE_DATABASE_ID:-}
+      ACCURATE_ACCOUNT_BASE: ${ACCURATE_ACCOUNT_BASE:-https://account.accurate.id}
+    ports:
+      - "127.0.0.1:8091:8091"
+
 volumes:
   epv3_pgdata:
     name: epv3_postgres_dev_data

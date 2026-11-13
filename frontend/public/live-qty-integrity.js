@@ -1,0 +1,381 @@
+/** Slice 1M.1 — qty / Tenggat / Inbox cell / detail dedupe (shared by production.html + live-runtime). */
+(function (global) {
+  "use strict";
+
+  function isQtyUnverified(o) {
+    if (!o) return true;
+    if (o.qtyUnverified === true) return true;
+    if (o.qtyVerified === false) return true;
+    if (o.qtyVerified === true) {
+      return o.qty == null || !Number.isFinite(Number(o.qty));
+    }
+    // Legacy/demo rows without an explicit flag: missing/non-finite qty is unknown.
+    if (o.qty == null || !Number.isFinite(Number(o.qty))) return true;
+    return false;
+  }
+
+  function productionQtySnapshot(o, opts) {
+    const live = opts && opts.live === true;
+    if (live && isQtyUnverified(o)) {
+      return {
+        qty: null,
+        scheduled: 0,
+        done: 0,
+        packed: 0,
+        unassigned: 0,
+        remainingScheduled: 0,
+        remainingTotal: null,
+        invalid: false,
+        unknownQty: 1,
+        qtyUnverified: true,
+      };
+    }
+    const qty = live
+      ? Math.max(0, Math.trunc(Number(opts && opts.printPhysicalQty) || 0))
+      : Math.max(0, Math.trunc(Number(o.qty) || 0));
+    const scheduled = Math.min(
+      qty,
+      Math.max(0, Math.trunc(Number(o.scheduledQty) || 0)),
+    );
+    const done = Math.min(qty, Math.max(0, Math.trunc(Number(o.done) || 0)));
+    const packed = Math.max(0, Math.trunc(Number(o.packed) || 0));
+    return {
+      qty: qty,
+      scheduled: scheduled,
+      done: done,
+      packed: packed,
+      unassigned: Math.max(0, qty - scheduled),
+      remainingScheduled: Math.max(0, scheduled - done),
+      remainingTotal: Math.max(0, qty - done),
+      invalid:
+        scheduled > qty || done > qty || done > scheduled || packed > done,
+      unknownQty: live
+        ? Math.max(0, Number(opts && opts.unknownPhysicalQty) || 0)
+        : 0,
+      qtyUnverified: false,
+    };
+  }
+
+  function scheduleLeadLabel(o, q) {
+    const snap = q || productionQtySnapshot(o, { live: true });
+    if (snap.qtyUnverified) {
+      return "Qty belum terverifikasi";
+    }
+    const m = String(o.ship || "").match(/(\d{1,2}) Nov 2026/);
+    if (!m) return "Belum ada target";
+    const n = Number(m[1]) - 9;
+    if (snap.remainingTotal == null) return "Qty belum terverifikasi";
+    if (!snap.remainingTotal) return "Selesai";
+    if (n < 0) return "Terlambat " + Math.abs(n) + " hari";
+    if (n === 0) return "Hari ini";
+    if (n === 1) return "Besok";
+    return n + " hari lagi";
+  }
+
+  function scheduleOverviewSum(rows, productionQtyFor, leadFor) {
+    const unique = [];
+    const seen = {};
+    (rows || []).forEach(function (o) {
+      const id = o && o.id;
+      if (!id || seen[id]) return;
+      seen[id] = true;
+      unique.push(o);
+    });
+    const sum = {
+      qty: 0,
+      scheduled: 0,
+      done: 0,
+      remainingTotal: 0,
+      unassigned: 0,
+      remainingScheduled: 0,
+      unknownQty: 0,
+      unverifiedPoCount: 0,
+      invalid: 0,
+      deadline: 0,
+      cells: [],
+    };
+    unique.forEach(function (o) {
+      const q = productionQtyFor(o);
+      if (q.qtyUnverified) {
+        sum.unverifiedPoCount += 1;
+        sum.unknownQty += q.unknownQty || 1;
+      } else {
+        sum.qty += q.qty || 0;
+        sum.scheduled += q.scheduled || 0;
+        sum.done += q.done || 0;
+        sum.remainingTotal += q.remainingTotal || 0;
+        sum.unassigned += q.unassigned || 0;
+        sum.remainingScheduled += q.remainingScheduled || 0;
+        sum.unknownQty += q.unknownQty || 0;
+      }
+      if (q.invalid) sum.invalid += 1;
+      const lead = leadFor(o);
+      if (
+        lead === "Hari ini" ||
+        lead === "Besok" ||
+        String(lead).indexOf("Terlambat") === 0
+      ) {
+        sum.deadline += 1;
+      }
+    });
+    const qtyLabel = sum.unverifiedPoCount
+      ? "Total Qty Cetak (terverifikasi)"
+      : "Total Qty Cetak";
+    sum.cells = [
+      [qtyLabel, sum.qty],
+      ["Qty Terjadwal", sum.scheduled],
+      ["Sudah Dicetak", sum.done],
+      ["Belum Dicetak", sum.remainingTotal],
+      ["Sisa Terjadwal", sum.remainingScheduled],
+      ["Belum Dijadwalkan", sum.unassigned],
+    ];
+    if (sum.unverifiedPoCount) {
+      sum.cells.push(["PO Qty belum terverifikasi", sum.unverifiedPoCount]);
+    } else if (sum.unknownQty) {
+      sum.cells.push(["Qty Proses Belum Terverifikasi", sum.unknownQty]);
+    }
+    return sum;
+  }
+
+  function escapeAttr(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  var INBOX_PLACEHOLDER_VALUES = {
+    "": true,
+    "—": true,
+    "-": true,
+    "Belum terverifikasi": true,
+    "Belum tersedia": true,
+    "Belum dimuat": true,
+    "Memuat…": true,
+    "Memuat...": true,
+    "Gagal dimuat": true,
+    "Gagal memuat": true,
+    "Detail barang belum dimuat": true,
+    "Perlu verifikasi": true,
+  };
+
+  function inboxFieldHasVerifiedDisplay(value) {
+    if (value == null) return false;
+    if (typeof value === "number") return Number.isFinite(value);
+    if (typeof value === "boolean") return true;
+    var s = String(value).trim();
+    if (!s) return false;
+    if (INBOX_PLACEHOLDER_VALUES[s]) return false;
+    return true;
+  }
+
+  function inboxDetailRetryHtml(soNumber, escapeFn) {
+    var esc = escapeFn || escapeAttr;
+    var so = esc(soNumber || "");
+    return (
+      '<span class="muted">Gagal dimuat</span> ' +
+      '<button type="button" class="btn sm" onclick="window.retryInboxDetail&&window.retryInboxDetail(\'' +
+      so +
+      "')\">Retry</button>"
+    );
+  }
+
+  function inboxDetailPendingHtml(o, escapeFn) {
+    var state = (o && o.detailLoadState) || "not_loaded";
+    if (state === "loading") return '<span class="muted">Memuat…</span>';
+    if (state === "failed") return inboxDetailRetryHtml(o && o.id, escapeFn);
+    if (state === "loaded") return "";
+    return '<span class="muted">Belum dimuat</span>';
+  }
+
+  function inboxAbsenceHtml(kind) {
+    var label = kind === "unverified" ? "Belum terverifikasi" : "Belum tersedia";
+    return '<span class="muted">' + label + "</span>";
+  }
+
+  function inboxDetailDependentHtml(o, options) {
+    options = options || {};
+    var escapeFn = options.escapeFn || escapeAttr;
+    var absence = options.absence || "unavailable";
+    var value = options.value;
+    if (inboxFieldHasVerifiedDisplay(value)) {
+      var escaped = escapeFn(String(value));
+      return options.wrap ? options.wrap(escaped) : escaped;
+    }
+    var pending = inboxDetailPendingHtml(o, escapeFn);
+    if (pending) return pending;
+    return inboxAbsenceHtml(absence);
+  }
+
+  function inboxQtyCellHtml(o, escapeFn) {
+    var esc = escapeFn || escapeAttr;
+    var state = o.detailLoadState || "not_loaded";
+    if (
+      o.qtyVerified === true &&
+      o.qty != null &&
+      Number.isFinite(Number(o.qty))
+    ) {
+      return (
+        '<b class="right">' + Number(o.qty).toLocaleString("id-ID") + "</b>"
+      );
+    }
+    if (state === "loading") return '<span class="muted">Memuat…</span>';
+    if (state === "failed") return inboxDetailRetryHtml(o && o.id, esc);
+    if (state === "loaded") {
+      return '<span class="muted">Qty belum terverifikasi</span>';
+    }
+    return '<span class="muted">Belum dimuat</span>';
+  }
+
+  function scheduleDetailProgress(o) {
+    if (isQtyUnverified(o)) {
+      return { label: "UNKNOWN", pct: 0, unknown: true };
+    }
+    const qty = Number(o.qty);
+    const done = Math.max(0, Math.trunc(Number(o.done) || 0));
+    if (!Number.isFinite(qty) || qty <= 0) {
+      return { label: "UNKNOWN", pct: 0, unknown: true };
+    }
+    const pct = Math.min(100, Math.round((100 * done) / qty));
+    return {
+      label:
+        pct +
+        "% · " +
+        done.toLocaleString("id-ID") +
+        " / " +
+        qty.toLocaleString("id-ID") +
+        " pcs",
+      pct: pct,
+      unknown: false,
+    };
+  }
+
+  function fetchDetailDeduped(number, stores, requestFn, opts) {
+    const force = !!(opts && opts.force);
+    if (force) {
+      delete stores.cache[number];
+    } else if (stores.cache[number] !== undefined) {
+      return Promise.resolve(stores.cache[number]);
+    }
+    if (Object.prototype.hasOwnProperty.call(stores.inflight, number)) {
+      return stores.inflight[number];
+    }
+    const pending = requestFn()
+      .then(function (detail) {
+        stores.cache[number] = detail;
+        delete stores.inflight[number];
+        return detail;
+      })
+      .catch(function (err) {
+        delete stores.inflight[number];
+        delete stores.cache[number];
+        throw err;
+      });
+    stores.inflight[number] = pending;
+    return pending;
+  }
+
+  function shouldApplyDetail(enrichGeneration, startedGeneration, present) {
+    return enrichGeneration === startedGeneration && !!present;
+  }
+
+  function urgentFlagFromState(urgentState) {
+    if (urgentState == null) return null;
+    const s = String(urgentState).trim();
+    if (!s) return null;
+    if (s === "approved_urgent" || s === "legacy_urgent") return true;
+    if (s === "normal") return false;
+    return null;
+  }
+
+  function orderPriorityFromState(urgentState) {
+    const flag = urgentFlagFromState(urgentState);
+    if (flag === true) return "Urgent";
+    if (flag === false) return "Normal";
+    return "Belum terverifikasi";
+  }
+
+  function urgentFieldsFromAccurateState(urgentState) {
+    const state =
+      urgentState == null || !String(urgentState).trim()
+        ? null
+        : String(urgentState).trim();
+    return {
+      urgent: urgentFlagFromState(state),
+      urgentState: state,
+      orderPriority: orderPriorityFromState(state),
+    };
+  }
+
+  function mergeUrgentFromIncoming(existing, incomingUrgentState) {
+    const hasIncoming =
+      incomingUrgentState != null && String(incomingUrgentState).trim() !== "";
+    if (!hasIncoming) {
+      const keptState =
+        existing &&
+        existing.urgentState != null &&
+        String(existing.urgentState).trim()
+          ? String(existing.urgentState).trim()
+          : null;
+      if (keptState) return urgentFieldsFromAccurateState(keptState);
+      if (existing && existing.urgent === true) {
+        return {
+          urgent: true,
+          urgentState: existing.urgentState || "approved_urgent",
+          orderPriority: existing.orderPriority || "Urgent",
+        };
+      }
+      if (existing && existing.urgent === false) {
+        return {
+          urgent: false,
+          urgentState: existing.urgentState || "normal",
+          orderPriority: existing.orderPriority || "Normal",
+        };
+      }
+      return {
+        urgent: null,
+        urgentState: null,
+        orderPriority:
+          (existing && existing.orderPriority) || "Belum terverifikasi",
+      };
+    }
+    return urgentFieldsFromAccurateState(incomingUrgentState);
+  }
+
+  function countUrgentOrders(rows) {
+    return (rows || []).filter(function (o) {
+      return o && o.urgent === true;
+    }).length;
+  }
+
+  function filterUrgentOrders(rows) {
+    return (rows || []).filter(function (o) {
+      return o && o.urgent === true;
+    });
+  }
+
+  global.V3QtyIntegrity = {
+    isQtyUnverified: isQtyUnverified,
+    productionQtySnapshot: productionQtySnapshot,
+    scheduleLeadLabel: scheduleLeadLabel,
+    scheduleOverviewSum: scheduleOverviewSum,
+    escapeAttr: escapeAttr,
+    inboxQtyCellHtml: inboxQtyCellHtml,
+    inboxFieldHasVerifiedDisplay: inboxFieldHasVerifiedDisplay,
+    inboxDetailRetryHtml: inboxDetailRetryHtml,
+    inboxDetailPendingHtml: inboxDetailPendingHtml,
+    inboxAbsenceHtml: inboxAbsenceHtml,
+    inboxDetailDependentHtml: inboxDetailDependentHtml,
+    scheduleDetailProgress: scheduleDetailProgress,
+    fetchDetailDeduped: fetchDetailDeduped,
+    shouldApplyDetail: shouldApplyDetail,
+    urgentFlagFromState: urgentFlagFromState,
+    orderPriorityFromState: orderPriorityFromState,
+    urgentFieldsFromAccurateState: urgentFieldsFromAccurateState,
+    mergeUrgentFromIncoming: mergeUrgentFromIncoming,
+    countUrgentOrders: countUrgentOrders,
+    filterUrgentOrders: filterUrgentOrders,
+  };
+})(typeof window !== "undefined" ? window : globalThis);

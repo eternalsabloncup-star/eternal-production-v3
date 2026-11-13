@@ -7,6 +7,13 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 5173,
+    proxy: {
+      // Private Staging / local Vite → V3 backend only (not ERP V1 port 8000).
+      "/api": {
+        target: "http://127.0.0.1:8100",
+        changeOrigin: true,
+      },
+    },
   },
   test: {
     environment: "jsdom",

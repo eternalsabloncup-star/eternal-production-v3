@@ -228,3 +228,4 @@ frontend/dist/
 
 # Local tooling
 .DS_Store
+.secrets/
