@@ -23,12 +23,14 @@ import sys
 import tarfile
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 EXIT_OK, EXIT_REFUSED, EXIT_ROLLED_BACK, EXIT_ROLLBACK_FAILED, EXIT_UNFINISHED = 0, 2, 3, 4, 5
 
+DEFAULT_WORKFLOW = ".github/workflows/ci.yml"
 DEFAULT_CI = [
     "Backend (Postgres + Pytest + Alembic)",
     "Accurate Gateway (fixture mode)",
@@ -50,6 +52,10 @@ class DeployFailed(Exception):
 
 def now() -> str:
     return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def now_us() -> str:
+    return dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
 
 
 def log(msg: str) -> None:
@@ -98,8 +104,8 @@ def validate_config(cfg: dict) -> list[str]:
     if cfg.get("ssh_key") and not Path(cfg["ssh_key"]).is_file():
         errs.append(f"ssh_key not found: {cfg['ssh_key']}")
     ci = cfg.get("ci", {})
-    if not ci.get("command") and not (ci.get("token_file") and Path(ci["token_file"]).is_file()):
-        errs.append("ci.token_file missing/not found (or provide ci.command)")
+    if not (ci.get("token_file") and Path(ci["token_file"]).is_file()):
+        errs.append("ci.token_file missing/not found")
     for name in APPLY_ORDER:
         c = cfg["components"].get(name)
         if not c:
@@ -222,18 +228,18 @@ class Runner:
             raise Refused(f"{sha} is not an ancestor of {main}")
 
     def check_ci(self, sha: str) -> None:
+        """Fail-closed CI gate via GitHub Actions REST API (Actions: read-only permission)."""
         ci = self.cfg.get("ci", {})
-        required = ci.get("required", DEFAULT_CI)
-        if ci.get("command"):
-            out = self.run([a.format(sha=sha) for a in ci["command"]]).stdout
-        else:
+        try:
             token = Path(ci["token_file"]).read_text().strip()
-            req = urllib.request.Request(
-                f"https://api.github.com/repos/{self.cfg['github_repo']}/commits/{sha}/check-runs?per_page=100",
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
-            with urllib.request.urlopen(req, timeout=30) as r:
-                out = r.read()
-        evaluate_ci(json.loads(out), required, sha)
+        except (KeyError, OSError):
+            raise Refused("CI verification unavailable: token file unreadable")
+        if not token:
+            raise Refused("CI verification unavailable: empty token")
+        verify_ci_actions(
+            lambda path: github_get(ci.get("api_base", "https://api.github.com"), path, token),
+            self.cfg["github_repo"], sha, ci.get("required", DEFAULT_CI),
+            ci.get("workflow_path", DEFAULT_WORKFLOW), int(ci.get("per_page", 100)))
 
     def tree(self, sha: str, sub: str) -> dict[str, str]:
         out = self.git("ls-tree", "-r", "-z", sha, "--", f"{sub}/").stdout.decode()
@@ -358,7 +364,7 @@ class Runner:
         return json.loads(p.read_text()).get("frontend_manifest", {}) if p.exists() else {}
 
     def backup(self, sha: str, plan: dict, old: str, dist: Path | None = None) -> Path:
-        bdir = self.backups / f"deploy-{now()}{time.time_ns() % 10**6:06d}-{sha[:12]}"
+        bdir = self.backups / f"deploy-{now_us()}-{sha[:12]}"
         bdir.mkdir(parents=True)
         self.save(backup=str(bdir))
         if self.cfg.get("db_backup", True):
@@ -662,7 +668,7 @@ class Runner:
             self.save(phase="migrate-backup")
             try:
                 release = self.extract(sha)
-                bdir = self.backups / f"deploy-{now()}{time.time_ns() % 10**6:06d}-migrate-{sha[:12]}"
+                bdir = self.backups / f"deploy-{now_us()}-migrate-{sha[:12]}"
                 bdir.mkdir(parents=True)
                 self.save(backup=str(bdir))
                 dump = bdir / "db.dump"
@@ -689,16 +695,80 @@ class Runner:
         return EXIT_OK
 
 
-def evaluate_ci(data: dict, required: list[str], sha: str) -> None:
-    latest: dict[str, dict] = {}
-    for r in data.get("check_runs", []):
-        if r["name"] not in latest or r.get("id", 0) > latest[r["name"]].get("id", 0):
-            latest[r["name"]] = r
-    for name in required:
-        r = latest.get(name)
-        if not r or r.get("status") != "completed" or r.get("conclusion") != "success":
-            raise Refused(f"CI not green for {sha[:12]}: {name} -> "
-                          f"{(r or {}).get('conclusion') or (r or {}).get('status') or 'missing'}")
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+def github_get(base: str, path: str, token: str) -> dict:
+    """GET JSON from the GitHub API. Any failure -> Refused (never bypass CI); token never in messages."""
+    base = base.rstrip("/")
+    if not (base.startswith("https://") or base.startswith(("http://127.0.0.1", "http://localhost"))):
+        raise Refused("CI verification unavailable: api_base must be https")
+    req = urllib.request.Request(base + path, headers={
+        "Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "epv3-deploy"})
+    try:
+        with urllib.request.build_opener(_NoRedirect).open(req, timeout=30) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise Refused(f"CI verification unavailable: GitHub API HTTP {e.code}") from None
+    except Exception as e:  # noqa: BLE001
+        raise Refused(f"CI verification unavailable: {type(e).__name__}") from None
+
+
+def _paged(get, path: str, key: str, per_page: int, max_pages: int = 20) -> list[dict]:
+    items: list[dict] = []
+    total = None
+    for page in range(1, max_pages + 1):
+        data = get(f"{path}{'&' if '?' in path else '?'}per_page={per_page}&page={page}")
+        batch = data.get(key)
+        if not isinstance(batch, list) or not isinstance(data.get("total_count"), int):
+            raise Refused("CI verification unavailable: malformed API response")
+        total = data["total_count"]
+        items += batch
+        if len(items) >= total or not batch:
+            break
+    if len(items) != total:
+        raise Refused("CI verification unavailable: incomplete pagination")
+    return items
+
+
+def verify_ci_actions(get, repo: str, sha: str, required: list[str], workflow_path: str,
+                      per_page: int = 100) -> None:
+    """Every official CI run for exactly `sha` must be completed/success with all required jobs
+    (latest attempt) completed/success, each job name exactly once."""
+    if not SHA_RE.match(sha):
+        raise Refused("CI check needs full 40-hex SHA")
+    runs = _paged(get, f"/repos/{repo}/actions/runs?head_sha={sha}", "workflow_runs", per_page)
+    official, seen = [], set()
+    for r in runs:
+        if r.get("id") in seen:
+            continue
+        seen.add(r.get("id"))
+        if (r.get("head_sha") == sha
+                and (r.get("repository") or {}).get("full_name") == repo
+                and (r.get("head_repository") or {}).get("full_name") == repo
+                and str(r.get("path", "")).split("@")[0] == workflow_path):
+            official.append(r)
+    if not official:
+        raise Refused(f"CI not verified for {sha[:12]}: no official workflow run on exact SHA")
+    for r in official:
+        if r.get("status") != "completed" or r.get("conclusion") != "success":
+            raise Refused(f"CI not green for {sha[:12]}: run {r.get('id')} "
+                          f"{r.get('conclusion') or r.get('status')}")
+        jobs = _paged(get, f"/repos/{repo}/actions/runs/{r['id']}/jobs?filter=latest", "jobs", per_page)
+        for name in required:
+            same = [j for j in jobs if j.get("name") == name]
+            if len(same) != 1:
+                raise Refused(f"CI not verified for {sha[:12]}: job '{name}' "
+                              f"{'missing' if not same else 'duplicated'} in run {r['id']}")
+            j = same[0]
+            if j.get("head_sha") != sha or j.get("run_attempt") != r.get("run_attempt"):
+                raise Refused(f"CI not verified for {sha[:12]}: job '{name}' sha/attempt mismatch")
+            if j.get("status") != "completed" or j.get("conclusion") != "success":
+                raise Refused(f"CI not green for {sha[:12]}: {name} -> "
+                              f"{j.get('conclusion') or j.get('status')}")
 
 
 def dir_manifest(root: Path) -> dict[str, str]:

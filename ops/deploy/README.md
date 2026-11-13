@@ -25,7 +25,12 @@ Tidak ada opsi menimpa drift. `SIGTERM`/Ctrl-C memicu rollback; `kill -9`/reboot
 
 1. Lock (`flock` non-blocking) -> tolak jika jurnal `in_progress`/`rollback_failed`.
 2. `git remote update` pada mirror terisolasi `/opt/epv3/deploy/source/mirror.git` (deploy key read-only).
-3. Validasi: SHA penuh, ada di mirror, ancestor `main`, CI check-runs wajib (3 job `ci.yml`) `success` pada SHA tsb,
+3. Validasi: SHA penuh, ada di mirror, ancestor `main`, CI via **GitHub Actions REST API** (`/actions/runs?head_sha=<sha>` + `/runs/{id}/jobs?filter=latest`, permission
+   *Actions: Read-only*, bukan Checks API): hanya run resmi (repo V3, bukan fork, `ci.workflow_path`=`.github/workflows/ci.yml`,
+   `head_sha` persis) yang dihitung; SETIAP run resmi harus completed/success dan 3 job wajib (nama persis, tepat satu,
+   attempt terbaru, `head_sha` sama) completed/success. Pagination dikumpulkan penuh; tanpa run resmi, job gagal/pending/
+   duplikat, atau API 401/403/429/5xx/tak terjangkau/respons janggal = **FAIL CLOSED** (tanpa redirect; token hanya di header,
+   tidak pernah dicetak),
    dan **revision DB live (`SELECT version_num FROM alembic_version`, read-only via psql) harus tepat satu baris
    sama dengan head Alembic SHA target**. Tidak butuh wrapper Alembic. Gagal baca/ambigu = ditolak.
 4. Klasifikasi diff baseline->SHA per komponen (blob git): `gateway`, `backend`, `frontend`.
@@ -80,7 +85,7 @@ dipakai sebagai config live. Tidak ada `keys/`: deploy key yang sudah ada
 (`/home/eternaladmin/.ssh/epv3_github`) dipakai apa adanya, tidak diduplikasi.
 
 ```bash
-cp ops/deploy/deploy.conf.example.json /tmp/epv3-live.json   # edit REPLACE_ME (token checks read-only)
+cp ops/deploy/deploy.conf.example.json /tmp/epv3-live.json   # edit REPLACE_ME (token Actions read-only)
 bash ops/deploy/install.sh --config /tmp/epv3-live.json            # dry-run
 bash ops/deploy/install.sh --config /tmp/epv3-live.json --apply    # hanya setelah persetujuan
 ```
@@ -92,7 +97,7 @@ Prasyarat persetujuan terpisah (tidak dilakukan skrip):
 1. User runner (mis. `eternaladmin`) bisa menulis ke dest komponen dan `/opt/epv3/backups`.
 2. Sudoers sempit: `systemctl restart epv3-api epv3-accurate-gateway`, `pg_dump` dan `psql -c 'SELECT version_num ...'`
    sebagai postgres (read-only).
-3. Token GitHub read-only untuk membaca check-runs (`ci.token_file`).
+3. Fine-grained PAT read-only dengan permission **Actions: Read** (+ Metadata) pada repo V3 (`ci.token_file`).
 4. Eksekusi `init-baseline` (read-only terhadap live; menolak bila runtime != 299a921... atau DB != head).
 
 Rollback pemasangan: hapus `/opt/epv3/deploy` (tidak ada efek pada layanan).
@@ -102,7 +107,7 @@ Rollback pemasangan: hapus `/opt/epv3/deploy` (tidak ada efek pada layanan).
 ```bash
 cd ops/deploy && python3 -m pytest -q tests
 ```
-40 tes simulasi (hasil nyata: 40 passed), semua lokal (git origin sementara, stub systemctl/pg_dump/health), tanpa jaringan/DB/service.
+54 tes simulasi (hasil nyata: 54 passed), semua lokal (git origin sementara, stub systemctl/pg_dump/health), tanpa jaringan/DB/service.
 
 Cakupan tambahan: config fail-closed, DB revision exact (tanpa wrapper), cutover frontend in-place + mount basi,
 drift tanpa override, SIGTERM, recover hanya restart unit yang sempat di-restart, apply parsial + temp stray,
