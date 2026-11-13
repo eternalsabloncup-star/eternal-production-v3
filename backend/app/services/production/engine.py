@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,9 +26,11 @@ from app.services.production import permissions as P
 CANONICAL_PACKING_EVENT = "packing_batch"
 PACKING_EVENT_TYPES = frozenset({"packing_batch", "packing_recorded"})
 OUTPUT_EVENT_TYPES = frozenset({"output_confirmed", "output_correction"})
+HELPER_VERIFIED_EVENT = "output_helper_verified"
+HELPER_VERIFIED_EVENT_TYPES = frozenset({HELPER_VERIFIED_EVENT})
 REJECT_EVENT_TYPES = frozenset({"reject_verified"})
 # Color pass 1 records cups entering print; later passes are work-ops on the same cups.
-# Packing eligibility requires ALL scheduled required passes (min across passes), not pass 1 alone.
+# Packing eligibility = helper-verified qty across ALL required passes (min), not operator alone.
 PHYSICAL_CUP_COLOR_PASS = 1
 _CANCELLED_ASSIGNMENT = frozenset({"cancelled", "canceled", "void", "cancelled_remaining"})
 
@@ -106,16 +108,56 @@ def eligible_finished_qty_from_events(
     *,
     so_line_id: str | None = None,
 ) -> Decimal:
-    """Physical cups finished through ALL required color passes — never sum passes.
+    """Operator net finished through ALL required color passes — never sum passes.
 
-    Eligible = min(net qty per required pass). Pass 1 alone is never finished proof
-    when a higher pass is scheduled for the line.
+    Historical helper for operator progress. Packing authority uses
+    ``eligible_verified_qty_from_events`` (helper-verified pool).
     """
     passes = frozenset(int(p) for p in required_passes) or frozenset(
         {PHYSICAL_CUP_COLOR_PASS}
     )
     return min(
         qty_for_color_pass_from_events(events, p, so_line_id=so_line_id) for p in passes
+    )
+
+
+def qty_helper_verified_for_pass_from_events(
+    events: list,
+    color_pass: int,
+    *,
+    so_line_id: str | None = None,
+) -> Decimal:
+    """Sum helper-verified qty for one color pass (rejects reduce the pool)."""
+    target = int(color_pass)
+    total = Decimal("0")
+    for e in events:
+        line = getattr(e, "so_line_id", None)
+        if so_line_id is not None and line != so_line_id:
+            continue
+        if _event_color_pass(e) != target:
+            continue
+        et = getattr(e, "event_type", None)
+        qty = Decimal(getattr(e, "qty_physical", 0) or 0)
+        if et in HELPER_VERIFIED_EVENT_TYPES:
+            total += qty
+        elif et in REJECT_EVENT_TYPES:
+            total -= qty
+    return total
+
+
+def eligible_verified_qty_from_events(
+    events: list,
+    required_passes: frozenset[int] | set[int] | list[int],
+    *,
+    so_line_id: str | None = None,
+) -> Decimal:
+    """Packable cups = min(helper-verified net per required pass). Never sum passes."""
+    passes = frozenset(int(p) for p in required_passes) or frozenset(
+        {PHYSICAL_CUP_COLOR_PASS}
+    )
+    return min(
+        qty_helper_verified_for_pass_from_events(events, p, so_line_id=so_line_id)
+        for p in passes
     )
 
 
@@ -286,8 +328,24 @@ async def gates_open_for_schedule(
     job: ProductionJob, session: AsyncSession | None = None
 ) -> None:
     needs_design = await job_needs_design_gate(session, job)
-    if needs_design and job.design_status not in {"approved", "bypassed"}:
-        raise HTTPException(409, "Design belum disetujui/bypass")
+    if needs_design:
+        if job.design_status == "bypassed":
+            pass
+        elif job.design_status == "approved":
+            # Strict: approved must reflect customer token approval of current revision
+            # (or historical bypass already handled). Staff-only flags are insufficient.
+            if session is not None:
+                from app.services.production.customer_tokens import (
+                    current_design_customer_approved,
+                )
+
+                if not await current_design_customer_approved(session, job):
+                    raise HTTPException(
+                        409,
+                        "Design memerlukan persetujuan pelanggan pada revisi terkini",
+                    )
+        else:
+            raise HTTPException(409, "Design belum disetujui/bypass")
     if job.payment_status not in {"approved", "bypassed"}:
         raise HTTPException(409, "Payment belum disetujui/bypass")
 
@@ -302,6 +360,7 @@ async def upload_design(
     *,
     file_name: str,
     storage_key: str,
+    so_line_id: str | None = None,
 ) -> DesignVersion:
     _require(user, P.DESIGN_UPLOAD)
     _branch(user, job.branch_id)
@@ -322,14 +381,19 @@ async def upload_design(
     for row in prior:
         if row.status == "approved":
             row.status = "superseded"
+            row.customer_approval = False
             job.design_status = "pending"
         elif row.status == "pending":
             row.status = "superseded"
+    from app.services.production.customer_tokens import revoke_design_tokens_for_job
+
+    await revoke_design_tokens_for_job(session, job.id)
     ver = DesignVersion(
         job_id=job.id,
         version_no=int(max_v or 0) + 1,
         file_name=file_name,
         storage_key=storage_key,
+        so_line_id=(so_line_id or "").strip() or None,
         uploaded_by=user.id,
         status="pending",
     )
@@ -350,6 +414,12 @@ async def decide_design(
     bypass: bool = False,
     customer_approval: bool = False,
 ) -> DesignVersion:
+    """Staff design decision.
+
+    Strict printed-item gate: staff ``approved`` alone does **not** open schedule.
+    Only customer ``design_approval`` token decision (or staff bypass) opens the gate.
+    ``customer_approval`` body flag is ignored for gate authority (evidence-only legacy).
+    """
     ver = await session.get(DesignVersion, version_id)
     if ver is None:
         raise HTTPException(404, "Design version tidak ditemukan")
@@ -365,16 +435,30 @@ async def decide_design(
         raise HTTPException(422, "Keputusan design tidak valid")
     if ver.status not in {"pending", "approved"}:
         raise HTTPException(409, "Versi design tidak dapat diputuskan")
-    ver.status = decision if not bypass else "approved"
-    ver.bypass = bypass
-    ver.customer_approval = customer_approval
     ver.decision_by = user.id
     ver.decision_reason = reason
     ver.decided_at = datetime.now(UTC)
-    if decision == "rejected" and not bypass:
+    if bypass:
+        ver.status = "approved"
+        ver.bypass = True
+        # Bypass is staff-authorized gate open — not a customer legal claim.
+        ver.customer_approval = False
+        job.design_status = "bypassed"
+    elif decision == "rejected":
+        ver.status = "rejected"
+        ver.bypass = False
+        ver.customer_approval = False
         job.design_status = "rejected"
     else:
-        job.design_status = "bypassed" if bypass else "approved"
+        # Staff internal OK — gate stays closed until customer token approves.
+        ver.status = "approved"
+        ver.bypass = False
+        # Do not honor staff-set customer_approval as gate authority.
+        _ = customer_approval
+        if not ver.customer_approval:
+            job.design_status = "pending"
+        else:
+            job.design_status = "approved"
     await session.commit()
     await session.refresh(ver)
     return ver
@@ -1002,6 +1086,114 @@ async def correct_output(
     return event
 
 
+async def record_helper_output_verification(
+    session: AsyncSession,
+    user: User,
+    job: ProductionJob,
+    *,
+    source_output_event_id: int,
+    qty_physical: Decimal,
+    idempotency_key: str,
+    evidence_ref: str | None = None,
+    reason: str | None = None,
+) -> ProductionEvent:
+    """Helper independently verifies operator output — append-only.
+
+    Never rewrites operator history. Cumulative verified per source event cannot
+    exceed operator net for that event. Packing eligibility uses this pool.
+    """
+    _require(user, P.OUTPUT_HELPER_VERIFY)
+    _branch(user, job.branch_id)
+    if qty_physical <= 0:
+        raise HTTPException(422, "Qty verifikasi helper harus > 0")
+    src = await session.get(ProductionEvent, source_output_event_id)
+    if src is None or src.job_id != job.id or src.event_type != "output_confirmed":
+        raise HTTPException(404, "Output operator sumber tidak ditemukan")
+    # Operator net for this source = confirmed + corrections tied to it.
+    corrections = await session.scalar(
+        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.event_type == "output_correction",
+            ProductionEvent.payload_json.contains(f'"source_output_id":{src.id}'),
+        )
+    )
+    operator_net = Decimal(src.qty_physical or 0) + Decimal(corrections or 0)
+    if operator_net < 0:
+        operator_net = Decimal("0")
+    already = await session.scalar(
+        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.event_type == HELPER_VERIFIED_EVENT,
+            ProductionEvent.payload_json.contains(
+                f'"source_output_event_id":{src.id}'
+            ),
+        )
+    )
+    remaining = operator_net - Decimal(already or 0)
+    if remaining < 0:
+        remaining = Decimal("0")
+    if qty_physical > remaining:
+        raise HTTPException(
+            409,
+            f"Verifikasi melebihi sisa output operator (remaining={remaining})",
+        )
+    # Lock source row to serialize concurrent verifies.
+    await session.execute(
+        select(ProductionEvent)
+        .where(ProductionEvent.id == src.id)
+        .with_for_update()
+    )
+    # Re-check after lock.
+    already2 = await session.scalar(
+        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.event_type == HELPER_VERIFIED_EVENT,
+            ProductionEvent.payload_json.contains(
+                f'"source_output_event_id":{src.id}'
+            ),
+        )
+    )
+    remaining2 = operator_net - Decimal(already2 or 0)
+    if qty_physical > remaining2:
+        raise HTTPException(
+            409,
+            f"Verifikasi melebihi sisa output operator (remaining={remaining2})",
+        )
+    payload = {
+        "source_output_event_id": src.id,
+        "assignment_id": src.assignment_id,
+        "color_pass": int(src.color_pass or PHYSICAL_CUP_COLOR_PASS),
+        "operator_actor_user_id": src.actor_user_id,
+        "helper_actor_user_id": user.id,
+        "reason": (reason or "").strip() or None,
+    }
+    event = ProductionEvent(
+        job_id=job.id,
+        assignment_id=src.assignment_id,
+        event_type=HELPER_VERIFIED_EVENT,
+        so_line_id=src.so_line_id,
+        color_pass=src.color_pass or PHYSICAL_CUP_COLOR_PASS,
+        lot_code=src.lot_code,
+        qty_physical=qty_physical,
+        qty_pass_ops=qty_physical,
+        idempotency_key=idempotency_key,
+        actor_user_id=user.id,
+        evidence_ref=evidence_ref,
+        reason=(reason or "").strip() or None,
+        payload_json=json.dumps(payload, separators=(",", ":")),
+    )
+    session.add(event)
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(409, "Idempotency key duplikat / concurrent verify") from exc
+    await _mark_terproses(session, job)
+    await session.commit()
+    await session.refresh(event)
+    return event
+
+
 async def cancel_sj(
     session: AsyncSession,
     user: User,
@@ -1011,32 +1203,95 @@ async def cancel_sj(
     reason: str,
     idempotency_key: str,
 ) -> ProductionEvent:
-    """Preserve cancelled/superseded SJ identity as history event."""
+    """Append-only SJ cancel history. Never treats cancel as physical reversal.
+
+    Rejects when unreversed Loading (or POD) exists for the SJ. Capacity release
+    requires a separate authorized durable reversal (out of scope here).
+    """
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
-    if not accurate_sj_id.strip() or not reason.strip():
+    sj_id = (accurate_sj_id or "").strip()
+    if not sj_id or not reason.strip():
         raise HTTPException(422, "Pembatalan SJ memerlukan identitas dan alasan")
-    loaded = await session.scalar(
-        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+
+    # Serialize against Loading under the same per-job row lock.
+    locked = await session.scalar(
+        select(ProductionJob)
+        .where(ProductionJob.id == job.id)
+        .with_for_update()
+    )
+    if locked is None:
+        raise HTTPException(404, "Production job tidak ditemukan")
+
+    existing = await session.scalar(
+        select(ProductionEvent).where(
             ProductionEvent.job_id == job.id,
-            ProductionEvent.event_type == "loading",
-            ProductionEvent.accurate_sj_id == accurate_sj_id,
+            ProductionEvent.idempotency_key == idempotency_key,
         )
     )
+    if existing is not None:
+        if existing.event_type != "sj_cancelled":
+            raise HTTPException(409, "Idempotency key duplikat")
+        if (existing.accurate_sj_id or "").strip() != sj_id:
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return existing
+
+    loaded = await _net_confirmed_loading_sum(
+        session, job.id, accurate_sj_id=sj_id
+    )
+    if loaded > 0:
+        raise HTTPException(
+            409,
+            "SJ memiliki Loading terkonfirmasi (net) — batalkan Loading dulu, "
+            "pembatalan SJ terpisah",
+        )
+    podded = await session.scalar(
+        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.event_type == "pod",
+            ProductionEvent.accurate_sj_id == sj_id,
+        )
+    )
+    if Decimal(podded or 0) > 0:
+        raise HTTPException(
+            409,
+            "SJ memiliki POD — pembatalan ditolak",
+        )
+
     event = ProductionEvent(
         job_id=job.id,
         event_type="sj_cancelled",
-        qty_physical=Decimal(loaded or 0),
-        accurate_sj_id=accurate_sj_id.strip(),
+        qty_physical=Decimal("0"),
+        accurate_sj_id=sj_id,
         idempotency_key=idempotency_key,
         actor_user_id=user.id,
         reason=reason.strip(),
+        payload_json=json.dumps(
+            {
+                "event_type": "sj_cancelled",
+                "job_id": job.id,
+                "branch_id": job.branch_id,
+                "accurate_sj_id": sj_id,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
     )
     session.add(event)
     try:
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
+        raced = await session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.job_id == job.id,
+                ProductionEvent.idempotency_key == idempotency_key,
+            )
+        )
+        if raced is not None and raced.event_type == "sj_cancelled":
+            if (raced.accurate_sj_id or "").strip() != sj_id:
+                raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+            return raced
         raise HTTPException(409, "Idempotency key duplikat") from exc
     await session.refresh(event)
     return event
@@ -1067,14 +1322,15 @@ async def record_packing(
         )
     ).all()
     required = required_color_passes_from_assignments(asg_rows, so_line_id=so_line_id)
-    # Eligible finished = min(net qty per required pass). Never pass-1-only when
-    # a higher pass is scheduled; never sum multi-color work into packable stock.
+    # Packing authority = helper-verified pool (min across required passes).
+    # Operator output alone is never packable stock. Never sum multi-color passes.
+    # Loading remains independent (SJ-line PCS) — packing is monitoring only for Loading.
     pass_nets: list[Decimal] = []
     for pass_no in sorted(required):
-        produced = await session.scalar(
+        verified = await session.scalar(
             select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
                 ProductionEvent.job_id == job.id,
-                ProductionEvent.event_type.in_(list(OUTPUT_EVENT_TYPES)),
+                ProductionEvent.event_type.in_(list(HELPER_VERIFIED_EVENT_TYPES)),
                 ProductionEvent.so_line_id == so_line_id,
                 func.coalesce(ProductionEvent.color_pass, PHYSICAL_CUP_COLOR_PASS)
                 == pass_no,
@@ -1089,7 +1345,7 @@ async def record_packing(
                 == pass_no,
             )
         )
-        pass_nets.append(Decimal(produced or 0) - Decimal(rejected or 0))
+        pass_nets.append(Decimal(verified or 0) - Decimal(rejected or 0))
     eligible = min(pass_nets) if pass_nets else Decimal("0")
     packed = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
@@ -1104,7 +1360,7 @@ async def record_packing(
     if qty_physical > available:
         raise HTTPException(
             409,
-            "Overpacking: melebihi qty fisik selesai semua warna "
+            "Overpacking: melebihi qty helper-verified semua warna "
             f"(eligible={available})",
         )
     event = ProductionEvent(
@@ -1127,6 +1383,282 @@ async def record_packing(
     return event
 
 
+async def _cancelled_sj_ids(session: AsyncSession, job_id: int) -> set[str]:
+    rows = (
+        await session.scalars(
+            select(ProductionEvent.accurate_sj_id).where(
+                ProductionEvent.job_id == job_id,
+                ProductionEvent.event_type == "sj_cancelled",
+                ProductionEvent.accurate_sj_id.is_not(None),
+            )
+        )
+    ).all()
+    return {str(r).strip() for r in rows if r and str(r).strip()}
+
+
+LOADING_EVENT = "loading"
+LOADING_CANCEL_EVENT = "loading_cancelled"
+LOADING_CANCEL_CONFIRMATION = "confirmation_cancel"
+LOADING_CANCEL_PHYSICAL_RETURN = "physical_return"
+LOADING_RETURN_REQUESTED = "loading_return_requested"
+LOADING_RETURN_REJECTED = "loading_return_rejected"
+
+
+def _event_payload(ev: ProductionEvent) -> dict:
+    raw = getattr(ev, "payload_json", None) or ""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _reverses_event_id(ev: ProductionEvent) -> int | None:
+    raw = _event_payload(ev).get("reverses_event_id")
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _event_matches_line_filters(
+    ev: ProductionEvent,
+    *,
+    accurate_sj_id: str | None = None,
+    accurate_sj_line_id: str | None = None,
+    so_line_id: str | None = None,
+) -> bool:
+    sj = (ev.accurate_sj_id or "").strip()
+    if accurate_sj_id is not None and sj != accurate_sj_id.strip():
+        return False
+    if accurate_sj_line_id is not None:
+        if (ev.accurate_sj_line_id or "").strip() != accurate_sj_line_id.strip():
+            return False
+    if so_line_id is not None:
+        if (ev.so_line_id or "").strip() != so_line_id.strip():
+            return False
+    return True
+
+
+async def _sum_event_qty(
+    session: AsyncSession,
+    job_id: int,
+    event_type: str,
+    *,
+    accurate_sj_id: str | None = None,
+    accurate_sj_line_id: str | None = None,
+    so_line_id: str | None = None,
+    reverses_event_id: int | None = None,
+) -> Decimal:
+    rows = (
+        await session.scalars(
+            select(ProductionEvent).where(
+                ProductionEvent.job_id == job_id,
+                ProductionEvent.event_type == event_type,
+            )
+        )
+    ).all()
+    total = Decimal("0")
+    for ev in rows:
+        if not _event_matches_line_filters(
+            ev,
+            accurate_sj_id=accurate_sj_id,
+            accurate_sj_line_id=accurate_sj_line_id,
+            so_line_id=so_line_id,
+        ):
+            continue
+        if reverses_event_id is not None:
+            if _reverses_event_id(ev) != reverses_event_id:
+                continue
+        total += Decimal(ev.qty_physical or 0)
+    return total
+
+
+async def _net_confirmed_loading_sum(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    accurate_sj_id: str | None = None,
+    accurate_sj_line_id: str | None = None,
+    so_line_id: str | None = None,
+) -> Decimal:
+    """Net confirmed Loading = Σloading − Σloading_cancelled (exact identities).
+
+    Authority is Accurate SJ line qty, not Packing. Cancelled confirmation qty
+    is not active Loading. SJ document cancel is a separate concern.
+    """
+    gross = await _sum_event_qty(
+        session,
+        job_id,
+        LOADING_EVENT,
+        accurate_sj_id=accurate_sj_id,
+        accurate_sj_line_id=accurate_sj_line_id,
+        so_line_id=so_line_id,
+    )
+    cancelled = await _sum_event_qty(
+        session,
+        job_id,
+        LOADING_CANCEL_EVENT,
+        accurate_sj_id=accurate_sj_id,
+        accurate_sj_line_id=accurate_sj_line_id,
+        so_line_id=so_line_id,
+    )
+    net = gross - cancelled
+    return net if net > 0 else Decimal("0")
+
+
+# Compatibility aliases for older call sites / tests.
+async def _physical_loading_sum(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    accurate_sj_id: str | None = None,
+    accurate_sj_line_id: str | None = None,
+    so_line_id: str | None = None,
+) -> Decimal:
+    return await _net_confirmed_loading_sum(
+        session,
+        job_id,
+        accurate_sj_id=accurate_sj_id,
+        accurate_sj_line_id=accurate_sj_line_id,
+        so_line_id=so_line_id,
+    )
+
+
+async def _active_loading_sum(
+    session: AsyncSession,
+    job_id: int,
+    *,
+    cancelled: set[str] | None = None,
+    accurate_sj_id: str | None = None,
+    accurate_sj_line_id: str | None = None,
+    so_line_id: str | None = None,
+) -> Decimal:
+    del cancelled
+    return await _net_confirmed_loading_sum(
+        session,
+        job_id,
+        accurate_sj_id=accurate_sj_id,
+        accurate_sj_line_id=accurate_sj_line_id,
+        so_line_id=so_line_id,
+    )
+
+
+_PCS_UOM_ALIASES = frozenset({"PCS", "PC", "PIECE", "PIECES", "CUP", "CUPS"})
+
+
+def _normalize_uom(raw: object) -> str:
+    return str(raw or "").strip().upper()
+
+
+def _require_sj_physical_pcs_uom(line: dict) -> str:
+    """Loading authority is verified SJ qty in physical PCS."""
+    uom = _normalize_uom(line.get("uom"))
+    if not uom:
+        raise HTTPException(
+            409,
+            "UOM baris SJ tidak ada — Loading PCS diblokir",
+        )
+    if uom not in _PCS_UOM_ALIASES:
+        raise HTTPException(
+            409,
+            f"UOM baris SJ harus PCS untuk Loading (uom={uom})",
+        )
+    return uom
+
+
+def _require_whole_physical_pcs(qty_physical: Decimal) -> Decimal:
+    """Confirmed Loading must be whole PCS — no silent truncate/round."""
+    q = Decimal(qty_physical)
+    if q <= 0:
+        raise HTTPException(422, "Qty loading harus > 0")
+    if q != q.to_integral_value():
+        raise HTTPException(
+            409,
+            "Qty loading fisik PCS tidak boleh fraksional",
+        )
+    return q
+
+
+def _authorized_base_qty(line: dict) -> Decimal:
+    """Verified SJ line capacity in physical PCS: quantity × unitRatio."""
+    if line.get("unit_ratio_verified") is False:
+        raise HTTPException(409, "Qty/unit_ratio SJ line tidak valid")
+    if line.get("qty_verified") is False:
+        raise HTTPException(409, "Qty/unit_ratio SJ line tidak valid")
+    qty = line.get("quantity")
+    ratio = line.get("unit_ratio")
+    if qty is None or ratio is None:
+        raise HTTPException(409, "Qty/unit_ratio SJ line tidak valid")
+    try:
+        q = Decimal(str(qty))
+        r = Decimal(str(ratio))
+    except Exception as exc:
+        raise HTTPException(409, "Qty/unit_ratio SJ line tidak valid") from exc
+    if q < 0 or r <= 0:
+        raise HTTPException(409, "Qty/unit_ratio SJ line tidak valid")
+    return q * r
+
+
+def _loading_identity_matches(
+    existing: ProductionEvent,
+    *,
+    job: ProductionJob,
+    accurate_sj_id: str,
+    accurate_sj_number: str,
+    accurate_sj_line_id: str,
+    so_line_id: str,
+    qty_physical: Decimal,
+) -> bool:
+    """Canonical Loading identity — field compare, not JSON key order."""
+    if existing.event_type != LOADING_EVENT or existing.job_id != job.id:
+        return False
+    if (existing.accurate_sj_id or "").strip() != accurate_sj_id:
+        return False
+    if (existing.accurate_sj_number or "").strip() != accurate_sj_number:
+        return False
+    if (existing.accurate_sj_line_id or "").strip() != accurate_sj_line_id:
+        return False
+    if (existing.so_line_id or "").strip() != so_line_id:
+        return False
+    if Decimal(existing.qty_physical or 0) != Decimal(qty_physical):
+        return False
+    payload = _event_payload(existing)
+    if "branch_id" in payload and str(payload.get("branch_id") or "") != str(
+        job.branch_id
+    ):
+        return False
+    return True
+
+
+def _loading_cancel_identity_matches(
+    existing: ProductionEvent,
+    *,
+    job: ProductionJob,
+    source_event_id: int,
+    qty_physical: Decimal,
+    cancel_kind: str,
+) -> bool:
+    if existing.event_type != LOADING_CANCEL_EVENT or existing.job_id != job.id:
+        return False
+    if _reverses_event_id(existing) != source_event_id:
+        return False
+    if Decimal(existing.qty_physical or 0) != Decimal(qty_physical):
+        return False
+    payload = _event_payload(existing)
+    if str(payload.get("cancel_kind") or "") != cancel_kind:
+        return False
+    if "branch_id" in payload and str(payload.get("branch_id") or "") != str(
+        job.branch_id
+    ):
+        return False
+    return True
+
+
 async def record_loading(
     session: AsyncSession,
     user: User,
@@ -1134,63 +1666,805 @@ async def record_loading(
     *,
     accurate_sj_id: str,
     accurate_sj_number: str,
+    accurate_sj_line_id: str,
+    so_line_id: str,
     qty_physical: Decimal,
     idempotency_key: str,
     evidence_ref: str | None = None,
 ) -> ProductionEvent:
+    """Confirm Loading against Accurate SJ line capacity only (not Packing)."""
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
-    if not accurate_sj_id.strip() or not accurate_sj_number.strip():
+    sj_id = (accurate_sj_id or "").strip()
+    sj_no = (accurate_sj_number or "").strip()
+    sj_line = (accurate_sj_line_id or "").strip()
+    so_line = (so_line_id or "").strip()
+    if not sj_id or not sj_no:
         raise HTTPException(422, "Identitas SJ Accurate wajib")
-    if qty_physical <= 0:
-        raise HTTPException(422, "Qty loading harus > 0")
-    from app.services.accurate_evidence import require_valid_sj
+    if not sj_line or not so_line:
+        raise HTTPException(422, "Identitas baris SJ dan SO line wajib")
+    qty_physical = _require_whole_physical_pcs(qty_physical)
 
-    await require_valid_sj(
-        accurate_sj_id=accurate_sj_id,
-        accurate_sj_number=accurate_sj_number,
+    existing = await session.scalar(
+        select(ProductionEvent).where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        if not _loading_identity_matches(
+            existing,
+            job=job,
+            accurate_sj_id=sj_id,
+            accurate_sj_number=sj_no,
+            accurate_sj_line_id=sj_line,
+            so_line_id=so_line,
+            qty_physical=qty_physical,
+        ):
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return existing
+
+    from app.services.accurate_evidence import (
+        require_valid_sj,
+        resolve_sj_loading_line,
+    )
+
+    evidence = await require_valid_sj(
+        accurate_sj_id=sj_id,
+        accurate_sj_number=sj_no,
         expected_so_number=job.accurate_so_number,
         expected_branch_id=job.branch_id,
     )
-    packed = await session.scalar(
-        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+    line = resolve_sj_loading_line(
+        evidence, accurate_sj_line_id=sj_line, so_line_id=so_line
+    )
+    uom = _require_sj_physical_pcs_uom(line)
+    authorized_base = _authorized_base_qty(line)
+
+    locked = await session.scalar(
+        select(ProductionJob)
+        .where(ProductionJob.id == job.id)
+        .with_for_update()
+    )
+    if locked is None:
+        raise HTTPException(404, "Production job tidak ditemukan")
+
+    cancelled = await _cancelled_sj_ids(session, job.id)
+    if sj_id in cancelled:
+        raise HTTPException(409, "SJ sudah dibatalkan; gunakan SJ aktif")
+
+    legacy = await session.scalar(
+        select(func.count())
+        .select_from(ProductionEvent)
+        .where(
             ProductionEvent.job_id == job.id,
-            ProductionEvent.event_type.in_(list(PACKING_EVENT_TYPES)),
+            ProductionEvent.event_type == LOADING_EVENT,
+            ProductionEvent.accurate_sj_id == sj_id,
+            or_(
+                ProductionEvent.accurate_sj_line_id.is_(None),
+                ProductionEvent.so_line_id.is_(None),
+            ),
         )
     )
-    loaded = await session.scalar(
-        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
-            ProductionEvent.event_type == "loading",
+    if int(legacy or 0) > 0:
+        raise HTTPException(
+            409,
+            "SJ memiliki Loading legacy tanpa identitas baris — rekonsiliasi wajib",
         )
+
+    # Owner authority: SJ line verified PCS − net confirmed Loading for that line.
+    # Packing is monitoring-only — never a hard Loading cap.
+    net_loaded = await _net_confirmed_loading_sum(
+        session,
+        job.id,
+        accurate_sj_id=sj_id,
+        accurate_sj_line_id=sj_line,
+        so_line_id=so_line,
     )
-    cancelled = await session.scalar(
-        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
-            ProductionEvent.event_type == "sj_cancelled",
+    remaining_sj = authorized_base - net_loaded
+    if qty_physical > remaining_sj:
+        raise HTTPException(
+            409,
+            f"Loading melebihi sisa otorisasi baris SJ (sisa={remaining_sj})",
         )
-    )
-    available = (
-        Decimal(packed or 0) - Decimal(loaded or 0) + Decimal(cancelled or 0)
-    )
-    if qty_physical > available:
-        raise HTTPException(409, "Loading melebihi qty packing tersedia")
+
+    payload = {
+        "event_type": LOADING_EVENT,
+        "job_id": job.id,
+        "branch_id": job.branch_id,
+        "accurate_sj_id": sj_id,
+        "accurate_sj_number": sj_no,
+        "accurate_sj_line_id": sj_line,
+        "so_line_id": so_line,
+        "qty_physical": str(qty_physical),
+        "uom": uom,
+        "accurate_so_id": line.get("accurate_so_id"),
+        "accurate_item_id": line.get("accurate_item_id"),
+        "quantity": str(line.get("quantity")),
+        "unit_ratio": str(line.get("unit_ratio")),
+        "authorized_base": str(authorized_base),
+        "so_line_id_source": line.get("so_line_id_source"),
+        "authority": "accurate_sj_line",
+    }
     event = ProductionEvent(
         job_id=job.id,
-        event_type="loading",
+        event_type=LOADING_EVENT,
+        so_line_id=so_line,
         qty_physical=qty_physical,
-        accurate_sj_id=accurate_sj_id.strip(),
-        accurate_sj_number=accurate_sj_number.strip(),
+        accurate_sj_id=sj_id,
+        accurate_sj_number=sj_no,
+        accurate_sj_line_id=sj_line,
         idempotency_key=idempotency_key,
         actor_user_id=user.id,
         evidence_ref=evidence_ref,
+        payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
     )
     session.add(event)
     try:
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        raise HTTPException(409, "Idempotency key duplikat") from exc
+        raced = await session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.job_id == job.id,
+                ProductionEvent.idempotency_key == idempotency_key,
+            )
+        )
+        if raced is not None and _loading_identity_matches(
+            raced,
+            job=job,
+            accurate_sj_id=sj_id,
+            accurate_sj_number=sj_no,
+            accurate_sj_line_id=sj_line,
+            so_line_id=so_line,
+            qty_physical=qty_physical,
+        ):
+            return raced
+        raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+    await session.refresh(event)
+    return event
+
+
+def _request_event_id_from_payload(ev: ProductionEvent) -> int | None:
+    raw = _event_payload(ev).get("request_event_id")
+    if raw is None or raw == "":
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _loading_return_request_terminal(
+    session: AsyncSession, job_id: int, request_id: int
+) -> str | None:
+    """Return 'approved' | 'rejected' | None if still open."""
+    rows = (
+        await session.scalars(
+            select(ProductionEvent).where(
+                ProductionEvent.job_id == job_id,
+                ProductionEvent.event_type.in_(
+                    [LOADING_RETURN_REJECTED, LOADING_CANCEL_EVENT]
+                ),
+            )
+        )
+    ).all()
+    for ev in rows:
+        if _request_event_id_from_payload(ev) != request_id:
+            continue
+        if ev.event_type == LOADING_RETURN_REJECTED:
+            return "rejected"
+        if (
+            ev.event_type == LOADING_CANCEL_EVENT
+            and _event_payload(ev).get("cancel_kind") == LOADING_CANCEL_PHYSICAL_RETURN
+        ):
+            return "approved"
+    return None
+
+
+async def _open_return_request_qty(
+    session: AsyncSession,
+    job_id: int,
+    source_event_id: int,
+    *,
+    exclude_request_id: int | None = None,
+) -> Decimal:
+    """Sum qty on open (not approved/rejected) return requests for a Loading."""
+    rows = (
+        await session.scalars(
+            select(ProductionEvent).where(
+                ProductionEvent.job_id == job_id,
+                ProductionEvent.event_type == LOADING_RETURN_REQUESTED,
+            )
+        )
+    ).all()
+    total = Decimal("0")
+    for ev in rows:
+        if exclude_request_id is not None and ev.id == exclude_request_id:
+            continue
+        if _reverses_event_id(ev) != source_event_id:
+            continue
+        terminal = await _loading_return_request_terminal(session, job_id, ev.id)
+        if terminal is None:
+            total += Decimal(ev.qty_physical or 0)
+    return total
+
+
+async def _cancellable_loading_remaining(
+    session: AsyncSession,
+    job: ProductionJob,
+    source: ProductionEvent,
+    *,
+    qty_physical: Decimal,
+    reserve_open_requests: bool,
+) -> tuple[str, str, str, Decimal, Decimal]:
+    """Shared guards for confirmation cancel and physical return approve/request."""
+    sj_id = (source.accurate_sj_id or "").strip()
+    sj_line = (source.accurate_sj_line_id or "").strip()
+    so_line = (source.so_line_id or "").strip()
+    if not sj_id or not sj_line or not so_line:
+        raise HTTPException(
+            409,
+            "Loading legacy tanpa identitas baris tidak dapat dibatalkan lewat jalur ini",
+        )
+    already_cancelled = await _sum_event_qty(
+        session,
+        job.id,
+        LOADING_CANCEL_EVENT,
+        reverses_event_id=source.id,
+    )
+    remaining_on_event = Decimal(source.qty_physical or 0) - already_cancelled
+    if reserve_open_requests:
+        remaining_on_event -= await _open_return_request_qty(
+            session, job.id, source.id
+        )
+    if remaining_on_event <= 0:
+        raise HTTPException(409, "Loading sumber sudah dibatalkan penuh")
+    if qty_physical > remaining_on_event:
+        raise HTTPException(
+            409,
+            f"Qty batal melebihi sisa Loading event (sisa={remaining_on_event})",
+        )
+    net_sj = await _net_confirmed_loading_sum(
+        session, job.id, accurate_sj_id=sj_id
+    )
+    podded = await session.scalar(
+        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.event_type == "pod",
+            ProductionEvent.accurate_sj_id == sj_id,
+        )
+    )
+    pod_qty = Decimal(podded or 0)
+    # Open return requests do not release net; POD guard uses net after this cancel.
+    if net_sj - qty_physical < pod_qty:
+        raise HTTPException(
+            409,
+            "Tidak boleh membatalkan qty yang sudah ter-cover POD",
+        )
+    return sj_id, sj_line, so_line, remaining_on_event, pod_qty
+
+
+async def cancel_loading(
+    session: AsyncSession,
+    user: User,
+    job: ProductionJob,
+    *,
+    source_event_id: int,
+    qty_physical: Decimal,
+    reason: str,
+    idempotency_key: str,
+    cancel_kind: str = LOADING_CANCEL_CONFIRMATION,
+    evidence_attachment_id: int | None = None,
+    evidence_ref: str | None = None,
+) -> ProductionEvent:
+    """confirmation_cancel only — physical_return uses request/approve APIs."""
+    _require(user, P.DELIVERY_MANAGE)
+    _branch(user, job.branch_id)
+    kind = (cancel_kind or "").strip() or LOADING_CANCEL_CONFIRMATION
+    if kind == LOADING_CANCEL_PHYSICAL_RETURN:
+        raise HTTPException(
+            422,
+            "physical_return memakai API return-request/approve — "
+            "bukan cancel langsung",
+        )
+    if kind != LOADING_CANCEL_CONFIRMATION:
+        raise HTTPException(422, "Jenis pembatalan Loading tidak valid")
+    if not (reason or "").strip():
+        raise HTTPException(422, "Alasan pembatalan Loading wajib")
+    if evidence_attachment_id is not None:
+        raise HTTPException(
+            422,
+            "confirmation_cancel tidak memakai evidence_attachment_id",
+        )
+    del evidence_ref  # optional note unused for confirmation path
+    qty_physical = _require_whole_physical_pcs(qty_physical)
+
+    existing = await session.scalar(
+        select(ProductionEvent).where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        if not _loading_cancel_identity_matches(
+            existing,
+            job=job,
+            source_event_id=source_event_id,
+            qty_physical=qty_physical,
+            cancel_kind=kind,
+        ):
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return existing
+
+    locked = await session.scalar(
+        select(ProductionJob)
+        .where(ProductionJob.id == job.id)
+        .with_for_update()
+    )
+    if locked is None:
+        raise HTTPException(404, "Production job tidak ditemukan")
+
+    source = await session.get(ProductionEvent, source_event_id)
+    if (
+        source is None
+        or source.job_id != job.id
+        or source.event_type != LOADING_EVENT
+    ):
+        raise HTTPException(404, "Event Loading sumber tidak ditemukan")
+
+    sj_id, sj_line, so_line, _, _ = await _cancellable_loading_remaining(
+        session,
+        job,
+        source,
+        qty_physical=qty_physical,
+        reserve_open_requests=True,
+    )
+
+    payload = {
+        "event_type": LOADING_CANCEL_EVENT,
+        "job_id": job.id,
+        "branch_id": job.branch_id,
+        "actor_user_id": user.id,
+        "reverses_event_id": int(source.id),
+        "cancel_kind": kind,
+        "accurate_sj_id": sj_id,
+        "accurate_sj_number": (source.accurate_sj_number or "").strip(),
+        "accurate_sj_line_id": sj_line,
+        "so_line_id": so_line,
+        "qty_physical": str(qty_physical),
+        "claims_physical_return": False,
+        "evidence_attachment_id": None,
+        "approval_policy": "confirmation_cancel_no_dual_approval",
+    }
+    event = ProductionEvent(
+        job_id=job.id,
+        event_type=LOADING_CANCEL_EVENT,
+        so_line_id=so_line,
+        qty_physical=qty_physical,
+        accurate_sj_id=sj_id,
+        accurate_sj_number=source.accurate_sj_number,
+        accurate_sj_line_id=sj_line,
+        idempotency_key=idempotency_key,
+        actor_user_id=user.id,
+        reason=reason.strip(),
+        evidence_ref=None,
+        payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+    )
+    session.add(event)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raced = await session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.job_id == job.id,
+                ProductionEvent.idempotency_key == idempotency_key,
+            )
+        )
+        if raced is not None and _loading_cancel_identity_matches(
+            raced,
+            job=job,
+            source_event_id=source_event_id,
+            qty_physical=qty_physical,
+            cancel_kind=kind,
+        ):
+            return raced
+        raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+    await session.refresh(event)
+    return event
+
+
+def _return_request_identity_matches(
+    existing: ProductionEvent,
+    *,
+    job: ProductionJob,
+    source_event_id: int,
+    qty_physical: Decimal,
+    evidence_attachment_id: int,
+) -> bool:
+    if existing.event_type != LOADING_RETURN_REQUESTED or existing.job_id != job.id:
+        return False
+    if _reverses_event_id(existing) != source_event_id:
+        return False
+    if Decimal(existing.qty_physical or 0) != Decimal(qty_physical):
+        return False
+    payload = _event_payload(existing)
+    if int(payload.get("evidence_attachment_id") or 0) != int(evidence_attachment_id):
+        return False
+    if "branch_id" in payload and str(payload.get("branch_id") or "") != str(
+        job.branch_id
+    ):
+        return False
+    return True
+
+
+async def request_loading_return(
+    session: AsyncSession,
+    user: User,
+    job: ProductionJob,
+    *,
+    source_event_id: int,
+    qty_physical: Decimal,
+    reason: str,
+    idempotency_key: str,
+    evidence_attachment_id: int,
+) -> ProductionEvent:
+    """Create physical-return request. Does NOT release Loading capacity."""
+    _require(user, P.DELIVERY_LOADING_RETURN_REQUEST)
+    _branch(user, job.branch_id)
+    if not (reason or "").strip():
+        raise HTTPException(422, "Alasan physical return wajib")
+    qty_physical = _require_whole_physical_pcs(qty_physical)
+
+    existing = await session.scalar(
+        select(ProductionEvent).where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        if not _return_request_identity_matches(
+            existing,
+            job=job,
+            source_event_id=source_event_id,
+            qty_physical=qty_physical,
+            evidence_attachment_id=evidence_attachment_id,
+        ):
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return existing
+
+    locked = await session.scalar(
+        select(ProductionJob)
+        .where(ProductionJob.id == job.id)
+        .with_for_update()
+    )
+    if locked is None:
+        raise HTTPException(404, "Production job tidak ditemukan")
+
+    source = await session.get(ProductionEvent, source_event_id)
+    if (
+        source is None
+        or source.job_id != job.id
+        or source.event_type != LOADING_EVENT
+    ):
+        raise HTTPException(404, "Event Loading sumber tidak ditemukan")
+
+    # Pending requests do not release capacity and do not hard-reserve it.
+    # Over-subscription is fail-closed at approve under the job lock.
+    sj_id, sj_line, so_line, _, _ = await _cancellable_loading_remaining(
+        session,
+        job,
+        source,
+        qty_physical=qty_physical,
+        reserve_open_requests=False,
+    )
+
+    from app.services.production import attachments as attach_svc
+
+    attachment = await attach_svc.validate_unbound_loading_return_attachment(
+        session,
+        job=job,
+        accurate_sj_id=sj_id,
+        attachment_id=int(evidence_attachment_id),
+    )
+
+    payload = {
+        "event_type": LOADING_RETURN_REQUESTED,
+        "job_id": job.id,
+        "branch_id": job.branch_id,
+        "actor_user_id": user.id,
+        "requester_user_id": user.id,
+        "reverses_event_id": int(source.id),
+        "accurate_sj_id": sj_id,
+        "accurate_sj_number": (source.accurate_sj_number or "").strip(),
+        "accurate_sj_line_id": sj_line,
+        "so_line_id": so_line,
+        "qty_physical": str(qty_physical),
+        "evidence_attachment_id": int(attachment.id),
+        "releases_capacity": False,
+        "approval_policy": "dual_control_loading_return",
+    }
+    event = ProductionEvent(
+        job_id=job.id,
+        event_type=LOADING_RETURN_REQUESTED,
+        so_line_id=so_line,
+        qty_physical=qty_physical,
+        accurate_sj_id=sj_id,
+        accurate_sj_number=source.accurate_sj_number,
+        accurate_sj_line_id=sj_line,
+        idempotency_key=idempotency_key,
+        actor_user_id=user.id,
+        reason=reason.strip(),
+        evidence_ref=f"attachment:{attachment.id}",
+        payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+    )
+    session.add(event)
+    try:
+        await session.flush()
+        await attach_svc.bind_attachments_to_event(
+            session, {"loading_return_photo": attachment}, event.id
+        )
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raced = await session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.job_id == job.id,
+                ProductionEvent.idempotency_key == idempotency_key,
+            )
+        )
+        if raced is not None and _return_request_identity_matches(
+            raced,
+            job=job,
+            source_event_id=source_event_id,
+            qty_physical=qty_physical,
+            evidence_attachment_id=evidence_attachment_id,
+        ):
+            return raced
+        raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+    await session.refresh(event)
+    return event
+
+
+async def approve_loading_return(
+    session: AsyncSession,
+    user: User,
+    job: ProductionJob,
+    *,
+    request_event_id: int,
+    idempotency_key: str,
+    reason: str | None = None,
+) -> ProductionEvent:
+    """Approve physical return → append loading_cancelled; releases capacity."""
+    _require(user, P.DELIVERY_LOADING_RETURN_APPROVE)
+    _branch(user, job.branch_id)
+
+    existing = await session.scalar(
+        select(ProductionEvent).where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        if existing.event_type != LOADING_CANCEL_EVENT:
+            raise HTTPException(409, "Idempotency key duplikat")
+        payload = _event_payload(existing)
+        if _request_event_id_from_payload(existing) != request_event_id:
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        if payload.get("cancel_kind") != LOADING_CANCEL_PHYSICAL_RETURN:
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return existing
+
+    locked = await session.scalar(
+        select(ProductionJob)
+        .where(ProductionJob.id == job.id)
+        .with_for_update()
+    )
+    if locked is None:
+        raise HTTPException(404, "Production job tidak ditemukan")
+
+    req = await session.get(ProductionEvent, request_event_id)
+    if (
+        req is None
+        or req.job_id != job.id
+        or req.event_type != LOADING_RETURN_REQUESTED
+    ):
+        raise HTTPException(404, "Permintaan physical return tidak ditemukan")
+
+    terminal = await _loading_return_request_terminal(session, job.id, req.id)
+    if terminal == "approved":
+        # Find prior approval for true idempotent replay without key
+        raise HTTPException(409, "Permintaan physical return sudah disetujui")
+    if terminal == "rejected":
+        raise HTTPException(409, "Permintaan physical return sudah ditolak")
+
+    if int(req.actor_user_id) == int(user.id):
+        raise HTTPException(
+            409,
+            "Verifier harus berbeda dari requester physical return",
+        )
+
+    source_id = _reverses_event_id(req)
+    if source_id is None:
+        raise HTTPException(409, "Permintaan return tanpa sumber Loading")
+    source = await session.get(ProductionEvent, source_id)
+    if (
+        source is None
+        or source.job_id != job.id
+        or source.event_type != LOADING_EVENT
+    ):
+        raise HTTPException(409, "Event Loading sumber tidak valid")
+
+    qty_physical = _require_whole_physical_pcs(Decimal(req.qty_physical or 0))
+    # Capacity uses committed cancels only — open requests do not reserve stock.
+    # Concurrent approves serialize on job FOR UPDATE; loser sees reduced remaining.
+    sj_id, sj_line, so_line, _, _ = await _cancellable_loading_remaining(
+        session,
+        job,
+        source,
+        qty_physical=qty_physical,
+        reserve_open_requests=False,
+    )
+
+    req_payload = _event_payload(req)
+    payload = {
+        "event_type": LOADING_CANCEL_EVENT,
+        "job_id": job.id,
+        "branch_id": job.branch_id,
+        "actor_user_id": user.id,
+        "approver_user_id": user.id,
+        "requester_user_id": int(req.actor_user_id),
+        "request_event_id": int(req.id),
+        "reverses_event_id": int(source.id),
+        "cancel_kind": LOADING_CANCEL_PHYSICAL_RETURN,
+        "accurate_sj_id": sj_id,
+        "accurate_sj_number": (source.accurate_sj_number or "").strip(),
+        "accurate_sj_line_id": sj_line,
+        "so_line_id": so_line,
+        "qty_physical": str(qty_physical),
+        "claims_physical_return": True,
+        "evidence_attachment_id": req_payload.get("evidence_attachment_id"),
+        "approval_policy": "dual_control_loading_return",
+        "releases_capacity": True,
+    }
+    event = ProductionEvent(
+        job_id=job.id,
+        event_type=LOADING_CANCEL_EVENT,
+        so_line_id=so_line,
+        qty_physical=qty_physical,
+        accurate_sj_id=sj_id,
+        accurate_sj_number=source.accurate_sj_number,
+        accurate_sj_line_id=sj_line,
+        idempotency_key=idempotency_key,
+        actor_user_id=user.id,
+        reason=(reason or req.reason or "physical_return_approved").strip(),
+        evidence_ref=req.evidence_ref,
+        payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+    )
+    session.add(event)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raced = await session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.job_id == job.id,
+                ProductionEvent.idempotency_key == idempotency_key,
+            )
+        )
+        if (
+            raced is not None
+            and raced.event_type == LOADING_CANCEL_EVENT
+            and _request_event_id_from_payload(raced) == request_event_id
+        ):
+            return raced
+        raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+    await session.refresh(event)
+    return event
+
+
+async def reject_loading_return(
+    session: AsyncSession,
+    user: User,
+    job: ProductionJob,
+    *,
+    request_event_id: int,
+    reason: str,
+    idempotency_key: str,
+) -> ProductionEvent:
+    """Reject physical-return request — no capacity change."""
+    _require(user, P.DELIVERY_LOADING_RETURN_APPROVE)
+    _branch(user, job.branch_id)
+    if not (reason or "").strip():
+        raise HTTPException(422, "Alasan penolakan physical return wajib")
+
+    existing = await session.scalar(
+        select(ProductionEvent).where(
+            ProductionEvent.job_id == job.id,
+            ProductionEvent.idempotency_key == idempotency_key,
+        )
+    )
+    if existing is not None:
+        if existing.event_type != LOADING_RETURN_REJECTED:
+            raise HTTPException(409, "Idempotency key duplikat")
+        if _request_event_id_from_payload(existing) != request_event_id:
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return existing
+
+    locked = await session.scalar(
+        select(ProductionJob)
+        .where(ProductionJob.id == job.id)
+        .with_for_update()
+    )
+    if locked is None:
+        raise HTTPException(404, "Production job tidak ditemukan")
+
+    req = await session.get(ProductionEvent, request_event_id)
+    if (
+        req is None
+        or req.job_id != job.id
+        or req.event_type != LOADING_RETURN_REQUESTED
+    ):
+        raise HTTPException(404, "Permintaan physical return tidak ditemukan")
+
+    terminal = await _loading_return_request_terminal(session, job.id, req.id)
+    if terminal is not None:
+        raise HTTPException(
+            409,
+            f"Permintaan physical return sudah {terminal}",
+        )
+    if int(req.actor_user_id) == int(user.id):
+        raise HTTPException(
+            409,
+            "Verifier harus berbeda dari requester physical return",
+        )
+
+    payload = {
+        "event_type": LOADING_RETURN_REJECTED,
+        "job_id": job.id,
+        "branch_id": job.branch_id,
+        "actor_user_id": user.id,
+        "approver_user_id": user.id,
+        "requester_user_id": int(req.actor_user_id),
+        "request_event_id": int(req.id),
+        "reverses_event_id": _reverses_event_id(req),
+        "qty_physical": str(req.qty_physical or 0),
+        "releases_capacity": False,
+        "approval_policy": "dual_control_loading_return",
+    }
+    event = ProductionEvent(
+        job_id=job.id,
+        event_type=LOADING_RETURN_REJECTED,
+        so_line_id=req.so_line_id,
+        qty_physical=Decimal(req.qty_physical or 0),
+        accurate_sj_id=req.accurate_sj_id,
+        accurate_sj_number=req.accurate_sj_number,
+        accurate_sj_line_id=req.accurate_sj_line_id,
+        idempotency_key=idempotency_key,
+        actor_user_id=user.id,
+        reason=reason.strip(),
+        evidence_ref=req.evidence_ref,
+        payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+    )
+    session.add(event)
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raced = await session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.job_id == job.id,
+                ProductionEvent.idempotency_key == idempotency_key,
+            )
+        )
+        if (
+            raced is not None
+            and raced.event_type == LOADING_RETURN_REJECTED
+            and _request_event_id_from_payload(raced) == request_event_id
+        ):
+            return raced
+        raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
     await session.refresh(event)
     return event
 
@@ -1244,12 +2518,21 @@ async def record_pod(
     )
     if int(cancelled or 0) > 0:
         raise HTTPException(409, "SJ sudah dibatalkan; gunakan SJ aktif")
+    # Serialize POD against Loading cancel under the same job lock.
+    locked = await session.scalar(
+        select(ProductionJob)
+        .where(ProductionJob.id == job.id)
+        .with_for_update()
+    )
+    if locked is None:
+        raise HTTPException(404, "Production job tidak ditemukan")
+
     # Re-verify SJ at POD time — never rely solely on prior loading snapshot.
     loading_row = await session.scalar(
         select(ProductionEvent)
         .where(
             ProductionEvent.job_id == job.id,
-            ProductionEvent.event_type == "loading",
+            ProductionEvent.event_type == LOADING_EVENT,
             ProductionEvent.accurate_sj_id == sj,
         )
         .order_by(ProductionEvent.id.desc())
@@ -1266,12 +2549,8 @@ async def record_pod(
             expected_so_number=job.accurate_so_number,
             expected_branch_id=job.branch_id,
         )
-    loaded = await session.scalar(
-        select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
-            ProductionEvent.event_type == "loading",
-            ProductionEvent.accurate_sj_id == sj,
-        )
+    loaded = await _net_confirmed_loading_sum(
+        session, job.id, accurate_sj_id=sj
     )
     already_pod = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
@@ -1280,8 +2559,8 @@ async def record_pod(
             ProductionEvent.accurate_sj_id == sj,
         )
     )
-    remaining = Decimal(loaded or 0) - Decimal(already_pod or 0)
-    if Decimal(loaded or 0) <= 0:
+    remaining = loaded - Decimal(already_pod or 0)
+    if loaded <= 0:
         raise HTTPException(409, "POD tidak boleh bypass Loading")
     if qty_physical <= 0 or qty_physical > remaining:
         raise HTTPException(409, "Qty POD tidak valid terhadap sisa Loading SJ")
@@ -1348,6 +2627,146 @@ async def find_job_by_so(
         return None
     _branch(user, job.branch_id)
     return job
+
+
+def _try_authorized_sj_pcs(line: dict) -> Decimal | None:
+    """Return verified SJ-line PCS or None — never invent a quantity."""
+    try:
+        return _authorized_base_qty(line)
+    except HTTPException:
+        return None
+
+
+async def resolve_loading_line_authority(
+    session: AsyncSession,
+    user: User,
+    job: ProductionJob,
+    *,
+    accurate_sj_id: str,
+    accurate_sj_number: str,
+    accurate_sj_line_id: str,
+    so_line_id: str,
+) -> dict:
+    """SJ-line Loading authority row for UI. Soft on gateway; UNKNOWN if unverified."""
+    _require(user, P.JOB_READ)
+    _branch(user, job.branch_id)
+    from app.services.accurate_evidence import (
+        require_valid_sj,
+        resolve_sj_loading_line,
+    )
+
+    sj_id = (accurate_sj_id or "").strip()
+    sj_no = (accurate_sj_number or "").strip() or sj_id
+    sj_line = (accurate_sj_line_id or "").strip()
+    so_line = (so_line_id or "").strip()
+    if not sj_id or not sj_line or not so_line:
+        raise HTTPException(422, "Identitas SJ / SJ-line / SO-line wajib")
+
+    confirmed = await _sum_event_qty(
+        session,
+        job.id,
+        LOADING_EVENT,
+        accurate_sj_id=sj_id,
+        accurate_sj_line_id=sj_line,
+        so_line_id=so_line,
+    )
+    cancelled = await _sum_event_qty(
+        session,
+        job.id,
+        LOADING_CANCEL_EVENT,
+        accurate_sj_id=sj_id,
+        accurate_sj_line_id=sj_line,
+        so_line_id=so_line,
+    )
+    net = confirmed - cancelled
+    if net < 0:
+        net = Decimal("0")
+
+    qty_sj: Decimal | None = None
+    verification = "UNKNOWN"
+    note = None
+    try:
+        evidence = await require_valid_sj(
+            accurate_sj_id=sj_id,
+            accurate_sj_number=sj_no,
+            expected_so_number=job.accurate_so_number,
+            expected_branch_id=job.branch_id,
+        )
+        if evidence.get("verified") and evidence.get("mode") != "test_skip":
+            line = resolve_sj_loading_line(
+                evidence,
+                accurate_sj_line_id=sj_line,
+                so_line_id=so_line,
+            )
+            qty_sj = _try_authorized_sj_pcs(line)
+            if qty_sj is not None:
+                verification = "VERIFIED"
+            else:
+                note = "Qty/unit_ratio SJ line tidak valid"
+        else:
+            note = "Verifikasi SJ Accurate tidak tersedia"
+    except HTTPException as exc:
+        note = str(exc.detail)
+
+    remaining = None if qty_sj is None else max(Decimal("0"), qty_sj - net)
+
+    def _pcs_str(value: Decimal) -> str:
+        integral = value.to_integral_value()
+        if value == integral:
+            return str(integral)
+        return format(value, "f")
+
+    return {
+        "accurate_sj_id": sj_id,
+        "accurate_sj_number": sj_no,
+        "accurate_sj_line_id": sj_line,
+        "so_line_id": so_line,
+        "verification": verification,
+        "qty_sj_pcs": _pcs_str(qty_sj) if qty_sj is not None else None,
+        "loading_confirmed": _pcs_str(confirmed),
+        "loading_cancelled": _pcs_str(cancelled),
+        "loading_net": _pcs_str(net),
+        "remaining_loading": _pcs_str(remaining) if remaining is not None else None,
+        "packing_monitoring_only": True,
+        "actions_enabled": verification == "VERIFIED",
+        "note": note,
+    }
+
+
+async def _loading_line_authority_for_events(
+    session: AsyncSession,
+    user: User,
+    job: ProductionJob,
+    events: list[ProductionEvent],
+) -> list[dict]:
+    keys: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for ev in events:
+        sj_id = (ev.accurate_sj_id or "").strip()
+        sj_line = (ev.accurate_sj_line_id or "").strip()
+        so_line = (ev.so_line_id or "").strip()
+        if not sj_id or not sj_line or not so_line:
+            continue
+        sj_no = (ev.accurate_sj_number or "").strip() or sj_id
+        key = (sj_id, sj_no, sj_line, so_line)
+        if key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    rows: list[dict] = []
+    for sj_id, sj_no, sj_line, so_line in keys:
+        rows.append(
+            await resolve_loading_line_authority(
+                session,
+                user,
+                job,
+                accurate_sj_id=sj_id,
+                accurate_sj_number=sj_no,
+                accurate_sj_line_id=sj_line,
+                so_line_id=so_line,
+            )
+        )
+    return rows
 
 
 async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> dict:
@@ -1435,6 +2854,7 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                 "id": d.id,
                 "version_no": d.version_no,
                 "file_name": d.file_name,
+                "so_line_id": d.so_line_id,
                 "status": d.status,
                 "bypass": d.bypass,
                 "customer_approval": d.customer_approval,
@@ -1537,11 +2957,18 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                 "lot_code": e.lot_code,
                 "accurate_sj_id": e.accurate_sj_id,
                 "accurate_sj_number": e.accurate_sj_number,
+                "accurate_sj_line_id": e.accurate_sj_line_id,
+                "actor_user_id": e.actor_user_id,
+                "payload_json": e.payload_json,
+                "evidence_ref": e.evidence_ref,
                 "reason": e.reason,
                 "created_at": e.created_at.isoformat() if e.created_at else None,
             }
             for e in events
         ],
+        "sj_line_authority": await _loading_line_authority_for_events(
+            session, user, job, list(events)
+        ),
     }
 
 
@@ -1713,9 +3140,9 @@ def derive_team_tasks_for_job(
     sample_uploaded = bool(samples)
     # Cups that entered print (pass 1 ledger) — progress signal, not pack eligibility.
     print_qty = physical_cup_qty_from_events(events)
-    # Packable finished cups = min across required scheduled color passes.
+    # Packable = helper-verified min across required scheduled color passes.
     required_passes = required_color_passes_from_assignments(active_assignments)
-    finished_qty = eligible_finished_qty_from_events(events, required_passes)
+    finished_qty = eligible_verified_qty_from_events(events, required_passes)
     pack_qty = packing_qty_from_events(events)
 
     tasks: list[dict] = []
@@ -1809,15 +3236,26 @@ def derive_team_tasks_for_job(
                         )
                     )
 
-        # Loading → Pengiriman (POD) — evidence-based; never fake Done from UI.
-        load_qty = sum(
+        # Loading → Pengiriman (POD) — SJ-line authority; Packing is monitoring only.
+        load_gross = sum(
             (
                 Decimal(getattr(e, "qty_physical", 0) or 0)
                 for e in events
-                if getattr(e, "event_type", None) == "loading"
+                if getattr(e, "event_type", None) == LOADING_EVENT
             ),
             Decimal("0"),
         )
+        load_cancel = sum(
+            (
+                Decimal(getattr(e, "qty_physical", 0) or 0)
+                for e in events
+                if getattr(e, "event_type", None) == LOADING_CANCEL_EVENT
+            ),
+            Decimal("0"),
+        )
+        load_qty = load_gross - load_cancel
+        if load_qty < 0:
+            load_qty = Decimal("0")
         pod_qty = sum(
             (
                 Decimal(getattr(e, "qty_physical", 0) or 0)
@@ -1836,7 +3274,8 @@ def derive_team_tasks_for_job(
             if '"attachments"' in str(raw) and "pod_photo_1" in str(raw):
                 compliant_pod = True
                 break
-        if pack_qty > 0:
+        # Loading is not gated on Packing qty (Owner rule).
+        if payment_ok:
             if load_qty > 0:
                 tasks.append(_task_row(job, "loading", "done"))
             else:
@@ -1872,15 +3311,6 @@ def derive_team_tasks_for_job(
                         reason="Menunggu Loading SJ resmi",
                     )
                 )
-        elif finished_qty > 0 or print_qty > 0:
-            tasks.append(
-                _task_row(
-                    job,
-                    "loading",
-                    "blocked",
-                    reason="Menunggu packing sebelum loading",
-                )
-            )
 
     if has_non_print:
         # Non-cetak: no fake screen/sample/print. Payment opens visibility.

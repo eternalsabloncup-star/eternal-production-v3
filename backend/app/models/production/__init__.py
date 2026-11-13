@@ -1,6 +1,7 @@
 """Phase 2 production workflow models."""
 
 from app.models.production.attachment import ProductionAttachment
+from app.models.production.customer_token import CustomerAccessToken
 from app.models.production.design import DesignVersion
 from app.models.production.event import ProductionEvent
 from app.models.production.job import ProductionJob
@@ -12,6 +13,7 @@ from app.models.production.schedule import ScheduleAssignment
 
 __all__ = [
     "DesignVersion",
+    "CustomerAccessToken",
     "ProductionJob",
     "PaymentReceiptRef",
     "PaymentBypass",

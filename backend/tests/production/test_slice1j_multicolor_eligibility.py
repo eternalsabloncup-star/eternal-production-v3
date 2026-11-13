@@ -190,6 +190,7 @@ ALL_PERMS_1J = [
     P.JOB_READ,
     P.DESIGN_UPLOAD,
     P.DESIGN_APPROVE,
+    P.DESIGN_BYPASS,
     P.PAYMENT_BYPASS,
     P.SCHEDULE_MANAGE,
     P.PREP_SCREENER,
@@ -197,6 +198,7 @@ ALL_PERMS_1J = [
     P.SAMPLE_UPLOAD,
     P.SAMPLE_DECIDE,
     P.OUTPUT_CONFIRM,
+    P.OUTPUT_HELPER_VERIFY,
     P.PACKING_RECORD,
 ]
 
@@ -264,7 +266,7 @@ async def _seed_two_color_job(client: AsyncClient) -> tuple[int, dict, dict]:
     ).json()
     await client.post(
         f"/api/v1/production/jobs/design/versions/{design['id']}/decision",
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
     await client.post(
         f"/api/v1/production/jobs/{jid}/payment/bypass",
@@ -326,7 +328,7 @@ async def _seed_two_color_job(client: AsyncClient) -> tuple[int, dict, dict]:
     ).json()
     await client.post(
         f"/api/v1/production/jobs/samples/{sample['id']}/decision",
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
     return jid, asg1, asg2
 
@@ -334,17 +336,19 @@ async def _seed_two_color_job(client: AsyncClient) -> tuple[int, dict, dict]:
 @pytest.mark.asyncio
 async def test_api_pass1_only_cannot_pack(client_1j: AsyncClient) -> None:
     jid, asg1, _asg2 = await _seed_two_color_job(client_1j)
-    assert (
-        await client_1j.post(
-            f"/api/v1/production/jobs/{jid}/outputs",
-            json={
-                "assignment_id": asg1["id"],
-                "qty_physical": "5000",
-                "color_pass": 1,
-                "idempotency_key": "out-1j-p1-only",
-            },
-        )
-    ).status_code == 200
+    o1 = await client_1j.post(
+        f"/api/v1/production/jobs/{jid}/outputs",
+        json={
+            "assignment_id": asg1["id"],
+            "qty_physical": "5000",
+            "color_pass": 1,
+            "idempotency_key": "out-1j-p1-only",
+        },
+    )
+    assert o1.status_code == 200
+    from tests.production.helper_verify_helpers import helper_verify_output
+
+    await helper_verify_output(client_1j, jid, o1.json()["id"], "5000", idem="hv-1j-p1-only")
     blocked = await client_1j.post(
         f"/api/v1/production/jobs/{jid}/packing",
         json={
@@ -359,28 +363,30 @@ async def test_api_pass1_only_cannot_pack(client_1j: AsyncClient) -> None:
 @pytest.mark.asyncio
 async def test_api_partial_pass2_caps_packing(client_1j: AsyncClient) -> None:
     jid, asg1, asg2 = await _seed_two_color_job(client_1j)
-    assert (
-        await client_1j.post(
-            f"/api/v1/production/jobs/{jid}/outputs",
-            json={
-                "assignment_id": asg1["id"],
-                "qty_physical": "5000",
-                "color_pass": 1,
-                "idempotency_key": "out-1j-p1-full",
-            },
-        )
-    ).status_code == 200
-    assert (
-        await client_1j.post(
-            f"/api/v1/production/jobs/{jid}/outputs",
-            json={
-                "assignment_id": asg2["id"],
-                "qty_physical": "3000",
-                "color_pass": 2,
-                "idempotency_key": "out-1j-p2-partial",
-            },
-        )
-    ).status_code == 200
+    o1 = await client_1j.post(
+        f"/api/v1/production/jobs/{jid}/outputs",
+        json={
+            "assignment_id": asg1["id"],
+            "qty_physical": "5000",
+            "color_pass": 1,
+            "idempotency_key": "out-1j-p1-full",
+        },
+    )
+    assert o1.status_code == 200
+    o2 = await client_1j.post(
+        f"/api/v1/production/jobs/{jid}/outputs",
+        json={
+            "assignment_id": asg2["id"],
+            "qty_physical": "3000",
+            "color_pass": 2,
+            "idempotency_key": "out-1j-p2-partial",
+        },
+    )
+    assert o2.status_code == 200
+    from tests.production.helper_verify_helpers import helper_verify_output
+
+    await helper_verify_output(client_1j, jid, o1.json()["id"], "5000", idem="hv-1j-p1")
+    await helper_verify_output(client_1j, jid, o2.json()["id"], "3000", idem="hv-1j-p2")
     over = await client_1j.post(
         f"/api/v1/production/jobs/{jid}/packing",
         json={

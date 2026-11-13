@@ -34,8 +34,10 @@ class ProductionEvent(Base):
         ForeignKey("schedule_assignments.id"), nullable=True, index=True
     )
     event_type: Mapped[str] = mapped_column(String(64), index=True)
-    # output_confirmed|output_correction|reject|reject_verified|
-    # packing_batch|loading|pod|sj_ref|sj_cancelled|wip_hold|note
+    # output_confirmed|output_correction|output_helper_verified|
+    # reject|reject_verified|
+    # packing_batch|loading|loading_cancelled|loading_return_requested|
+    # loading_return_rejected|pod|sj_ref|sj_cancelled|wip_hold|note
     so_line_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     color_pass: Mapped[int | None] = mapped_column(Integer, nullable=True)
     lot_code: Mapped[str | None] = mapped_column(String(120), nullable=True)
@@ -44,6 +46,8 @@ class ProductionEvent(Base):
     # print-pass operations may exceed physical cups for multicolor
     accurate_sj_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     accurate_sj_number: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # Accurate delivery-order detailItem.id — required for new Loading rows.
+    accurate_sj_line_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(120))
     actor_user_id: Mapped[int] = mapped_column(Integer)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -43,6 +43,7 @@ ALL_PERMS = [
     P.SAMPLE_UPLOAD,
     P.SAMPLE_DECIDE,
     P.OUTPUT_CONFIRM,
+    P.OUTPUT_HELPER_VERIFY,
     P.REJECT_RECORD,
     P.REJECT_VERIFY,
     P.PACKING_RECORD,
@@ -93,7 +94,34 @@ async def _token(client: AsyncClient) -> str:
 
 
 @pytest.mark.asyncio
-async def test_full_happy_path_and_guards(client: AsyncClient) -> None:
+async def test_full_happy_path_and_guards(
+    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.production.sj_line_helpers import sj_line_item
+
+    async def _valid_sj(**kwargs):
+        return {
+            "verified": True,
+            "mode": "gateway",
+            "accurate_sj_id": kwargs["accurate_sj_id"],
+            "accurate_sj_number": kwargs["accurate_sj_number"],
+            "sales_order_number": "SO/PHASE2/001",
+            "branch_id": "branch-a",
+            "line_items": [
+                sj_line_item(
+                    accurate_sj_line_id="SL-1",
+                    so_line_id="line-1",
+                    quantity=100,
+                )
+            ],
+            "loading_eligible": True,
+            "live_verified": False,
+        }
+
+    monkeypatch.setattr(
+        "app.services.accurate_evidence.require_valid_sj", _valid_sj
+    )
+
     token = await _token(client)
     h = {"Authorization": f"Bearer {token}"}
 
@@ -132,7 +160,7 @@ async def test_full_happy_path_and_guards(client: AsyncClient) -> None:
     decided = await client.post(
         f"/api/v1/production/jobs/design/versions/{design.json()['id']}/decision",
         headers=h,
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
     assert decided.status_code == 200
 
@@ -148,7 +176,7 @@ async def test_full_happy_path_and_guards(client: AsyncClient) -> None:
     await client.post(
         f"/api/v1/production/jobs/design/versions/{design2.json()['id']}/decision",
         headers=h,
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
 
     pay = await client.post(
@@ -225,7 +253,7 @@ async def test_full_happy_path_and_guards(client: AsyncClient) -> None:
     sample_ok = await client.post(
         f"/api/v1/production/jobs/samples/{sample.json()['id']}/decision",
         headers=h,
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
     assert sample_ok.status_code == 200
 
@@ -242,6 +270,11 @@ async def test_full_happy_path_and_guards(client: AsyncClient) -> None:
         },
     )
     assert out.status_code == 200
+    from tests.production.helper_verify_helpers import helper_verify_output
+
+    await helper_verify_output(
+        client, job_id, out.json()["id"], "40", headers=h, idem="hv-wf-0001"
+    )
     dup = await client.post(
         f"/api/v1/production/jobs/{job_id}/outputs",
         headers=h,
@@ -310,6 +343,8 @@ async def test_full_happy_path_and_guards(client: AsyncClient) -> None:
         json={
             "accurate_sj_id": "sj-1",
             "accurate_sj_number": "SJ/001",
+            "accurate_sj_line_id": "SL-1",
+            "so_line_id": "line-1",
             "qty_physical": "20",
             "idempotency_key": "load-pass-1",
         },
@@ -424,7 +459,7 @@ async def test_cancel_remaining_preserves_confirmed(client: AsyncClient) -> None
     await client.post(
         f"/api/v1/production/jobs/design/versions/{d3['id']}/decision",
         headers=h,
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
     r3 = (
         await client.post(

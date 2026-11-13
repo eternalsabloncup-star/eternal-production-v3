@@ -46,6 +46,7 @@ ALL_PERMS = [
     P.SAMPLE_UPLOAD,
     P.SAMPLE_DECIDE,
     P.OUTPUT_CONFIRM,
+    P.OUTPUT_HELPER_VERIFY,
     P.REJECT_RECORD,
     P.REJECT_VERIFY,
     P.PACKING_RECORD,
@@ -81,25 +82,26 @@ class _Gw:
                 "branch": {"id": "branch-a"},
             },
         }
+        from tests.production.sj_line_helpers import sj_delivery_note, sj_line_item
+
         self.sj = {
-            "/delivery-notes/SJ-OK-1": {
-                "id": "SJ-OK-1",
-                "number": "SJ-OK-1",
-                "status": "DELIVERED",
-                "cancelled": False,
-                "verifiable": True,
-                "sales_order_number": "SO-P4-E2E-001",
-                "branch": {"id": "branch-a"},
-            },
-            "/delivery-notes/SJ-CANCELLED": {
-                "id": "SJ-CANCELLED",
-                "number": "SJ-CANCELLED",
-                "status": "CANCELLED",
-                "cancelled": True,
-                "verifiable": False,
-                "sales_order_number": "SO-P4-E2E-001",
-                "branch": {"id": "branch-a"},
-            },
+            "/delivery-notes/SJ-OK-1": sj_delivery_note(
+                sj_id="SJ-OK-1",
+                so_number="SO-P4-E2E-001",
+                lines=[
+                    sj_line_item(
+                        accurate_sj_line_id="SL-P4-1",
+                        so_line_id="line-1",
+                        quantity=100,
+                    )
+                ],
+            ),
+            "/delivery-notes/SJ-CANCELLED": sj_delivery_note(
+                sj_id="SJ-CANCELLED",
+                so_number="SO-P4-E2E-001",
+                cancelled=True,
+                lines=[],
+            ),
         }
         self.orders = {
             f"/sales-orders/SO-P4-{i:03d}": {
@@ -265,7 +267,7 @@ async def _open_gates(client, h, job_id: int, so: str) -> None:
     await client.post(
         f"/api/v1/production/jobs/design/versions/{d['id']}/decision",
         headers=h,
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
     # Align receipt SO link: monkeypatch path uses SO-P4-E2E-001 only for that job.
     # For other SOs use bypass so evidence SO match does not block acceptance paths
@@ -376,7 +378,7 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
     await client.post(
         f"/api/v1/production/jobs/samples/{sample['id']}/decision",
         headers=h,
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
 
     out1 = await client.post(
@@ -457,8 +459,19 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
         json={"approved_qty": "3"},
     )
 
-    # Eligible finished = min(pass nets). Pass1: 30+20-2-3reject=45; Pass2: 40 → 40.
-    # Pass-1 alone must never authorize packing beyond completed final passes.
+    # Packing from helper-verified min across passes (not operator alone).
+    # Verify pass1 net-ish 48 and pass2 40 → packable 40 after rejects still on operator ledger.
+    from tests.production.helper_verify_helpers import helper_verify_output
+
+    await helper_verify_output(
+        client, jid, out1.json()["id"], "28", headers=h, idem="hv-p4-1"
+    )
+    await helper_verify_output(
+        client, jid, out1b.json()["id"], "20", headers=h, idem="hv-p4-1b"
+    )
+    await helper_verify_output(
+        client, jid, out2.json()["id"], "40", headers=h, idem="hv-p4-2"
+    )
     pack = await client.post(
         f"/api/v1/production/jobs/{jid}/packing",
         headers=h,
@@ -487,6 +500,8 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
         json={
             "accurate_sj_id": "SJ-CANCELLED",
             "accurate_sj_number": "SJ-CANCELLED",
+            "accurate_sj_line_id": "SL-P4-1",
+            "so_line_id": "line-1",
             "qty_physical": "10",
             "idempotency_key": "load-bad-1",
         },
@@ -499,6 +514,8 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
         json={
             "accurate_sj_id": "SJ-OK-1",
             "accurate_sj_number": "SJ-OK-1",
+            "accurate_sj_line_id": "SL-P4-1",
+            "so_line_id": "line-1",
             "qty_physical": "40",
             "idempotency_key": "load-ok-01",
         },
@@ -515,7 +532,7 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
     )
     assert pod.status_code == 200, pod.text
 
-    # Document cancellation SJ
+    # Cancel with unreversed Loading/POD must fail closed (no silent capacity free).
     cancel = await client.post(
         f"/api/v1/production/jobs/{jid}/sj/cancel",
         headers=h,
@@ -525,7 +542,19 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
             "idempotency_key": "sjc-pass-1",
         },
     )
-    assert cancel.status_code == 200
+    assert cancel.status_code == 409
+
+    # Cancel before any Loading still works (append-only history).
+    cancel_idle = await client.post(
+        f"/api/v1/production/jobs/{jid}/sj/cancel",
+        headers=h,
+        json={
+            "accurate_sj_id": "SJ-IDLE-CANCEL",
+            "reason": "never loaded",
+            "idempotency_key": "sjc-idle-1",
+        },
+    )
+    assert cancel_idle.status_code == 200, cancel_idle.text
 
     board = await client.get(f"/api/v1/production/jobs/{jid}/board", headers=h)
     assert board.status_code == 200

@@ -23,6 +23,7 @@ def test_metadata_contains_auth_and_work_order_tables() -> None:
         "auth_audit_events",
         "production_jobs",
         "design_versions",
+        "customer_access_tokens",
         "payment_receipt_refs",
         "payment_bypasses",
         "schedule_assignments",

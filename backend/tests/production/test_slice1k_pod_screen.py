@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,7 @@ ALL_PERMS = [
     P.JOB_READ,
     P.DESIGN_UPLOAD,
     P.DESIGN_APPROVE,
+    P.DESIGN_BYPASS,
     P.PAYMENT_BYPASS,
     P.SCHEDULE_MANAGE,
     P.PREP_SCREENER,
@@ -49,6 +51,7 @@ ALL_PERMS = [
     P.SAMPLE_UPLOAD,
     P.SAMPLE_DECIDE,
     P.OUTPUT_CONFIRM,
+    P.OUTPUT_HELPER_VERIFY,
     P.PACKING_RECORD,
     P.DELIVERY_MANAGE,
 ]
@@ -128,7 +131,7 @@ async def _seed_packed_job(client: AsyncClient) -> tuple[int, str]:
     ).json()
     await client.post(
         f"/api/v1/production/jobs/design/versions/{design['id']}/decision",
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
     await client.post(
         f"/api/v1/production/jobs/{jid}/payment/bypass", json={"reason": "test"}
@@ -178,7 +181,7 @@ async def _seed_packed_job(client: AsyncClient) -> tuple[int, str]:
     ).json()
     await client.post(
         f"/api/v1/production/jobs/samples/{sample['id']}/decision",
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
     assert (
         await client.post(
@@ -231,7 +234,7 @@ async def test_screen_size_required_and_invalid_rejected(client_1k: AsyncClient)
     ).json()
     await client_1k.post(
         f"/api/v1/production/jobs/design/versions/{design['id']}/decision",
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
     await client_1k.post(
         f"/api/v1/production/jobs/{jid}/payment/bypass", json={"reason": "t"}
@@ -342,15 +345,46 @@ async def test_pod_requires_four_attachments_and_partials(client_1k: AsyncClient
     )
     assert no_load.status_code == 409
 
-    load = await client_1k.post(
-        f"/api/v1/production/jobs/{jid}/loading",
-        json={
-            "accurate_sj_id": sj,
-            "accurate_sj_number": sj,
-            "qty_physical": "50",
-            "idempotency_key": "load-1k-50",
-        },
-    )
+    from tests.production.sj_line_helpers import sj_line_item
+
+    async def _valid_sj(**kwargs):
+        return {
+            "verified": True,
+            "mode": "gateway",
+            "accurate_sj_id": kwargs["accurate_sj_id"],
+            "accurate_sj_number": kwargs["accurate_sj_number"],
+            "sales_order_number": "SO-1K",
+            "branch_id": "branch-a",
+            "line_items": [
+                sj_line_item(
+                    accurate_sj_line_id="SL-1K",
+                    so_line_id="L1",
+                    quantity=50,
+                )
+            ],
+            "loading_eligible": True,
+            "live_verified": False,
+        }
+
+    # Patch via module used inside record_loading.
+    import app.services.accurate_evidence as ev
+
+    prev = ev.require_valid_sj
+    ev.require_valid_sj = _valid_sj  # type: ignore[assignment]
+    try:
+        load = await client_1k.post(
+            f"/api/v1/production/jobs/{jid}/loading",
+            json={
+                "accurate_sj_id": sj,
+                "accurate_sj_number": sj,
+                "accurate_sj_line_id": "SL-1K",
+                "so_line_id": "L1",
+                "qty_physical": "50",
+                "idempotency_key": "load-1k-50",
+            },
+        )
+    finally:
+        ev.require_valid_sj = prev  # type: ignore[assignment]
     assert load.status_code == 200, load.text
 
     # Wrong SJ on attachments
@@ -399,8 +433,8 @@ async def test_pod_requires_four_attachments_and_partials(client_1k: AsyncClient
     )
     assert ok2.status_code == 200, ok2.text
 
-    # Cancelled SJ blocks
-    await client_1k.post(
+    # Cancel API rejects when unreversed Loading exists (no silent reversal).
+    cancel_api = await client_1k.post(
         f"/api/v1/production/jobs/{jid}/sj/cancel",
         json={
             "accurate_sj_id": sj,
@@ -408,6 +442,26 @@ async def test_pod_requires_four_attachments_and_partials(client_1k: AsyncClient
             "idempotency_key": "cancel-1k",
         },
     )
+    assert cancel_api.status_code == 409
+
+    # Historical sj_cancelled row still blocks new POD; Loading/POD history kept.
+    from app.db.session import get_session_factory
+    from app.models.production.event import ProductionEvent
+
+    factory = get_session_factory()
+    async with factory() as session:
+        session.add(
+            ProductionEvent(
+                job_id=jid,
+                event_type="sj_cancelled",
+                qty_physical=Decimal("0"),
+                accurate_sj_id=sj,
+                idempotency_key="cancel-1k-hist",
+                actor_user_id=1,
+                reason="legacy cancel row",
+            )
+        )
+        await session.commit()
     p3 = await upload_pod_bundle(client_1k, jid, sj)
     cancelled = await client_1k.post(
         f"/api/v1/production/jobs/{jid}/pod",

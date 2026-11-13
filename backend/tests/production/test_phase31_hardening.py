@@ -44,6 +44,7 @@ ALL_PERMS = [
     P.SAMPLE_UPLOAD,
     P.SAMPLE_DECIDE,
     P.OUTPUT_CONFIRM,
+    P.OUTPUT_HELPER_VERIFY,
     P.REJECT_RECORD,
     P.REJECT_VERIFY,
     P.PACKING_RECORD,
@@ -185,7 +186,7 @@ async def test_invalidate_receipt_audits_and_closes_gate(
     await client.post(
         f"/api/v1/production/jobs/design/versions/{d['id']}/decision",
         headers=h,
-        json={"decision": "approved"},
+        json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
     rec = (
         await client.post(

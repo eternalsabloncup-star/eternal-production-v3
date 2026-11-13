@@ -44,6 +44,7 @@ class CreateJobBody(BaseModel):
 class DesignUploadBody(BaseModel):
     file_name: str
     storage_key: str
+    so_line_id: str | None = None
 
 
 class DesignDecideBody(BaseModel):
@@ -51,6 +52,19 @@ class DesignDecideBody(BaseModel):
     reason: str | None = None
     bypass: bool = False
     customer_approval: bool = False
+
+
+class DesignApprovalLinkBody(BaseModel):
+    so_line_id: str | None = None
+    ttl_hours: int | None = None
+
+
+class HelperVerifyBody(BaseModel):
+    source_output_event_id: int
+    qty_physical: Decimal
+    idempotency_key: str = Field(min_length=8, max_length=120)
+    evidence_ref: str | None = None
+    reason: str | None = None
 
 
 class PaymentReceiptBody(BaseModel):
@@ -128,6 +142,8 @@ class PackingBody(BaseModel):
 class LoadingBody(BaseModel):
     accurate_sj_id: str
     accurate_sj_number: str
+    accurate_sj_line_id: str
+    so_line_id: str
     qty_physical: Decimal
     idempotency_key: str = Field(min_length=8, max_length=120)
     evidence_ref: str | None = None
@@ -163,6 +179,29 @@ class CancelSjBody(BaseModel):
     accurate_sj_id: str
     reason: str
     idempotency_key: str = Field(min_length=8, max_length=120)
+
+
+class CancelLoadingBody(BaseModel):
+    """confirmation_cancel only (incorrect Loading record)."""
+
+    qty_physical: Decimal
+    reason: str
+    idempotency_key: str = Field(min_length=8, max_length=120)
+    cancel_kind: str = "confirmation_cancel"
+    evidence_attachment_id: int | None = None
+    evidence_ref: str | None = None
+
+
+class LoadingReturnRequestBody(BaseModel):
+    qty_physical: Decimal
+    reason: str
+    idempotency_key: str = Field(min_length=8, max_length=120)
+    evidence_attachment_id: int
+
+
+class LoadingReturnDecisionBody(BaseModel):
+    idempotency_key: str = Field(min_length=8, max_length=120)
+    reason: str | None = None
 
 
 class PrepBody(BaseModel):
@@ -316,6 +355,29 @@ async def get_job_board(
     return await engine.job_board(session, user, job)
 
 
+@router.get("/{job_id}/loading-authority")
+async def get_loading_authority(
+    job_id: int,
+    accurate_sj_id: str,
+    accurate_sj_number: str,
+    accurate_sj_line_id: str,
+    so_line_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_permissions(P.JOB_READ)),
+):
+    """Narrow SJ-line Loading authority read — never invents PCS qty."""
+    job = await engine.get_job(session, job_id)
+    return await engine.resolve_loading_line_authority(
+        session,
+        user,
+        job,
+        accurate_sj_id=accurate_sj_id,
+        accurate_sj_number=accurate_sj_number,
+        accurate_sj_line_id=accurate_sj_line_id,
+        so_line_id=so_line_id,
+    )
+
+
 @router.get("/{job_id}")
 async def get_job(
     job_id: int,
@@ -339,9 +401,19 @@ async def design_upload(
 ):
     job = await engine.get_job(session, job_id)
     ver = await engine.upload_design(
-        session, user, job, file_name=body.file_name, storage_key=body.storage_key
+        session,
+        user,
+        job,
+        file_name=body.file_name,
+        storage_key=body.storage_key,
+        so_line_id=body.so_line_id,
     )
-    return {"id": ver.id, "version_no": ver.version_no, "status": ver.status}
+    return {
+        "id": ver.id,
+        "version_no": ver.version_no,
+        "status": ver.status,
+        "so_line_id": ver.so_line_id,
+    }
 
 
 @router.post("/design/versions/{version_id}/decision")
@@ -365,7 +437,48 @@ async def design_decide(
         "status": ver.status,
         "bypass": ver.bypass,
         "customer_approval": ver.customer_approval,
+        "note": (
+            "Staff approve alone does not open the printed-item design gate; "
+            "customer design_approval token or staff bypass required."
+        ),
     }
+
+
+@router.post("/{job_id}/design/versions/{version_id}/approval-links")
+async def design_approval_link(
+    job_id: int,
+    version_id: int,
+    body: DesignApprovalLinkBody,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    from app.services.production import customer_tokens as CT
+
+    job = await engine.get_job(session, job_id)
+    minted = await CT.mint_customer_token(
+        session,
+        user,
+        job,
+        scope=CT.SCOPE_DESIGN_APPROVAL,
+        design_version_id=version_id,
+        so_line_id=body.so_line_id,
+        ttl_hours=body.ttl_hours,
+    )
+    return minted
+
+
+@router.post("/{job_id}/tracking-links")
+async def live_tracking_link(
+    job_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    from app.services.production import customer_tokens as CT
+
+    job = await engine.get_job(session, job_id)
+    return await CT.mint_customer_token(
+        session, user, job, scope=CT.SCOPE_LIVE_TRACKING
+    )
 
 
 @router.post("/{job_id}/payment/receipts")
@@ -665,6 +778,39 @@ async def output_correct(
     return {"id": event.id, "event_type": event.event_type}
 
 
+@router.post("/{job_id}/outputs/{event_id}/helper-verifications")
+async def helper_verify_output(
+    job_id: int,
+    event_id: int,
+    body: HelperVerifyBody,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    job = await engine.get_job(session, job_id)
+    if body.source_output_event_id != event_id:
+        from fastapi import HTTPException
+
+        raise HTTPException(422, "source_output_event_id harus cocok dengan path")
+    event = await engine.record_helper_output_verification(
+        session,
+        user,
+        job,
+        source_output_event_id=event_id,
+        qty_physical=body.qty_physical,
+        idempotency_key=body.idempotency_key,
+        evidence_ref=body.evidence_ref,
+        reason=body.reason,
+    )
+    return {
+        "id": event.id,
+        "event_type": event.event_type,
+        "qty_physical": str(event.qty_physical),
+        "so_line_id": event.so_line_id,
+        "color_pass": event.color_pass,
+        "assignment_id": event.assignment_id,
+    }
+
+
 @router.post("/{job_id}/packing")
 async def packing_record(
     job_id: int,
@@ -700,11 +846,132 @@ async def loading_record(
         job,
         accurate_sj_id=body.accurate_sj_id,
         accurate_sj_number=body.accurate_sj_number,
+        accurate_sj_line_id=body.accurate_sj_line_id,
+        so_line_id=body.so_line_id,
         qty_physical=body.qty_physical,
         idempotency_key=body.idempotency_key,
         evidence_ref=body.evidence_ref,
     )
-    return {"id": event.id, "event_type": event.event_type}
+    return {
+        "id": event.id,
+        "event_type": event.event_type,
+        "accurate_sj_id": event.accurate_sj_id,
+        "accurate_sj_line_id": event.accurate_sj_line_id,
+        "so_line_id": event.so_line_id,
+        "qty_physical": str(event.qty_physical) if event.qty_physical is not None else None,
+    }
+
+
+@router.post("/{job_id}/loading/{event_id}/cancel")
+async def loading_cancel(
+    job_id: int,
+    event_id: int,
+    body: CancelLoadingBody,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    job = await engine.get_job(session, job_id)
+    event = await engine.cancel_loading(
+        session,
+        user,
+        job,
+        source_event_id=event_id,
+        qty_physical=body.qty_physical,
+        reason=body.reason,
+        idempotency_key=body.idempotency_key,
+        cancel_kind=body.cancel_kind,
+        evidence_attachment_id=body.evidence_attachment_id,
+        evidence_ref=body.evidence_ref,
+    )
+    return {
+        "id": event.id,
+        "event_type": event.event_type,
+        "accurate_sj_id": event.accurate_sj_id,
+        "accurate_sj_line_id": event.accurate_sj_line_id,
+        "so_line_id": event.so_line_id,
+        "qty_physical": str(event.qty_physical) if event.qty_physical is not None else None,
+        "payload_json": event.payload_json,
+    }
+
+
+@router.post("/{job_id}/loading/{event_id}/return-requests")
+async def loading_return_request(
+    job_id: int,
+    event_id: int,
+    body: LoadingReturnRequestBody,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    job = await engine.get_job(session, job_id)
+    event = await engine.request_loading_return(
+        session,
+        user,
+        job,
+        source_event_id=event_id,
+        qty_physical=body.qty_physical,
+        reason=body.reason,
+        idempotency_key=body.idempotency_key,
+        evidence_attachment_id=body.evidence_attachment_id,
+    )
+    return {
+        "id": event.id,
+        "event_type": event.event_type,
+        "qty_physical": str(event.qty_physical) if event.qty_physical is not None else None,
+        "payload_json": event.payload_json,
+    }
+
+
+@router.post("/{job_id}/loading/return-requests/{request_id}/approve")
+async def loading_return_approve(
+    job_id: int,
+    request_id: int,
+    body: LoadingReturnDecisionBody,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    job = await engine.get_job(session, job_id)
+    event = await engine.approve_loading_return(
+        session,
+        user,
+        job,
+        request_event_id=request_id,
+        idempotency_key=body.idempotency_key,
+        reason=body.reason,
+    )
+    return {
+        "id": event.id,
+        "event_type": event.event_type,
+        "qty_physical": str(event.qty_physical) if event.qty_physical is not None else None,
+        "payload_json": event.payload_json,
+    }
+
+
+@router.post("/{job_id}/loading/return-requests/{request_id}/reject")
+async def loading_return_reject(
+    job_id: int,
+    request_id: int,
+    body: LoadingReturnDecisionBody,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    job = await engine.get_job(session, job_id)
+    if not (body.reason or "").strip():
+        from fastapi import HTTPException
+
+        raise HTTPException(422, "Alasan penolakan physical return wajib")
+    event = await engine.reject_loading_return(
+        session,
+        user,
+        job,
+        request_event_id=request_id,
+        reason=body.reason or "",
+        idempotency_key=body.idempotency_key,
+    )
+    return {
+        "id": event.id,
+        "event_type": event.event_type,
+        "payload_json": event.payload_json,
+    }
 
 
 @router.post("/{job_id}/pod")
