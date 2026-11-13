@@ -698,8 +698,9 @@
     return response.json();
   }
 
+  const monitorOrders = Object.create(null);
   function orderBySo(so) {
-    return (window.orders || []).find((x) => x.id === so) || null;
+    return (window.orders || []).find((x) => x.id === so) || monitorOrders[so] || null;
   }
 
   const detailCache = Object.create(null);
@@ -1869,8 +1870,11 @@
       "</b> · Cabang " +
       escapeHtml(order.branch) +
       " · Qty SO " +
-      escapeHtml(order.qty) +
+      escapeHtml(order.qty === "" || order.qty == null ? "Belum terverifikasi" : order.qty) +
       "</p>" +
+      (order.v3Monitor && order.accurateDetailNote
+        ? '<p class="v49-quiet">' + escapeHtml(order.accurateDetailNote) + "</p>"
+        : "") +
       (job
         ? "<p>Job #<b>" +
           escapeHtml(job.id) +
@@ -1945,7 +1949,7 @@
           '<label>Date<input id="v3-asg-date" type="date"/></label>' +
           '<label>Color pass<input id="v3-asg-pass" type="number" min="1" value="1"/></label>' +
           '<label>Qty planned<input id="v3-asg-qty" type="number" min="1" value="' +
-          escapeHtml(order.qty || 1) +
+          escapeHtml(order.v3Monitor && !order.qty ? "" : order.qty || 1) +
           '"/></label>' +
           '<button type="button" class="btn sm" data-v3="asg-create">Buat assignment</button>' +
           '<label>Assignment id<input id="v3-asg-id" type="number"/></label>' +
@@ -1961,12 +1965,12 @@
           escapeHtml(firstLineId(order)) +
           '"/></label>' +
           '<label>PO qty ceiling<input id="v3-prep-po" type="number" value="' +
-          escapeHtml(order.qty || 1) +
+          escapeHtml(order.v3Monitor && !order.qty ? "" : order.qty || 1) +
           '"/></label>' +
           '<label>Screen qty<input id="v3-prep-screen" type="number" value="1"/></label>' +
           '<label>Screen size<select id="v3-prep-screen-size"><option value="kecil">Kecil</option><option value="besar">Besar</option></select></label>' +
           '<label>Helper qty<input id="v3-prep-helper" type="number" value="' +
-          escapeHtml(order.qty || 1) +
+          escapeHtml(order.v3Monitor && !order.qty ? "" : order.qty || 1) +
           '"/></label>' +
           '<label>Evidence<input id="v3-prep-ev" value="prep-evidence"/></label>' +
           '<button type="button" class="btn sm" data-v3="prep-screen">Simpan screener</button>' +
@@ -3591,7 +3595,7 @@
 
   // Monitoring Penerimaan (operasional): daftar resmi lintas PO dari
   // GET /production/jobs/payment/receipts. Tidak ada fixture/peran demo/simulasi.
-  const rm = { q: "", paymentStatus: "", receiptStatus: "", page: 1, pageSize: 25, data: null, loading: false, error: "", stale: true, detail: null };
+  const rm = { q: "", paymentStatus: "", receiptStatus: "", receipts: "", page: 1, pageSize: 25, data: null, loading: false, error: "", stale: true, detail: null };
   const RM_PAY = { approved: ["APPROVED", "Disetujui (terverifikasi)"], bypassed: ["BYPASSED", "Bypass berwenang"], pending: ["PENDING", "Belum terverifikasi"] };
   function rmAmount(v) {
     if (v == null || v === "") return "Belum terverifikasi";
@@ -3605,6 +3609,7 @@
     if (rm.q) params.set("q", rm.q);
     if (rm.paymentStatus) params.set("payment_status", rm.paymentStatus);
     if (rm.receiptStatus) params.set("receipt_status", rm.receiptStatus);
+    if (rm.receipts) params.set("receipts", rm.receipts);
     try {
       rm.data = await request(API + "/production/jobs/payment/receipts?" + params.toString());
       rm.stale = false;
@@ -3617,15 +3622,43 @@
   }
   function rmRowHtml(r) {
     const pay = RM_PAY[r.payment_status] || RM_PAY.pending;
-    const inbox = !!orderBySo(r.so_number);
+    const latest = r.receipts && r.receipts[0];
+    const none = !r.receipt_count;
+    const ref = none
+      ? "<span class=\"muted\">Belum ada penerimaan</span>"
+      : escapeHtml(latest.accurate_receipt_number || latest.accurate_receipt_id) + "<br><small>" + escapeHtml(r.receipt_count) + " penerimaan</small>";
+    const amount = none ? "Belum ada penerimaan" : rmAmount(r.verified_amount);
+    const evidence = none ? "—" : latest.evidence_verified ? "Evidence terverifikasi" : "Evidence belum terverifikasi";
     return "<tr><td><b>" + escapeHtml(r.so_number) + "</b><br><small>" + escapeHtml(r.branch_id) + "</small></td>" +
-      "<td>" + escapeHtml(r.customer_name || "Belum terverifikasi") + "</td>" +
-      "<td>" + escapeHtml(r.accurate_receipt_number || r.accurate_receipt_id) + "<br><small>ID " + escapeHtml(r.accurate_receipt_id) + "</small></td>" +
-      "<td>" + escapeHtml(rmAmount(r.amount)) + "</td>" +
-      "<td>" + (r.evidence_verified ? "Evidence terverifikasi" : "Evidence belum terverifikasi") + (r.receipt_status !== "valid" ? "<br><b>" + escapeHtml(r.receipt_status) + "</b>" : "") + "</td>" +
+      "<td>" + escapeHtml(r.customer_name || "Belum terverifikasi") + "</td><td>" + ref + "</td>" +
+      "<td>" + escapeHtml(amount) + "</td><td>" + evidence + "</td>" +
       "<td><span class=\"tag v165-status--" + (pay[0] === "APPROVED" ? "done" : pay[0] === "PENDING" ? "pending" : "process") + "\">" + pay[1] + "</span>" + (r.bypass_active ? "<br><small>Bypass aktif</small>" : "") + "</td>" +
-      "<td><button type=\"button\" class=\"btn sm\" data-rm=\"detail\" data-rid=\"" + escapeHtml(r.receipt_id) + "\">Detail</button> " +
-      (inbox ? "<button type=\"button\" class=\"btn sm\" data-rm=\"open\" data-so=\"" + escapeHtml(r.so_number) + "\">Buka PO &amp; Payment</button>" : "<small title=\"PO tidak ada pada halaman Inbox yang sedang dimuat\">PO di luar halaman Inbox</small>") + "</td></tr>";
+      "<td>" + (none ? "" : "<button type=\"button\" class=\"btn sm\" data-rm=\"detail\" data-jid=\"" + escapeHtml(r.job_id) + "\">Detail</button> ") +
+      "<button type=\"button\" class=\"btn sm\" data-rm=\"open\" data-jid=\"" + escapeHtml(r.job_id) + "\">Buka PO &amp; Payment</button></td></tr>";
+  }
+  async function rmOpen(jobId) {
+    const row = rm.data && rm.data.items.find(function (x) { return x.job_id === jobId; });
+    if (!row) return;
+    const so = row.so_number;
+    if (!orderBySo(so)) {
+      monitorOrders[so] = { id: so, name: row.customer_name || "", branch: row.branch_id || "", qty: "", sourceLines: [], v3Monitor: true };
+      try {
+        applyDetailToOrder(so, await fetchOrderDetail(so));
+      } catch (err) {
+        monitorOrders[so].accurateDetailNote = "Detail Accurate tidak tersedia: " + String((err && err.message) || "gagal dimuat");
+      }
+    }
+    try {
+      jobCache[so] = { id: row.job_id, accurate_so_number: so, branch_id: row.branch_id };
+      delete boardCache[so];
+      await loadBoard(so, true);
+    } catch (err) {
+      delete jobCache[so];
+      toast((err && err.message) || "Gagal memuat job");
+      return;
+    }
+    if (!boardCache[so]) { toast("Detail Payment tidak dapat dimuat"); return; }
+    renderWorkflowDrawer(so);
   }
   function rmView() {
     const h = typeof window.heading === "function" ? window.heading : function (t, d) { return "<h1>" + t + "</h1><p>" + d + "</p>"; };
@@ -3635,19 +3668,23 @@
       return "<label>" + label + " <select id=\"" + id + "\">" + opts.map(function (o) { return "<option value=\"" + o[0] + "\"" + (cur === o[0] ? " selected" : "") + ">" + o[1] + "</option>"; }).join("") + "</select></label>";
     };
     let body;
-    if (rm.loading && !d) body = "<div class=\"flat-notice\" role=\"status\">Memuat penerimaan resmi…</div>";
+    if (rm.loading && !d) body = "<div class=\"flat-notice\" role=\"status\">Memuat monitoring pembayaran…</div>";
     else if (rm.error) body = "<div class=\"flat-notice\" role=\"alert\"><b>Gagal memuat:</b> " + escapeHtml(rm.error) + " <button type=\"button\" class=\"btn sm\" data-rm=\"reload\">Coba lagi</button></div>";
-    else if (!d || !d.items.length) body = "<div class=\"flat-notice\">Belum ada penerimaan tercatat sesuai filter. Penerimaan hanya muncul setelah dicatat dan diverifikasi pada panel Payment PO.</div>";
-    else body = "<div class=\"v36-table-container\"><table class=\"v36-table\"><thead><tr><th>No. PO</th><th>Pelanggan</th><th>Referensi penerimaan</th><th>Nominal alokasi ke PO</th><th>Evidence</th><th>Status pembayaran</th><th>Aksi</th></tr></thead><tbody>" + d.items.map(rmRowHtml).join("") + "</tbody></table></div>" +
-      "<div class=\"row\"><button type=\"button\" class=\"btn sm\" data-rm=\"prev\"" + (rm.page <= 1 ? " disabled" : "") + ">‹ Sebelumnya</button><span>Halaman " + d.page + " · " + d.total + " penerimaan</span><button type=\"button\" class=\"btn sm\" data-rm=\"next\"" + (d.has_more ? "" : " disabled") + ">Berikutnya ›</button></div>";
+    else if (!d || !d.items.length) body = "<div class=\"flat-notice\">Tidak ada PO sesuai filter. PO muncul setelah job V3 dibuat dari Inbox/Tugas Tim.</div>";
+    else body = "<div class=\"v36-table-container\"><table class=\"v36-table\"><thead><tr><th>No. PO</th><th>Pelanggan</th><th>Referensi penerimaan</th><th>Nominal terverifikasi</th><th>Evidence</th><th>Status pembayaran</th><th>Aksi</th></tr></thead><tbody>" + d.items.map(rmRowHtml).join("") + "</tbody></table></div>" +
+      "<div class=\"row\"><button type=\"button\" class=\"btn sm\" data-rm=\"prev\"" + (rm.page <= 1 ? " disabled" : "") + ">‹ Sebelumnya</button><span>Halaman " + d.page + " · " + d.total + " PO</span><button type=\"button\" class=\"btn sm\" data-rm=\"next\"" + (d.has_more ? "" : " disabled") + ">Berikutnya ›</button></div>";
     let detail = "";
     if (rm.detail && d) {
-      const r = d.items.find(function (x) { return x.receipt_id === rm.detail; });
-      if (r) detail = "<section class=\"flat-notice\" id=\"v3-rm-detail\"><b>Detail penerimaan #" + escapeHtml(r.receipt_id) + "</b><ul><li>PO: " + escapeHtml(r.so_number) + " · cabang " + escapeHtml(r.branch_id) + "</li><li>Receipt Accurate: " + escapeHtml(r.accurate_receipt_number || "Belum terverifikasi") + " (ID " + escapeHtml(r.accurate_receipt_id) + ")</li><li>Nominal alokasi: " + escapeHtml(rmAmount(r.amount)) + "</li><li>Status receipt: " + escapeHtml(r.receipt_status) + " · evidence " + (r.evidence_verified ? "terverifikasi" : "belum terverifikasi") + "</li><li>Dicatat: " + escapeHtml(r.recorded_at || "Belum terverifikasi") + "</li></ul><small>Riwayat dan tindakan (revalidasi, invalidasi, bypass) ada pada panel Payment PO.</small></section>";
+      const r = d.items.find(function (x) { return x.job_id === rm.detail; });
+      if (r) detail = "<section class=\"flat-notice\" id=\"v3-rm-detail\"><b>Penerimaan " + escapeHtml(r.so_number) + " · cabang " + escapeHtml(r.branch_id) + "</b><ul>" +
+        r.receipts.map(function (x) { return "<li>#" + escapeHtml(x.receipt_id) + " · " + escapeHtml(x.accurate_receipt_number || x.accurate_receipt_id) + " (ID " + escapeHtml(x.accurate_receipt_id) + ") · " + escapeHtml(rmAmount(x.amount)) + " · " + escapeHtml(x.receipt_status) + " · evidence " + (x.evidence_verified ? "terverifikasi" : "belum terverifikasi") + " · " + escapeHtml(x.recorded_at || "Belum terverifikasi") + "</li>"; }).join("") +
+        "</ul><small>Revalidasi, invalidasi, dan bypass tersedia pada panel Payment (Buka PO &amp; Payment).</small></section>";
     }
-    return h("Monitoring Penerimaan Penjualan", "Data resmi dari backend V3 (receipt yang dicatat dan diverifikasi per PO); tidak ada simulasi.") +
-      "<form class=\"v36-toolbar\" id=\"v3-rm-form\"><label class=\"v36-search\"><span>⌕</span><input id=\"v3-rm-q\" aria-label=\"Cari penerimaan\" placeholder=\"No. PO / pelanggan / receipt\" value=\"" + escapeHtml(rm.q) + "\"></label>" +
+    return h("Monitoring Penerimaan Penjualan", "Status pembayaran resmi dari backend Payment Gate; tidak ada simulasi.") +
+      "<div class=\"flat-notice\" id=\"v3-rm-coverage\"><b>Cakupan:</b> hanya PO yang sudah menjadi job V3 (dibuka dari Inbox/Tugas Tim). PO Accurate yang belum menjadi job V3 tidak tercantum di sini. \"Disetujui\" berarti ada receipt valid dengan evidence terverifikasi; ini bukan penanda lunas (nilai PO tidak dibandingkan). Receipt dibatalkan/reversed tidak dihitung.</div>" +
+      "<form class=\"v36-toolbar\" id=\"v3-rm-form\"><label class=\"v36-search\"><span>⌕</span><input id=\"v3-rm-q\" aria-label=\"Cari PO atau penerimaan\" placeholder=\"No. PO / pelanggan / receipt\" value=\"" + escapeHtml(rm.q) + "\"></label>" +
       sel("v3-rm-pay", "Status pembayaran", rm.paymentStatus, [["", "Semua"], ["approved", "Disetujui"], ["bypassed", "Bypass"], ["pending", "Belum terverifikasi"]]) +
+      sel("v3-rm-has", "Penerimaan", rm.receipts, [["", "Semua"], ["with", "Sudah ada"], ["without", "Belum ada"]]) +
       sel("v3-rm-rs", "Status receipt", rm.receiptStatus, [["", "Semua"], ["valid", "Valid"], ["invalidated", "Dibatalkan"], ["reversed", "Reversed"]]) +
       "<button type=\"submit\" class=\"btn sm\">Terapkan</button></form>" + body + detail;
   }
@@ -3663,6 +3700,7 @@
     rm.q = document.getElementById("v3-rm-q").value.trim();
     rm.paymentStatus = document.getElementById("v3-rm-pay").value;
     rm.receiptStatus = document.getElementById("v3-rm-rs").value;
+    rm.receipts = document.getElementById("v3-rm-has").value;
     rm.page = 1; rm.detail = null; rm.stale = true;
     if (typeof window.render === "function") window.render();
   });
@@ -3673,8 +3711,8 @@
     if (act === "prev" && rm.page > 1) { rm.page--; rm.stale = true; rm.detail = null; }
     else if (act === "next") { rm.page++; rm.stale = true; rm.detail = null; }
     else if (act === "reload") { rm.stale = true; }
-    else if (act === "detail") { rm.detail = Number(t.getAttribute("data-rid")); }
-    else if (act === "open") { window.v3OpenWorkflow(t.getAttribute("data-so")); return; }
+    else if (act === "detail") { rm.detail = Number(t.getAttribute("data-jid")); }
+    else if (act === "open") { rmOpen(Number(t.getAttribute("data-jid"))); return; }
     else return;
     if (typeof window.render === "function") window.render();
   });

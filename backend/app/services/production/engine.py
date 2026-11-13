@@ -3523,70 +3523,113 @@ async def list_payment_receipts(
     q: str | None = None,
     payment_status: str | None = None,
     receipt_status: str | None = None,
+    receipts: str | None = None,
     branch: str | None = None,
     page: int = 1,
     page_size: int = 25,
 ) -> dict:
-    """Cross-PO receipt monitor: read-only view over PaymentReceiptRef (no new ledger)."""
+    """Per-PO payment monitor: one row per job (with or without receipts), read-only.
+
+    Derived from PaymentReceiptRef/PaymentBypass through the existing payment gate; no ledger copy.
+    """
     _require(user, P.JOB_READ)
     from app.authorization.workflow import branch_allowed
     from app.services.production.payment_gate import status_expression
 
     page = max(1, int(page))
     page_size = min(100, max(1, int(page_size)))
-    # Evaluated in its own subquery so its EXISTS clauses cannot auto-correlate to the outer receipt table.
+    # Separate subqueries so EXISTS clauses cannot auto-correlate to the outer tables and a PO
+    # with many receipts stays one row.
     st = select(ProductionJob.id.label("job_id"), status_expression().label("payment_status")).subquery()
+    agg = (
+        select(
+            PaymentReceiptRef.job_id.label("job_id"),
+            func.count(PaymentReceiptRef.id).label("receipt_count"),
+            func.sum(PaymentReceiptRef.amount).filter(
+                PaymentReceiptRef.status == "valid",
+                PaymentReceiptRef.evidence_verified.is_(True),
+                PaymentReceiptRef.amount > 0,
+            ).label("verified_amount"),
+        )
+        .group_by(PaymentReceiptRef.job_id)
+        .subquery()
+    )
+    count_col = func.coalesce(agg.c.receipt_count, 0)
     branches = (await session.scalars(select(ProductionJob.branch_id).distinct())).all()
     allowed = [b for b in branches if branch_allowed(user, b)]
     if branch:
         allowed = [b for b in allowed if b == branch]
     base = (
-        select(PaymentReceiptRef, ProductionJob, st.c.payment_status)
-        .join(ProductionJob, ProductionJob.id == PaymentReceiptRef.job_id)
+        select(ProductionJob, st.c.payment_status, count_col.label("receipt_count"), agg.c.verified_amount)
         .join(st, st.c.job_id == ProductionJob.id)
+        .outerjoin(agg, agg.c.job_id == ProductionJob.id)
         .where(ProductionJob.branch_id.in_(allowed or [""]))
     )
-    if receipt_status:
-        base = base.where(PaymentReceiptRef.status == receipt_status)
     if payment_status:
         base = base.where(st.c.payment_status == payment_status)
+    if receipts == "with":
+        base = base.where(count_col > 0)
+    elif receipts == "without":
+        base = base.where(count_col == 0)
+    if receipt_status:
+        base = base.where(
+            select(PaymentReceiptRef.id)
+            .where(PaymentReceiptRef.job_id == ProductionJob.id, PaymentReceiptRef.status == receipt_status)
+            .exists()
+        )
     term = (q or "").strip()
     if term:
         like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         base = base.where(or_(
             ProductionJob.accurate_so_number.ilike(like, escape="\\"),
             ProductionJob.customer_name.ilike(like, escape="\\"),
-            PaymentReceiptRef.accurate_receipt_id.ilike(like, escape="\\"),
-            PaymentReceiptRef.accurate_receipt_number.ilike(like, escape="\\"),
+            select(PaymentReceiptRef.id).where(
+                PaymentReceiptRef.job_id == ProductionJob.id,
+                or_(
+                    PaymentReceiptRef.accurate_receipt_id.ilike(like, escape="\\"),
+                    PaymentReceiptRef.accurate_receipt_number.ilike(like, escape="\\"),
+                ),
+            ).exists(),
         ))
     total = await session.scalar(select(func.count()).select_from(base.order_by(None).subquery())) or 0
     rows = (await session.execute(
-        base.order_by(PaymentReceiptRef.created_at.desc(), PaymentReceiptRef.id.desc())
-        .limit(page_size).offset((page - 1) * page_size)
+        base.order_by(ProductionJob.id.desc()).limit(page_size).offset((page - 1) * page_size)
     )).all()
-    job_ids = {job.id for _, job, _ in rows}
-    bypassed = set()
+    job_ids = [job.id for job, *_ in rows]
+    by_job: dict[int, list] = {}
+    bypassed: set[int] = set()
     if job_ids:
+        for r in (await session.scalars(
+            select(PaymentReceiptRef).where(PaymentReceiptRef.job_id.in_(job_ids)).order_by(PaymentReceiptRef.id.desc())
+        )).all():
+            by_job.setdefault(r.job_id, []).append(r)
         bypassed = set((await session.scalars(
             select(PaymentBypass.job_id).where(PaymentBypass.job_id.in_(job_ids), PaymentBypass.active.is_(True))
         )).all())
     items = [
         {
-            "receipt_id": r.id,
-            "accurate_receipt_id": r.accurate_receipt_id,
-            "accurate_receipt_number": r.accurate_receipt_number,
-            "amount": str(r.amount) if r.amount is not None else None,
-            "receipt_status": r.status,
-            "evidence_verified": bool(r.evidence_verified),
-            "recorded_at": r.created_at.isoformat() if r.created_at else None,
             "job_id": job.id,
             "so_number": job.accurate_so_number,
             "customer_name": job.customer_name,
             "branch_id": job.branch_id,
             "payment_status": status,
             "bypass_active": job.id in bypassed,
+            "receipt_count": int(count),
+            "verified_amount": str(verified) if verified is not None else None,
+            "receipts": [
+                {
+                    "receipt_id": r.id,
+                    "accurate_receipt_id": r.accurate_receipt_id,
+                    "accurate_receipt_number": r.accurate_receipt_number,
+                    "amount": str(r.amount) if r.amount is not None else None,
+                    "receipt_status": r.status,
+                    "evidence_verified": bool(r.evidence_verified),
+                    "recorded_at": r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in by_job.get(job.id, [])
+            ],
         }
-        for r, job, status in rows
+        for job, status, count, verified in rows
     ]
     return {"items": items, "total": total, "page": page, "page_size": page_size,
             "has_more": page * page_size < total}

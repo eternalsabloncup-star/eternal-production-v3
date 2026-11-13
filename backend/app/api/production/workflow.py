@@ -274,16 +274,17 @@ async def payment_receipts_list(
     q: str | None = None,
     payment_status: str | None = Query(None, pattern="^(approved|bypassed|pending)$"),
     receipt_status: str | None = Query(None, pattern="^(valid|invalidated|reversed)$"),
+    receipts: str | None = Query(None, pattern="^(with|without)$"),
     branch: str | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     session: AsyncSession = Depends(get_db_session),
     user: User = Depends(require_permissions(P.JOB_READ)),
 ):
-    """Official cross-PO payment receipt monitor (read-only, branch scoped)."""
+    """Official per-PO payment monitor, with or without receipts (read-only, branch scoped)."""
     return await engine.list_payment_receipts(
         session, user, q=q, payment_status=payment_status, receipt_status=receipt_status,
-        branch=branch, page=page, page_size=page_size,
+        receipts=receipts, branch=branch, page=page, page_size=page_size,
     )
 
 
