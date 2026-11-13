@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -267,6 +267,24 @@ async def evidence_capability(
 
     _ = user
     return cap()
+
+
+@router.get("/payment/receipts")
+async def payment_receipts_list(
+    q: str | None = None,
+    payment_status: str | None = Query(None, pattern="^(approved|bypassed|pending)$"),
+    receipt_status: str | None = Query(None, pattern="^(valid|invalidated|reversed)$"),
+    branch: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_permissions(P.JOB_READ)),
+):
+    """Official cross-PO payment receipt monitor (read-only, branch scoped)."""
+    return await engine.list_payment_receipts(
+        session, user, q=q, payment_status=payment_status, receipt_status=receipt_status,
+        branch=branch, page=page, page_size=page_size,
+    )
 
 
 class TeamTaskSyncLine(BaseModel):

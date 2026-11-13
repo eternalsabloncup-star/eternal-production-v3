@@ -1196,6 +1196,7 @@
     const paymentDraft = selectedSo === so ? snapshotDeliveryDraft() : null;
     paymentEpoch++;
     taskRequestSequence++;
+    if (typeof window.v3PaymentMonitorRefresh === "function") window.v3PaymentMonitorRefresh();
     delete boardCache[so];
     delete jobCache[so];
     window.__V3_OFFICIAL_TASKS__ = [];
@@ -3587,6 +3588,97 @@
     document.getElementById("v36-tracking-overlay")?.remove();
     // Intentionally empty of progress UI — demo path removed.
   };
+
+  // Monitoring Penerimaan (operasional): daftar resmi lintas PO dari
+  // GET /production/jobs/payment/receipts. Tidak ada fixture/peran demo/simulasi.
+  const rm = { q: "", paymentStatus: "", receiptStatus: "", page: 1, pageSize: 25, data: null, loading: false, error: "", stale: true, detail: null };
+  const RM_PAY = { approved: ["APPROVED", "Disetujui (terverifikasi)"], bypassed: ["BYPASSED", "Bypass berwenang"], pending: ["PENDING", "Belum terverifikasi"] };
+  function rmAmount(v) {
+    if (v == null || v === "") return "Belum terverifikasi";
+    const n = Number(v);
+    return Number.isFinite(n) ? "Rp " + n.toLocaleString("id-ID") : "Belum terverifikasi";
+  }
+  async function rmLoad() {
+    if (rm.loading) return;
+    rm.loading = true; rm.error = "";
+    const params = new URLSearchParams({ page: String(rm.page), page_size: String(rm.pageSize) });
+    if (rm.q) params.set("q", rm.q);
+    if (rm.paymentStatus) params.set("payment_status", rm.paymentStatus);
+    if (rm.receiptStatus) params.set("receipt_status", rm.receiptStatus);
+    try {
+      rm.data = await request(API + "/production/jobs/payment/receipts?" + params.toString());
+      rm.stale = false;
+    } catch (err) {
+      rm.data = null; rm.error = String((err && err.message) || "Gagal memuat penerimaan");
+      rm.stale = false;
+    }
+    rm.loading = false;
+    if (typeof window.render === "function") window.render();
+  }
+  function rmRowHtml(r) {
+    const pay = RM_PAY[r.payment_status] || RM_PAY.pending;
+    const inbox = !!orderBySo(r.so_number);
+    return "<tr><td><b>" + escapeHtml(r.so_number) + "</b><br><small>" + escapeHtml(r.branch_id) + "</small></td>" +
+      "<td>" + escapeHtml(r.customer_name || "Belum terverifikasi") + "</td>" +
+      "<td>" + escapeHtml(r.accurate_receipt_number || r.accurate_receipt_id) + "<br><small>ID " + escapeHtml(r.accurate_receipt_id) + "</small></td>" +
+      "<td>" + escapeHtml(rmAmount(r.amount)) + "</td>" +
+      "<td>" + (r.evidence_verified ? "Evidence terverifikasi" : "Evidence belum terverifikasi") + (r.receipt_status !== "valid" ? "<br><b>" + escapeHtml(r.receipt_status) + "</b>" : "") + "</td>" +
+      "<td><span class=\"tag v165-status--" + (pay[0] === "APPROVED" ? "done" : pay[0] === "PENDING" ? "pending" : "process") + "\">" + pay[1] + "</span>" + (r.bypass_active ? "<br><small>Bypass aktif</small>" : "") + "</td>" +
+      "<td><button type=\"button\" class=\"btn sm\" data-rm=\"detail\" data-rid=\"" + escapeHtml(r.receipt_id) + "\">Detail</button> " +
+      (inbox ? "<button type=\"button\" class=\"btn sm\" data-rm=\"open\" data-so=\"" + escapeHtml(r.so_number) + "\">Buka PO &amp; Payment</button>" : "<small title=\"PO tidak ada pada halaman Inbox yang sedang dimuat\">PO di luar halaman Inbox</small>") + "</td></tr>";
+  }
+  function rmView() {
+    const h = typeof window.heading === "function" ? window.heading : function (t, d) { return "<h1>" + t + "</h1><p>" + d + "</p>"; };
+    if (rm.stale && !rm.loading) setTimeout(rmLoad, 0);
+    const d = rm.data;
+    const sel = function (id, label, cur, opts) {
+      return "<label>" + label + " <select id=\"" + id + "\">" + opts.map(function (o) { return "<option value=\"" + o[0] + "\"" + (cur === o[0] ? " selected" : "") + ">" + o[1] + "</option>"; }).join("") + "</select></label>";
+    };
+    let body;
+    if (rm.loading && !d) body = "<div class=\"flat-notice\" role=\"status\">Memuat penerimaan resmi…</div>";
+    else if (rm.error) body = "<div class=\"flat-notice\" role=\"alert\"><b>Gagal memuat:</b> " + escapeHtml(rm.error) + " <button type=\"button\" class=\"btn sm\" data-rm=\"reload\">Coba lagi</button></div>";
+    else if (!d || !d.items.length) body = "<div class=\"flat-notice\">Belum ada penerimaan tercatat sesuai filter. Penerimaan hanya muncul setelah dicatat dan diverifikasi pada panel Payment PO.</div>";
+    else body = "<div class=\"v36-table-container\"><table class=\"v36-table\"><thead><tr><th>No. PO</th><th>Pelanggan</th><th>Referensi penerimaan</th><th>Nominal alokasi ke PO</th><th>Evidence</th><th>Status pembayaran</th><th>Aksi</th></tr></thead><tbody>" + d.items.map(rmRowHtml).join("") + "</tbody></table></div>" +
+      "<div class=\"row\"><button type=\"button\" class=\"btn sm\" data-rm=\"prev\"" + (rm.page <= 1 ? " disabled" : "") + ">‹ Sebelumnya</button><span>Halaman " + d.page + " · " + d.total + " penerimaan</span><button type=\"button\" class=\"btn sm\" data-rm=\"next\"" + (d.has_more ? "" : " disabled") + ">Berikutnya ›</button></div>";
+    let detail = "";
+    if (rm.detail && d) {
+      const r = d.items.find(function (x) { return x.receipt_id === rm.detail; });
+      if (r) detail = "<section class=\"flat-notice\" id=\"v3-rm-detail\"><b>Detail penerimaan #" + escapeHtml(r.receipt_id) + "</b><ul><li>PO: " + escapeHtml(r.so_number) + " · cabang " + escapeHtml(r.branch_id) + "</li><li>Receipt Accurate: " + escapeHtml(r.accurate_receipt_number || "Belum terverifikasi") + " (ID " + escapeHtml(r.accurate_receipt_id) + ")</li><li>Nominal alokasi: " + escapeHtml(rmAmount(r.amount)) + "</li><li>Status receipt: " + escapeHtml(r.receipt_status) + " · evidence " + (r.evidence_verified ? "terverifikasi" : "belum terverifikasi") + "</li><li>Dicatat: " + escapeHtml(r.recorded_at || "Belum terverifikasi") + "</li></ul><small>Riwayat dan tindakan (revalidasi, invalidasi, bypass) ada pada panel Payment PO.</small></section>";
+    }
+    return h("Monitoring Penerimaan Penjualan", "Data resmi dari backend V3 (receipt yang dicatat dan diverifikasi per PO); tidak ada simulasi.") +
+      "<form class=\"v36-toolbar\" id=\"v3-rm-form\"><label class=\"v36-search\"><span>⌕</span><input id=\"v3-rm-q\" aria-label=\"Cari penerimaan\" placeholder=\"No. PO / pelanggan / receipt\" value=\"" + escapeHtml(rm.q) + "\"></label>" +
+      sel("v3-rm-pay", "Status pembayaran", rm.paymentStatus, [["", "Semua"], ["approved", "Disetujui"], ["bypassed", "Bypass"], ["pending", "Belum terverifikasi"]]) +
+      sel("v3-rm-rs", "Status receipt", rm.receiptStatus, [["", "Semua"], ["valid", "Valid"], ["invalidated", "Dibatalkan"], ["reversed", "Reversed"]]) +
+      "<button type=\"submit\" class=\"btn sm\">Terapkan</button></form>" + body + detail;
+  }
+  if (typeof window.v36ReceiptView === "function") {
+    const demoReceiptView = window.v36ReceiptView;
+    window.v36ReceiptView = function (a) {
+      return isPreviewFixture() ? demoReceiptView(a) : rmView();
+    };
+  }
+  document.addEventListener("submit", function (ev) {
+    if (!ev.target || ev.target.id !== "v3-rm-form") return;
+    ev.preventDefault();
+    rm.q = document.getElementById("v3-rm-q").value.trim();
+    rm.paymentStatus = document.getElementById("v3-rm-pay").value;
+    rm.receiptStatus = document.getElementById("v3-rm-rs").value;
+    rm.page = 1; rm.detail = null; rm.stale = true;
+    if (typeof window.render === "function") window.render();
+  });
+  document.addEventListener("click", function (ev) {
+    const t = ev.target && ev.target.closest ? ev.target.closest("[data-rm]") : null;
+    if (!t) return;
+    const act = t.getAttribute("data-rm");
+    if (act === "prev" && rm.page > 1) { rm.page--; rm.stale = true; rm.detail = null; }
+    else if (act === "next") { rm.page++; rm.stale = true; rm.detail = null; }
+    else if (act === "reload") { rm.stale = true; }
+    else if (act === "detail") { rm.detail = Number(t.getAttribute("data-rid")); }
+    else if (act === "open") { window.v3OpenWorkflow(t.getAttribute("data-so")); return; }
+    else return;
+    if (typeof window.render === "function") window.render();
+  });
+  window.v3PaymentMonitorRefresh = function () { rm.stale = true; };
 
   (async function bootLive() {
     clearGhosts();

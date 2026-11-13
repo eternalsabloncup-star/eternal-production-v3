@@ -281,18 +281,18 @@ async def matrix(ready, monkeypatch):
     return db, c
 
 
-async def test_all_48_endpoints_director_full_access(matrix):
+async def test_all_49_endpoints_director_full_access(matrix):
     _, c = matrix
     director, _ = await login(c)
     routes = matrix_routes()
-    assert len(routes) == 48
+    assert len(routes) == 49
     for method, path, name in routes:
         for job, run in ((1, 1), (2, 2)):
             r = await c.request(method, concrete(path, job, run), headers=director, json=matrix_body(name, 'B' if job == 2 else 'A'))
             assert r.status_code not in (401, 403), (name, job, r.status_code, r.text)
 
 
-async def test_all_48_endpoints_scoped_allow_cross_branch_and_revocation_deny(matrix):
+async def test_all_49_endpoints_scoped_allow_cross_branch_and_revocation_deny(matrix):
     db, c = matrix
     operator, _ = await login(c, 'test-3')
     checked = 0
@@ -314,7 +314,7 @@ async def test_all_48_endpoints_scoped_allow_cross_branch_and_revocation_deny(ma
         async with db.begin() as s:
             await s.delete(await s.get(ScopedGrant, gid))
         checked += 1
-    assert checked == 48
+    assert checked == 49
 
 
 @pytest.mark.parametrize('actor', ['director', 'scoped'])

@@ -144,7 +144,7 @@ async def test_every_legacy_endpoint_denies_empty_settings_grants(enforced):
             r=await c.request(next(iter(route.methods)),path,headers=operator,json={})
             assert r.status_code==403,(path,r.status_code,r.text)
             count+=1
-    assert count==48
+    assert count==49
 
 async def test_ownership_concurrent_revision_and_atomic_audit(enforced,monkeypatch):
     import asyncio

@@ -8,6 +8,7 @@ business execution. Unlisted production routes fail closed in enforced mode.
 WORKFLOW = {
  'create_job': ('job.create', ('job.create',)),
  'evidence_capability': ('evidence.capability.read', ()),
+ 'payment_receipts_list': ('payment.evidence.read', ('job.read',)),
  'list_team_tasks': ('task.read', ('job.read',)),
  'list_team_tasks_with_sync': ('task.read', ('job.read',)),
  'get_job_by_so': ('job.read', ('job.read',)),
@@ -61,5 +62,5 @@ SENSITIVE_FIELDS = {
  'events': 'audit.production.read', 'prep_events': 'audit.production.read',
 }
 # Aggregate job views require branch-wide grants, not an assignment-only grant.
-COLLECTIONS = {'list_team_tasks', 'list_team_tasks_with_sync', 'inbox', 'order_detail',
+COLLECTIONS = {'payment_receipts_list', 'list_team_tasks', 'list_team_tasks_with_sync', 'inbox', 'order_detail',
                'permissions_catalog', 'evidence_capability'}

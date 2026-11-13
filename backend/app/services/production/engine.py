@@ -3516,6 +3516,82 @@ def derive_team_tasks_for_job(
     return tasks
 
 
+async def list_payment_receipts(
+    session: AsyncSession,
+    user: User,
+    *,
+    q: str | None = None,
+    payment_status: str | None = None,
+    receipt_status: str | None = None,
+    branch: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+) -> dict:
+    """Cross-PO receipt monitor: read-only view over PaymentReceiptRef (no new ledger)."""
+    _require(user, P.JOB_READ)
+    from app.authorization.workflow import branch_allowed
+    from app.services.production.payment_gate import status_expression
+
+    page = max(1, int(page))
+    page_size = min(100, max(1, int(page_size)))
+    # Evaluated in its own subquery so its EXISTS clauses cannot auto-correlate to the outer receipt table.
+    st = select(ProductionJob.id.label("job_id"), status_expression().label("payment_status")).subquery()
+    branches = (await session.scalars(select(ProductionJob.branch_id).distinct())).all()
+    allowed = [b for b in branches if branch_allowed(user, b)]
+    if branch:
+        allowed = [b for b in allowed if b == branch]
+    base = (
+        select(PaymentReceiptRef, ProductionJob, st.c.payment_status)
+        .join(ProductionJob, ProductionJob.id == PaymentReceiptRef.job_id)
+        .join(st, st.c.job_id == ProductionJob.id)
+        .where(ProductionJob.branch_id.in_(allowed or [""]))
+    )
+    if receipt_status:
+        base = base.where(PaymentReceiptRef.status == receipt_status)
+    if payment_status:
+        base = base.where(st.c.payment_status == payment_status)
+    term = (q or "").strip()
+    if term:
+        like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        base = base.where(or_(
+            ProductionJob.accurate_so_number.ilike(like, escape="\\"),
+            ProductionJob.customer_name.ilike(like, escape="\\"),
+            PaymentReceiptRef.accurate_receipt_id.ilike(like, escape="\\"),
+            PaymentReceiptRef.accurate_receipt_number.ilike(like, escape="\\"),
+        ))
+    total = await session.scalar(select(func.count()).select_from(base.order_by(None).subquery())) or 0
+    rows = (await session.execute(
+        base.order_by(PaymentReceiptRef.created_at.desc(), PaymentReceiptRef.id.desc())
+        .limit(page_size).offset((page - 1) * page_size)
+    )).all()
+    job_ids = {job.id for _, job, _ in rows}
+    bypassed = set()
+    if job_ids:
+        bypassed = set((await session.scalars(
+            select(PaymentBypass.job_id).where(PaymentBypass.job_id.in_(job_ids), PaymentBypass.active.is_(True))
+        )).all())
+    items = [
+        {
+            "receipt_id": r.id,
+            "accurate_receipt_id": r.accurate_receipt_id,
+            "accurate_receipt_number": r.accurate_receipt_number,
+            "amount": str(r.amount) if r.amount is not None else None,
+            "receipt_status": r.status,
+            "evidence_verified": bool(r.evidence_verified),
+            "recorded_at": r.created_at.isoformat() if r.created_at else None,
+            "job_id": job.id,
+            "so_number": job.accurate_so_number,
+            "customer_name": job.customer_name,
+            "branch_id": job.branch_id,
+            "payment_status": status,
+            "bypass_active": job.id in bypassed,
+        }
+        for r, job, status in rows
+    ]
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "has_more": page * page_size < total}
+
+
 async def list_team_tasks(
     session: AsyncSession,
     user: User,
