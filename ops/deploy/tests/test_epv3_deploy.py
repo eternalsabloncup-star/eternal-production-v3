@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import epv3_deploy as D  # noqa: E402
 
 SCRIPT = Path(D.__file__)
+TOKEN = "FAKE_TEST_TOKEN_NOT_REAL_123"
 
 STUBS = {
     "systemctl": '''#!{py}
@@ -43,7 +44,6 @@ if "NOASSET" not in src: open("dist/assets/app.js", "w").write("js" + src)
 ''',
     "db_revision": '#!{py}\nimport os; print(open(os.environ["WORLD"] + "/db_rev").read())\n',
     "alembic_upgrade": '#!{py}\nimport os; open(os.environ["WORLD"] + "/db_rev", "w").write("rev0002")\n',
-    "ci": '#!{py}\nimport os; print(open(os.environ["WORLD"] + "/ci.json").read())\n',
 }
 
 BASE_FILES = {
@@ -93,6 +93,11 @@ class World:
         for u, s in (("epv3-api", "backend"), ("epv3-accurate-gateway", "gateway")):
             (self.w / "run" / f"{u}.loaded").write_text(f"# {s} v1\n")
         (self.w / "db_rev").write_text("rev0001\n")
+        self.api_status = None
+        self.runs_override = None
+        self.jobs_override = {}
+        self.api_auth = []
+        (self.w / "token").write_text(TOKEN + "\n")
         self.set_ci(True)
         for n, body in STUBS.items():
             p = self.w / "bin" / n
@@ -105,7 +110,8 @@ class World:
         self.cfg = {
             "repo_url": str(self.origin), "github_repo": "x/y", "root": str(self.w / "deploy"),
             "backup_dir": str(self.w / "backups"), "keep_backups": 3, "health_timeout": 2, "asset_timeout": 1,
-            "ci": {"command": [str(b / "ci")]},
+            "ci": {"token_file": str(self.w / "token"), "api_base": f"http://127.0.0.1:{port}",
+                   "per_page": 100},
             "proxy_health_url": f"http://127.0.0.1:{port}/proxy-health",
             "components": {
                 "backend": {"src": "backend", "dest": str(self.w / "opt/backend"), "unit": "epv3-api",
@@ -131,14 +137,28 @@ class World:
         assert self.run("init-baseline", "--sha", self.base, yes=True) == 0
 
     def handler(self):
+        world = self
         w = self.w
 
         class H(BaseHTTPRequestHandler):
             def log_message(self, *a):
                 pass
 
+            def api(self):
+                world.api_auth.append(self.headers.get("Authorization"))
+                if world.api_status:
+                    self.send_response(world.api_status)
+                    self.end_headers()
+                    return
+                body = json.dumps(world.api_response(self.path)).encode()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_GET(self):
                 code, body = 404, b""
+                if self.path.startswith("/repos/"):
+                    return self.api()
                 if self.path.startswith("/h/"):
                     txt = (w / "run" / f"{self.path[3:]}.loaded").read_text()
                     code, body = (500, b"bad") if "BROKEN" in txt else (200, b"ok")
@@ -157,6 +177,29 @@ class World:
 
         return H
 
+    def api_response(self, path):
+        from urllib.parse import parse_qs, urlparse
+        u = urlparse(path)
+        q = {k: v[0] for k, v in parse_qs(u.query).items()}
+        page, per = int(q.get("page", 1)), int(q.get("per_page", 30))
+        sl = slice((page - 1) * per, page * per)
+        if u.path.endswith("/actions/runs"):
+            sha = q["head_sha"]
+            runs = self.runs_override if self.runs_override is not None else [self.synth_run(sha)]
+            return {"total_count": len(runs), "workflow_runs": runs[sl]}
+        rid = int(u.path.split("/")[-2])
+        jobs = self.jobs_override.get(rid)
+        if jobs is None:
+            jobs = [{"name": n, "status": st, "conclusion": c, "head_sha": self.run_sha, "run_attempt": 1}
+                    for n, st, c in self.ci_jobs]
+        return {"total_count": len(jobs), "jobs": jobs[sl]}
+
+    def synth_run(self, sha):
+        self.run_sha = sha
+        return {"id": 1000, "head_sha": sha, "path": ".github/workflows/ci.yml", "status": "completed",
+                "conclusion": "success", "run_attempt": 1,
+                "repository": {"full_name": "x/y"}, "head_repository": {"full_name": "x/y"}}
+
     def commit(self, msg, **changes):
         for p, c in changes.items():
             p = p.replace("__", "/")
@@ -174,10 +217,8 @@ class World:
         return sh("git", "-C", str(self.origin), "rev-parse", "HEAD")
 
     def set_ci(self, ok=True, name_missing=None):
-        names = D.DEFAULT_CI
-        runs = [{"id": i, "name": n, "status": "completed", "conclusion": "success" if ok else "failure"}
-                for i, n in enumerate(names) if n != name_missing]
-        (self.w / "ci.json").write_text(json.dumps({"check_runs": runs}))
+        self.ci_jobs = [(n, "completed", "success" if ok else "failure")
+                        for n in D.DEFAULT_CI if n != name_missing]
 
     def run(self, *args, yes=False):
         a = ["--config", str(self.cfg_path)] + (["--yes"] if yes else []) + list(args)
@@ -438,12 +479,142 @@ def test_backup_pruning_keeps_recent(W):
     assert len(list((W.w / "backups").glob("deploy-*"))) == 3
 
 
-def test_evaluate_ci_picks_latest_run_per_name():
-    runs = {"check_runs": [{"id": 1, "name": "a", "status": "completed", "conclusion": "failure"},
-                           {"id": 2, "name": "a", "status": "completed", "conclusion": "success"}]}
-    D.evaluate_ci(runs, ["a"], "x" * 40)
+# ---- CI verification via GitHub Actions REST API ----
+def _run(i, sha, **kw):
+    r = {"id": i, "head_sha": sha, "path": ".github/workflows/ci.yml", "status": "completed",
+         "conclusion": "success", "run_attempt": 1,
+         "repository": {"full_name": "x/y"}, "head_repository": {"full_name": "x/y"}}
+    r.update(kw)
+    return r
+
+
+def _jobs(sha, attempt=1, **over):
+    return [dict({"name": n, "status": "completed", "conclusion": "success", "head_sha": sha,
+                  "run_attempt": attempt}, **over.get(n, {})) for n in D.DEFAULT_CI]
+
+
+def _be_sha(W):
+    return W.commit("be", **{"backend__app__main.py": "# backend v2\n"})
+
+
+def test_ci_three_jobs_success_on_exact_sha_deploys_and_uses_token_only_in_header(W, capfd):
+    sha = _be_sha(W)
+    assert W.deploy(sha) == 0
+    assert W.api_auth and set(W.api_auth) == {f"Bearer {TOKEN}"}
+    out = capfd.readouterr()
+    assert TOKEN not in out.out + out.err
+
+
+def test_ci_one_job_failed_pending_or_missing_refuses(W):
+    sha = _be_sha(W)
+    for jobs in ([(D.DEFAULT_CI[0], "completed", "failure")] + [(n, "completed", "success") for n in D.DEFAULT_CI[1:]],
+                 [(D.DEFAULT_CI[1], "in_progress", None)] + [(n, "completed", "success")
+                                                              for n in (D.DEFAULT_CI[0], D.DEFAULT_CI[2])],
+                 [(n, "completed", "success") for n in D.DEFAULT_CI[:2]],
+                 [(D.DEFAULT_CI[2], "completed", "cancelled")] + [(n, "completed", "success")
+                                                                   for n in D.DEFAULT_CI[:2]],
+                 [(D.DEFAULT_CI[2], "completed", "skipped")] + [(n, "completed", "success")
+                                                                 for n in D.DEFAULT_CI[:2]]):
+        W.ci_jobs = jobs
+        assert W.deploy(sha) == D.EXIT_REFUSED
+    assert W.restarts() == []
+
+
+def test_ci_run_still_running_or_failed_refuses(W):
+    sha = _be_sha(W)
+    for kw in ({"status": "in_progress", "conclusion": None}, {"conclusion": "failure"}, {"status": "queued"}):
+        W.runs_override = [_run(1, sha, **kw)]
+        W.jobs_override = {1: _jobs(sha)}
+        assert W.deploy(sha) == D.EXIT_REFUSED
+    assert W.restarts() == []
+
+
+def test_ci_sha_mismatch_job_or_run_refuses(W):
+    sha, other = _be_sha(W), "a" * 40
+    W.runs_override = [_run(1, other)]
+    W.jobs_override = {1: _jobs(other)}
+    assert W.deploy(sha) == D.EXIT_REFUSED  # run for a different SHA
+    W.runs_override = [_run(1, sha)]
+    W.jobs_override = {1: _jobs(other)}
+    assert W.deploy(sha) == D.EXIT_REFUSED  # job head_sha differs
+    assert W.restarts() == []
+
+
+def test_ci_no_workflow_run_refuses(W):
+    sha = _be_sha(W)
+    W.runs_override = []
+    assert W.deploy(sha) == D.EXIT_REFUSED
+
+
+def test_ci_unofficial_runs_ignored_or_refused(W):
+    sha = _be_sha(W)
+    for kw in ({"path": ".github/workflows/other.yml"}, {"repository": {"full_name": "evil/y"}},
+               {"head_repository": {"full_name": "fork/y"}}):
+        W.runs_override = [_run(1, sha, **kw)]
+        W.jobs_override = {1: _jobs(sha)}
+        assert W.deploy(sha) == D.EXIT_REFUSED  # only an unofficial green run exists
+    W.runs_override = [_run(1, sha, path=".github/workflows/other.yml"), _run(2, sha)]
+    W.jobs_override = {1: _jobs(sha, **{D.DEFAULT_CI[0]: {"conclusion": "failure"}}), 2: _jobs(sha)}
+    assert W.deploy(sha) == 0  # unofficial failing run is not part of the gate
+
+
+def test_ci_pagination_collects_all_runs_and_jobs(W):
+    sha = _be_sha(W)
+    W.cfg["ci"]["per_page"] = 1
+    W.cfg_path.write_text(json.dumps(W.cfg))
+    # failing run only visible on page 2 must still block
+    W.runs_override = [_run(1, sha), _run(2, sha, conclusion="failure")]
+    W.jobs_override = {1: _jobs(sha), 2: _jobs(sha)}
+    assert W.deploy(sha) == D.EXIT_REFUSED
+    # required jobs spread over pages (per_page=1) are all found
+    W.runs_override = [_run(1, sha)]
+    W.jobs_override = {1: _jobs(sha)}
+    assert W.deploy(sha) == 0
+
+
+def test_ci_rerun_uses_latest_attempt_jobs_only(W):
+    sha = _be_sha(W)
+    # run reports attempt 2 (success); jobs of attempt 1 (failed) must not be accepted
+    W.runs_override = [_run(1, sha, run_attempt=2)]
+    W.jobs_override = {1: _jobs(sha, attempt=1)}
+    assert W.deploy(sha) == D.EXIT_REFUSED
+    W.jobs_override = {1: _jobs(sha, attempt=2)}
+    assert W.deploy(sha) == 0
+
+
+def test_ci_duplicate_job_names_refuse(W):
+    sha = _be_sha(W)
+    W.runs_override = [_run(1, sha)]
+    W.jobs_override = {1: _jobs(sha) + [_jobs(sha)[0]]}
+    assert W.deploy(sha) == D.EXIT_REFUSED
+
+
+@pytest.mark.parametrize("code", [401, 403, 429, 500, 404])
+def test_ci_api_error_fails_closed_without_leaking_token(W, capfd, code):
+    sha = _be_sha(W)
+    W.api_status = code
+    assert W.deploy(sha) == D.EXIT_REFUSED
+    out = capfd.readouterr()
+    assert TOKEN not in out.out + out.err and f"HTTP {code}" in out.out + out.err
+    assert W.restarts() == []
+
+
+def test_ci_api_unreachable_malformed_redirect_or_missing_token_fail_closed(W):
+    sha = _be_sha(W)
+    W.cfg["ci"]["api_base"] = "http://127.0.0.1:9"
+    W.cfg_path.write_text(json.dumps(W.cfg))
+    assert W.deploy(sha) == D.EXIT_REFUSED
     with pytest.raises(D.Refused):
-        D.evaluate_ci({"check_runs": [{"id": 1, "name": "a", "status": "in_progress"}]}, ["a"], "x" * 40)
+        D.verify_ci_actions(lambda p: {"workflow_runs": "x"}, "x/y", sha, D.DEFAULT_CI, D.DEFAULT_WORKFLOW)
+    with pytest.raises(D.Refused):  # total_count larger than what pages deliver
+        D.verify_ci_actions(lambda p: {"total_count": 5, "workflow_runs": []}, "x/y", sha, D.DEFAULT_CI,
+                            D.DEFAULT_WORKFLOW)
+    with pytest.raises(D.Refused):
+        D.github_get("http://example.com", "/x", "t")  # non-https base rejected
+    W.cfg["ci"]["api_base"] = f"http://127.0.0.1:{W.srv.server_port}"
+    (W.w / "token").write_text("")
+    W.cfg_path.write_text(json.dumps(W.cfg))
+    assert W.deploy(sha) == D.EXIT_REFUSED
 
 
 # ---- DB revision verification (no alembic wrapper required) ----

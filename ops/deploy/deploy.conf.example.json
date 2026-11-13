@@ -10,7 +10,8 @@
   "pg_dump_to_stdout": true,
   "health_timeout": 45,
   "ci": {
-    "token_file": "REPLACE_ME_path_to_read_only_github_checks_token",
+    "token_file": "REPLACE_ME_path_to_read_only_github_actions_token",
+    "workflow_path": ".github/workflows/ci.yml",
     "required": [
       "Backend (Postgres + Pytest + Alembic)",
       "Accurate Gateway (fixture mode)",
