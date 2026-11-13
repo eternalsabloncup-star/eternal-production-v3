@@ -662,13 +662,33 @@
     }
     if (!response.ok) {
       let detail = "";
+      let errCode = "";
       try {
         const errBody = await response.json();
+        errCode = (errBody && errBody.error && errBody.error.code) || "";
         detail =
           (errBody && errBody.error && errBody.error.message) ||
           (typeof errBody.detail === "string" ? errBody.detail : "") ||
           "";
       } catch (_) {}
+      if (response.status === 409 && errCode === "access_changed_reconcile") {
+        // An earlier step was already saved: never present this as a plain failure.
+        Object.keys(boardCache).forEach(function (so) {
+          delete boardCache[so];
+        });
+        throw new Error(
+          "PERLU REKONSILIASI: akses berubah setelah satu langkah tersimpan. Data dimuat ulang — periksa hasilnya sebelum mengulang.",
+        );
+      }
+      if (
+        response.status === 409 &&
+        (errCode === "access_changed_nothing_written" ||
+          errCode === "sync_conflict_nothing_written")
+      ) {
+        throw new Error(
+          "Tidak ada data yang tersimpan (akses/sinkronisasi berubah). Aman untuk dicoba lagi setelah memuat ulang.",
+        );
+      }
       if (response.status === 503) {
         throw new Error("Gateway Accurate belum siap / tidak berwenang");
       }
@@ -2834,6 +2854,7 @@
         );
         const out = document.getElementById("v3-payroll-out");
         if (out) out.textContent = JSON.stringify(detail, null, 2);
+        window.v3LastPayrollRunId = run.id;
         toast("Payroll run #" + run.id);
         return;
       }

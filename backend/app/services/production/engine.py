@@ -8,7 +8,7 @@ from decimal import Decimal
 
 from fastapi import HTTPException
 from sqlalchemy import func, or_, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.production.attachment import ProductionAttachment  # noqa: F401
@@ -230,8 +230,12 @@ async def ensure_job(
     buffer_stock: bool | None = None,
     urgent_state: str | None = None,
     line_items: list[dict] | None = None,
+    commit: bool = True,
 ) -> ProductionJob:
-    """Create or refresh job. Classifications stay null/unknown unless explicit."""
+    """Create or refresh job. Classifications stay null/unknown unless explicit.
+
+    commit=False leaves the write pending in the caller's transaction (bulk sync).
+    """
     from app.services.production.prep import sync_job_lines_from_so_detail
 
     _require(user, P.JOB_CREATE)
@@ -256,6 +260,9 @@ async def ensure_job(
             existing.urgent_state = urgent_v
         if line_items:
             await sync_job_lines_from_so_detail(session, existing, line_items)
+        if not commit:
+            await session.flush()
+            return existing
         await session.commit()
         await session.refresh(existing)
         return existing
@@ -285,6 +292,9 @@ async def ensure_job(
                 processing_status="Baru",
             )
         )
+    if not commit:
+        await session.flush()
+        return job
     await session.commit()
     await session.refresh(job)
     return job
@@ -1165,6 +1175,24 @@ async def correct_output(
     src = await session.get(ProductionEvent, source_event_id)
     if src is None or src.job_id != job.id or src.event_type != "output_confirmed":
         raise HTTPException(404, "Output event sumber tidak ditemukan")
+    payload_json = f'{{"source_output_id":{src.id}}}'
+
+    def _same(row: ProductionEvent) -> bool:
+        return (
+            row.job_id == job.id
+            and row.event_type == "output_correction"
+            and row.qty_physical == qty_physical_delta
+            and (row.reason or "") == reason.strip()
+            and row.payload_json == payload_json
+        )
+
+    prior = await session.scalar(
+        select(ProductionEvent).where(ProductionEvent.idempotency_key == idempotency_key)
+    )
+    if prior is not None:
+        if not _same(prior):
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return prior
     event = ProductionEvent(
         job_id=job.id,
         assignment_id=src.assignment_id,
@@ -1177,20 +1205,33 @@ async def correct_output(
         idempotency_key=idempotency_key,
         actor_user_id=user.id,
         reason=reason.strip(),
-        payload_json=f'{{"source_output_id":{src.id}}}',
+        payload_json=payload_json,
     )
     session.add(event)
-    if src.assignment_id:
-        assignment = await session.get(ScheduleAssignment, src.assignment_id)
-        if assignment:
-            assignment.qty_confirmed = assignment.qty_confirmed + qty_physical_delta
-            if assignment.qty_confirmed < 0:
-                raise HTTPException(409, "Koreksi membuat qty confirmed negatif")
     try:
+        if src.assignment_id:
+            assignment = await session.get(ScheduleAssignment, src.assignment_id)
+            if assignment:
+                assignment.qty_confirmed = assignment.qty_confirmed + qty_physical_delta
+                if assignment.qty_confirmed < 0:
+                    raise HTTPException(409, "Koreksi membuat qty confirmed negatif")
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        raise HTTPException(409, "Idempotency key duplikat") from exc
+        orig = exc.orig
+        if (
+            getattr(orig, "sqlstate", None) != "23505"
+            or "uq_production_events_idempotency" not in str(orig)
+        ):
+            raise
+        raced = await session.scalar(
+            select(ProductionEvent).where(ProductionEvent.idempotency_key == idempotency_key)
+        )
+        if raced is None:
+            raise
+        if not _same(raced):
+            raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+        return raced
     await session.refresh(event)
     return event
 
@@ -3488,26 +3529,53 @@ async def list_team_tasks(
     synced: list[str] = []
     if sync_ensure and sync_payloads:
         _require(user, P.JOB_CREATE)
-        for payload in sync_payloads:
+        from app.authorization.workflow import branch_allowed, branch_allowed_for
+        # One transaction for the whole page: any failure leaves no partial sync.
+        # Rows are written in sorted SO order so concurrent syncs take unique-index
+        # locks in the same order (no lock-order deadlock); the response keeps input order.
+        indexed = []
+        for position, payload in enumerate(sync_payloads):
             so = str(payload.get("accurate_so_number") or "").strip()
             branch_id = str(payload.get("branch_id") or "").strip()
-            if not so or not branch_id:
-                continue
-            from app.authorization.workflow import branch_allowed
-            if not branch_allowed(user, branch_id):
-                continue
-            await ensure_job(
-                session,
-                user,
-                accurate_so_number=so,
-                branch_id=branch_id,
-                accurate_id=payload.get("accurate_id"),
-                customer_name=payload.get("customer_name"),
-                buffer_stock=payload.get("buffer_stock"),
-                urgent_state=payload.get("urgent_state"),
-                line_items=payload.get("line_items"),
-            )
-            synced.append(so)
+            if so and branch_id:
+                indexed.append((so, position, branch_id, payload))
+        done: dict[int, str] = {}
+        try:
+            for so, position, branch_id, payload in sorted(indexed, key=lambda t: (t[0], t[1])):
+                if not branch_allowed(user, branch_id) or not branch_allowed_for(
+                    user, "job.create", branch_id
+                ):
+                    continue
+                await ensure_job(
+                    session,
+                    user,
+                    accurate_so_number=so,
+                    branch_id=branch_id,
+                    accurate_id=payload.get("accurate_id"),
+                    customer_name=payload.get("customer_name"),
+                    buffer_stock=payload.get("buffer_stock"),
+                    urgent_state=payload.get("urgent_state"),
+                    line_items=payload.get("line_items"),
+                    commit=False,
+                )
+                done[position] = so
+            await session.commit()
+            synced.extend(done[k] for k in sorted(done))
+        except (IntegrityError, DBAPIError) as exc:
+            await session.rollback()
+            # Only concurrency outcomes are retryable: unique violation from a racing
+            # insert, deadlock, serialization failure. Anything else is a real fault.
+            if getattr(exc.orig, "sqlstate", None) not in {"23505", "40P01", "40001"}:
+                raise
+            from app.core.errors import AppError
+            raise AppError(
+                "Sinkronisasi bersamaan terdeteksi; tidak ada data tertulis, coba lagi",
+                code="sync_conflict_nothing_written",
+                status_code=409,
+            ) from exc
+        except BaseException:
+            await session.rollback()
+            raise
 
     from app.models.production.prep import JobLineQty, PrepState
 

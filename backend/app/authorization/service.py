@@ -26,8 +26,12 @@ def atomic_mutation(function):
             return await function(session, **kwargs)
     return wrapped
 
-async def load_access(session: AsyncSession, user_id: int, *, exclusive: bool = False) -> Access:
-    state = await session.scalar(select(AccessState).where(AccessState.id == 1).with_for_update(read=not exclusive).execution_options(populate_existing=True))
+async def load_access(session: AsyncSession, user_id: int, *, exclusive: bool = False, lock: bool = True) -> Access:
+    # lock=False is only for read-only diagnostics inside a READ ONLY snapshot; never for decisions.
+    query = select(AccessState).where(AccessState.id == 1)
+    if lock:
+        query = query.with_for_update(read=not exclusive)
+    state = await session.scalar(query.execution_options(populate_existing=True))
     if state is None or not state.bootstrapped:
         raise HTTPException(503, 'Access foundation is not bootstrapped')
     user = await session.get(User, user_id, populate_existing=True)

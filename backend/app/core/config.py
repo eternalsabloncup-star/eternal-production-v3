@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     accurate_read_gateway_token: str = Field(
         default="", alias="V3_ACCURATE_READ_GATEWAY_TOKEN"
     )
+    # Bounded upstream scan for branch-scoped (non-Director) Inbox pages.
+    inbox_scoped_scan_max_pages: int = Field(
+        default=50, ge=1, le=200, alias="V3_INBOX_SCOPED_SCAN_MAX_PAGES"
+    )
     # When true, payment receipts + SJ loading require live gateway verification.
     # Default false only so APP_ENV=test can skip; non-test always enforces via
     # accurate_evidence._enforce() even if this flag is false.

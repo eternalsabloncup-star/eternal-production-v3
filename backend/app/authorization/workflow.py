@@ -1,8 +1,10 @@
 """Request-scoped enforcement bridge. Never mutates or ORs legacy user grants."""
 from dataclasses import dataclass, replace
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import event, select
 from app.authorization.catalog import CATALOG
+from app.core.errors import AppError
+from app.authorization.models import AccessState
 from app.authorization.evaluator import Resource, evaluate, validate_grant
 from app.authorization.workflow_map import WORKFLOW, PAYROLL, INBOX
 from app.authorization.ownership import owned
@@ -31,11 +33,50 @@ class WorkflowContext:
     def can(self, capability):
         return evaluate(self.access,capability,self.resource).allowed
 
+    def allows(self, capability, branch):
+        return evaluate(self.access,capability,Resource(branch)).allowed
+
 
 def context(user): return getattr(user,'_workflow_context',None)
 def branch_allowed(user, branch):
     ctx=context(user)
     return ctx.branch(branch) if ctx else branch in list(user.branch_ids or [])
+
+def branch_allowed_for(user, capability, branch):
+    ctx=context(user)
+    return ctx.allows(capability,branch) if ctx else branch in list(user.branch_ids or [])
+
+FENCE_KEY='access_revision_fence'
+NOTHING_WRITTEN='access_changed_nothing_written'  # safe to refresh and retry
+RECONCILE='access_changed_reconcile'  # an earlier step is committed: reload, do not blindly retry
+
+def _check_fence(session, transaction, connection):
+    expected=session.info.get(FENCE_KEY)
+    if expected is None: return
+    current=connection.execute(select(AccessState.revision).where(AccessState.id==1).with_for_update(read=True)).scalar()
+    if current==expected: return
+    if session.info.get('fence_committed'):
+        # A step already committed: never answer 409 for it. Reads (response building) may
+        # finish; any further write is refused in _fence_before_flush.
+        session.info['fence_stale']=True
+        return
+    raise AppError('Access changed during this request; nothing was written, refresh and retry',code=NOTHING_WRITTEN,status_code=409)
+
+def _fence_after_commit(session): session.info['fence_committed']=True
+
+def _fence_before_flush(session, flush_context, instances):
+    if session.info.get('fence_stale') and (session.new or session.dirty or session.deleted):
+        raise AppError('Access changed after an earlier step committed; reconcile before retrying',code=RECONCILE,status_code=409)
+
+def install_revision_fence(session, revision):
+    """The FOR SHARE lock taken at authorization ends at the first commit. A later
+    transaction must re-prove the authorized revision before it may begin; after an
+    earlier commit it may only read, never write (see _check_fence)."""
+    sync=session.sync_session
+    sync.info[FENCE_KEY]=revision
+    sync.info.pop('fence_committed',None); sync.info.pop('fence_stale',None)
+    for name,fn in (('after_begin',_check_fence),('after_commit',_fence_after_commit),('before_flush',_fence_before_flush)):
+        if not event.contains(sync,name,fn): event.listen(sync,name,fn)
 
 def legacy_allowed(user, permissions):
     ctx=context(user)
@@ -133,9 +174,11 @@ async def authorize_request(session,user,request):
     if job is not None or branch or CATALOG[cap].scope=='global' or name in {'create_run','get_run'}:
         if not evaluate(access,cap,resource).allowed: raise HTTPException(403,'Resource scope denied')
     if name=='list_team_tasks_with_sync' and body.get('sync_ensure'):
-        # Legacy sync commits per job; a transaction-safe bulk adapter is still required.
-        raise HTTPException(409,'Bulk source sync unavailable during sandbox cutover')
+        # Each synced branch is re-checked against job.create inside the single sync transaction.
+        if not any_scope('job.create'): raise HTTPException(403,'Capability denied: job.create')
+        legacy=legacy+('job.create',)
     user._workflow_context=WorkflowContext(access,cap,tuple('production.'+p for p in legacy),resource)
+    install_revision_fence(session,access.revision)
 
 
 def redact_board(user, payload):

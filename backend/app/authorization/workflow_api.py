@@ -8,6 +8,7 @@ from app.authorization import accounts, ownership
 from app.authorization.evaluator import Resource, evaluate
 from app.models.production.job import ProductionJob
 from app.models.production.schedule import ScheduleAssignment
+from app.models.production.payroll import PayrollRun, PayrollLine
 from app.services.production.payment_gate import effective_statuses
 
 router = APIRouter(prefix='/production/access', route_class=SafeRoute, tags=['workflow-access'])
@@ -35,14 +36,23 @@ async def revoke(ownership_id:int,body:Mutation,access=Depends(actor),session=De
     return await result(session)
 
 async def scoped_rows(session, access, capability):
-    """Only identity/schedule/status fields. Never returns receipts or audit payloads."""
+    """Only identity/schedule/status fields. Never returns receipts or audit payloads.
+    Three batched reads (jobs, assignments, own bindings) instead of per-job queries;
+    delegation validity still goes through ownership.owned() per active binding."""
     jobs=(await session.scalars(select(ProductionJob).order_by(ProductionJob.id))).all()
+    ids=[j.id for j in jobs]
+    by_job={}
+    if ids:
+        for a in (await session.scalars(select(ScheduleAssignment).where(ScheduleAssignment.job_id.in_(ids)).order_by(ScheduleAssignment.id))).all():
+            by_job.setdefault(a.job_id,[]).append(a)
+    own={}
+    for b in (await session.scalars(select(ownership.TaskOwnership).where(ownership.TaskOwnership.user_id==access.user_id,ownership.TaskOwnership.active.is_(True),ownership.TaskOwnership.job_id.in_(ids) if ids else False).order_by(ownership.TaskOwnership.id))).all():
+        own.setdefault(b.job_id,[]).append(b)
     items=[]
     for job in jobs:
-        assignments=(await session.scalars(select(ScheduleAssignment).where(ScheduleAssignment.job_id==job.id))).all()
-        bindings=(await session.scalars(select(ownership.TaskOwnership).where(ownership.TaskOwnership.job_id==job.id,ownership.TaskOwnership.user_id==access.user_id,ownership.TaskOwnership.active.is_(True)))).all()
+        assignments=by_job.get(job.id,[])
         resources={}
-        for binding in bindings:
+        for binding in own.get(job.id,[]):
             oid=await ownership.owned(session,access.user_id,job.id,binding.task_kind,binding.assignment_id)
             if oid: resources[binding.assignment_id]=Resource(job.branch_id,binding.assignment_id,access.user_id,oid)
         candidates=list(assignments)
@@ -64,9 +74,27 @@ async def tasks(access=Depends(actor),session=Depends(transaction)):
         raise HTTPException(403,'Task read denied')
     return {'items':await scoped_rows(session,access,'task.read'),'revision':access.revision}
 
+async def payroll_document(session, access, kind, run_id):
+    """Run lines filtered per line branch. Source event IDs and rate snapshots stay internal."""
+    if run_id is None: raise HTTPException(422,'run_id required')
+    run=await session.get(PayrollRun,run_id)
+    if run is None: raise HTTPException(404,'Payroll run not found')
+    if run.branch_id and not evaluate(access,kind,Resource(run.branch_id)).allowed:
+        raise HTTPException(403,'Resource scope denied')
+    lines=(await session.scalars(select(PayrollLine).where(PayrollLine.run_id==run.id).order_by(PayrollLine.operator_name,PayrollLine.id))).all()
+    items=[{'operator_name':l.operator_name,'branch_id':l.branch_id,
+            **{k:str(getattr(l,k)) for k in ('qty_one','qty_two','qty_three','qty_four','qty_screen','amount_gross')}}
+           for l in lines if evaluate(access,kind,Resource(l.branch_id)).allowed]
+    if not run.branch_id and not items and lines: raise HTTPException(403,'Resource scope denied')
+    return {'run':{'id':run.id,'period_start':run.period_start.isoformat(),'period_end':run.period_end.isoformat(),
+                   'branch_id':run.branch_id,'status':run.status},'items':items}
+
 @router.get('/documents/{kind}')
-async def document(kind: Literal['job.export','job.print','task.export','report.production.export'],access=Depends(actor),session=Depends(transaction)):
+async def document(kind: Literal['job.export','job.print','task.export','report.production.export','payroll.export','payroll.print'],
+                   run_id: int | None = None,access=Depends(actor),session=Depends(transaction)):
     # Read permission is deliberately neither sufficient nor implicitly imported.
     if not access.director and not any(g.capability==kind for g in access.grants):
         raise HTTPException(403,'Explicit export/print grant required')
+    if kind.startswith('payroll.'):
+        return {'capability':kind,**await payroll_document(session,access,kind,run_id),'revision':access.revision}
     return {'capability':kind,'items':await scoped_rows(session,access,kind),'revision':access.revision}

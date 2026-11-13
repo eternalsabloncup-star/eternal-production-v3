@@ -92,7 +92,7 @@ async def test_manager_no_input_and_cross_job_rejected(enforced):
     body={'revision':0,'reason':'Wrong job','job_id':1,'user_id':3,'task_kind':'helper','assignment_id':3}
     assert (await c.post('/api/v1/production/access/ownership',headers=operator,json=body)).status_code==422
     assert (await c.post('/api/v1/production/jobs/1/payment/bypass',headers=operator,json={'reason':'No payment permission'})).status_code==403
-    assert (await c.post('/api/v1/production/jobs/tasks',headers=director,json={'sync_ensure':True,'jobs':[]})).status_code==409
+    assert (await c.post('/api/v1/production/jobs/tasks',headers=operator,json={'sync_ensure':True,'jobs':[]})).status_code==403
 
 @pytest.mark.parametrize('kind',['screener','operator','helper','packing','loading','courier'])
 async def test_stable_identity_all_roles_and_delegation_revocation(enforced,kind):
