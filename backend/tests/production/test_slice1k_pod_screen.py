@@ -183,27 +183,30 @@ async def _seed_packed_job(client: AsyncClient) -> tuple[int, str]:
         f"/api/v1/production/jobs/samples/{sample['id']}/decision",
         json={"decision": "approved", "bypass": True, "reason": "test setup bypass"},
     )
-    assert (
-        await client.post(
-            f"/api/v1/production/jobs/{jid}/outputs",
-            json={
-                "assignment_id": asg["id"],
-                "qty_physical": "100",
-                "color_pass": 1,
-                "idempotency_key": "out-1k-100",
-            },
-        )
-    ).status_code == 200
-    assert (
-        await client.post(
-            f"/api/v1/production/jobs/{jid}/packing",
-            json={
-                "so_line_id": "L1",
-                "qty_physical": "100",
-                "idempotency_key": "pack-1k-100",
-            },
-        )
-    ).status_code == 200
+    out = await client.post(
+        f"/api/v1/production/jobs/{jid}/outputs",
+        json={
+            "assignment_id": asg["id"],
+            "qty_physical": "100",
+            "color_pass": 1,
+            "idempotency_key": "out-1k-100",
+        },
+    )
+    assert out.status_code == 200, out.text
+    from tests.production.helper_verify_helpers import helper_verify_output
+
+    await helper_verify_output(
+        client, jid, out.json()["id"], "100", idem="hv-1k-pod-100"
+    )
+    pack = await client.post(
+        f"/api/v1/production/jobs/{jid}/packing",
+        json={
+            "so_line_id": "L1",
+            "qty_physical": "100",
+            "idempotency_key": "pack-1k-100",
+        },
+    )
+    assert pack.status_code == 200, pack.text
     return jid, "SJ-1K-1"
 
 
@@ -507,10 +510,25 @@ def test_alembic_upgrade_downgrade_isolated():
     with eng.begin() as conn:
         Base.metadata.drop_all(conn)
         Base.metadata.create_all(conn)
-        # Drop 1K objects so upgrade can recreate them from revision 0006 stamp.
+        # Drop objects introduced after 0006 so upgrade can recreate them.
         conn.execute(text("ALTER TABLE prep_events DROP COLUMN IF EXISTS screen_size"))
         conn.execute(text("ALTER TABLE prep_states DROP COLUMN IF EXISTS screen_size"))
         conn.execute(text("DROP TABLE IF EXISTS production_attachments CASCADE"))
+        conn.execute(
+            text(
+                "DROP INDEX IF EXISTS ix_production_events_loading_alloc"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE production_events "
+                "DROP COLUMN IF EXISTS accurate_sj_line_id"
+            )
+        )
+        conn.execute(
+            text("ALTER TABLE design_versions DROP COLUMN IF EXISTS so_line_id")
+        )
+        conn.execute(text("DROP TABLE IF EXISTS customer_access_tokens CASCADE"))
         conn.execute(text("DROP TABLE IF EXISTS alembic_version"))
     command.stamp(cfg, "20261112_0006")
     command.upgrade(cfg, "head")
