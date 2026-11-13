@@ -1,10 +1,12 @@
 """Local isolated customer portal routes — /t/{customer}/{po}/{token}.
 
-Not published. Target public domain eternalorder.id is Owner/DNS-gated.
+Not published until Owner activates V3 proxy /t/ routing.
 Bearer link ≠ legal identity proof.
 """
 
 from __future__ import annotations
+
+from html import escape
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -23,12 +25,20 @@ class DesignDecisionBody(BaseModel):
     note: str | None = None
 
 
+def _esc(value: object) -> str:
+    """Escape any dynamic value before HTML interpolation."""
+    if value is None:
+        return ""
+    return escape(str(value), quote=True)
+
+
 def _html_page(title: str, body: str) -> str:
     return f"""<!DOCTYPE html>
 <html lang="id"><head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>{title}</title>
+<meta name="referrer" content="no-referrer"/>
+<title>{_esc(title)}</title>
 <style>
 body{{font-family:Georgia,serif;margin:0;background:linear-gradient(160deg,#1a2332,#2c3e50);color:#f4f0e8;min-height:100vh}}
 main{{max-width:520px;margin:0 auto;padding:2.5rem 1.25rem}}
@@ -41,6 +51,17 @@ button{{margin:.5rem .5rem 0 0;padding:.55rem 1rem;cursor:pointer}}
 .note{{font-size:.8rem;opacity:.7;margin-top:1.5rem;line-height:1.4}}
 .err{{color:#ffb4a8}}
 </style></head><body><main>{body}</main></body></html>"""
+
+
+def _invalid_link_page(detail: object | None = None) -> str:
+    """Generic failure page — never echo job/customer payloads."""
+    msg = _esc(detail) if detail else "Tautan tidak valid atau sudah tidak berlaku"
+    return _html_page(
+        "Tautan tidak berlaku",
+        "<h1>Tautan tidak berlaku</h1>"
+        f"<p class='err'>{msg}</p>"
+        "<p class='note'>Jika Anda merasa ini kesalahan, hubungi Eternal Packaging.</p>",
+    )
 
 
 @router.get("/t/{customer_slug}/{po_slug}/{token}.json")
@@ -90,46 +111,44 @@ async def customer_token_page(
         )
     except HTTPException as exc:
         return HTMLResponse(
-            _html_page(
-                "Tautan tidak berlaku",
-                f"<h1>Tautan tidak berlaku</h1><p class='err'>{exc.detail}</p>"
-                "<p class='note'>Jika Anda merasa ini kesalahan, hubungi Eternal Packaging.</p>",
-            ),
+            _invalid_link_page(exc.detail),
             status_code=exc.status_code,
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
         )
     if row.scope == CT.SCOPE_LIVE_TRACKING:
         body = (
             f"<h1>Eternal Packaging</h1>"
             f"<p class='sub'>Pelacakan pesanan (read-only)</p>"
-            f"<div class='card'><p>PO: {job.accurate_so_number}</p>"
-            f"<p>Status proses: {job.processing_status}</p>"
-            f"<p>Design: {job.design_status} · Payment: {job.payment_status}</p></div>"
+            f"<div class='card'><p>PO: {_esc(job.accurate_so_number)}</p>"
+            f"<p>Status proses: {_esc(job.processing_status)}</p>"
+            f"<p>Design: {_esc(job.design_status)} · Payment: {_esc(job.payment_status)}</p></div>"
             "<p class='note'>Tautan ini tidak membuktikan identitas hukum pemegangnya.</p>"
         )
-        return HTMLResponse(_html_page("Live tracking", body))
+        return HTMLResponse(
+            _html_page("Live tracking", body),
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+        )
 
     if row.design_version_id is None:
         return HTMLResponse(
-            _html_page(
-                "Tautan tidak berlaku",
-                "<h1>Tautan tidak berlaku</h1><p class='err'>Revisi design tidak terikat.</p>",
-            ),
+            _invalid_link_page("Revisi design tidak terikat."),
             status_code=410,
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
         )
     ver = await session.get(DesignVersion, row.design_version_id)
     if ver is None:
         return HTMLResponse(
-            _html_page(
-                "Tautan tidak berlaku",
-                "<h1>Tautan tidak berlaku</h1>",
-            ),
+            _invalid_link_page(),
             status_code=404,
+            headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
         )
     view = CT.public_design_view(job, ver, row)
-    actions = ""
+    form_action = (
+        f"/t/{_esc(customer_slug)}/{_esc(po_slug)}/{_esc(token)}/decision"
+    )
     if view["actions_allowed"]:
         actions = f"""
-<form method="post" action="/t/{customer_slug}/{po_slug}/{token}/decision">
+<form method="post" action="{form_action}">
 <label>Catatan (opsional)</label>
 <textarea name="note" id="note"></textarea>
 <button type="submit" name="decision" value="approved">Setujui design</button>
@@ -152,19 +171,25 @@ document.querySelector('form').addEventListener('submit', async function(ev) {{
 </script>
 """
     else:
-        actions = f"<p>Keputusan: <strong>{view.get('decision') or '—'}</strong></p>"
+        actions = (
+            f"<p>Keputusan: <strong>{_esc(view.get('decision') or '—')}</strong></p>"
+        )
+    design = view.get("design") or {}
     body = f"""
 <h1>Eternal Packaging</h1>
-<p class="sub">Persetujuan design · PO {view['po_ref']}</p>
+<p class="sub">Persetujuan design · PO {_esc(view.get('po_ref'))}</p>
 <div class="card">
-<p>Pelanggan: {view['customer_label']}</p>
-<p>Revisi design: v{view['design']['version_no']} · {view['design']['file_name']}</p>
-<p>Line: {view.get('so_line_id') or '—'}</p>
+<p>Pelanggan: {_esc(view.get('customer_label'))}</p>
+<p>Revisi design: v{_esc(design.get('version_no'))} · {_esc(design.get('file_name'))}</p>
+<p>Line: {_esc(view.get('so_line_id') or '—')}</p>
 </div>
 {actions}
-<p class="note">{view['disclaimer']}</p>
+<p class="note">{_esc(view.get('disclaimer'))}</p>
 """
-    return HTMLResponse(_html_page("Persetujuan design", body))
+    return HTMLResponse(
+        _html_page("Persetujuan design", body),
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
 
 
 @router.post("/t/{customer_slug}/{po_slug}/{token}/decision")
@@ -183,4 +208,7 @@ async def customer_design_decision(
         decision=body.decision,
         note=body.note,
     )
-    return JSONResponse(result)
+    return JSONResponse(
+        result,
+        headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"},
+    )
