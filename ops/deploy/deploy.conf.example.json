@@ -1,0 +1,49 @@
+{
+  "repo_url": "git@github.com:prasnda21-tech/eternal-production-v3.git",
+  "github_repo": "prasnda21-tech/eternal-production-v3",
+  "main_ref": "main",
+  "ssh_key": "/opt/epv3/deploy/keys/github_v3_deploy_readonly",
+  "root": "/opt/epv3/deploy",
+  "backup_dir": "/opt/epv3/backups",
+  "keep_backups": 10,
+  "db_backup": true,
+  "pg_dump_to_stdout": true,
+  "health_timeout": 45,
+  "ci": {
+    "token_file": "/opt/epv3/deploy/keys/github_checks_token",
+    "required": [
+      "Backend (Postgres + Pytest + Alembic)",
+      "Accurate Gateway (fixture mode)",
+      "Frontend (build + tests)"
+    ]
+  },
+  "proxy_health_url": "http://127.0.0.1:8180/api/v1/health",
+  "migrations": { "enabled": false },
+  "components": {
+    "gateway": {
+      "src": "accurate-gateway",
+      "dest": "/opt/epv3/accurate-gateway",
+      "unit": "epv3-accurate-gateway",
+      "health_url": "http://127.0.0.1:8091/health"
+    },
+    "backend": {
+      "src": "backend",
+      "dest": "/opt/epv3/backend",
+      "unit": "epv3-api",
+      "health_url": "http://127.0.0.1:8100/api/v1/health"
+    },
+    "frontend": {
+      "src": "frontend",
+      "dest": "/opt/epv3/frontend-staging",
+      "verify_base": "http://127.0.0.1:8180"
+    }
+  },
+  "commands": {
+    "restart": ["sudo", "-n", "/bin/systemctl", "restart", "{unit}"],
+    "pg_dump": ["sudo", "-n", "-u", "postgres", "/usr/bin/pg_dump", "-Fc", "-d", "eternal_production_v3"],
+    "pg_restore_list": ["/usr/bin/pg_restore", "-l", "{dump}"],
+    "frontend_build": ["/bin/bash", "-lc", "npm ci --no-audit --no-fund && npm run build"],
+    "alembic_current": ["sudo", "-n", "-u", "epv3", "/opt/epv3/deploy/bin/alembic-current-wrapper"],
+    "alembic_upgrade": ["sudo", "-n", "-u", "epv3", "/opt/epv3/deploy/bin/alembic-upgrade-wrapper", "{cwd}"]
+  }
+}
