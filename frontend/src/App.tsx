@@ -94,7 +94,7 @@ export default function App() {
   if (session) return <>
     <header className="shell__header" style={{padding:"1rem"}}><span>{session.username}</span> <button onClick={logout}>Logout</button></header>
     {session.must_change_password ? <main className="shell"><h1>Ganti password awal</h1><PasswordChangeForm api={api} onChanged={logout} /></main>
-      : session.system_director ? <><a href="/production.html">Kembali ke Production / Settings existing</a><SettingsPanel api={api} runtime />{session.workflow_authorization === "enforced" && <WorkflowTasks />}</>
+      : session.system_director ? <><a href="/production.html">Kembali ke Production / Settings existing</a><SettingsPanel api={api} runtime workflowAuthorization={session.workflow_authorization || "legacy"} />{session.workflow_authorization === "enforced" && <WorkflowTasks />}</>
       : session.workflow_authorization === "enforced" ? <WorkflowTasks /> : <main className="shell"><h1>Akun aktif</h1><p>Permission produksi baru belum diaktifkan. Hubungi Direktur untuk akses yang sesuai.</p></main>}
   </>;
 

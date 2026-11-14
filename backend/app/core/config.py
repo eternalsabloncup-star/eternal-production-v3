@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     v3_password_pepper: str = Field(default="", alias="V3_PASSWORD_PEPPER")
     v3_workflow_authorization: str = Field(default="legacy", alias="V3_WORKFLOW_AUTHORIZATION")
     v3_settings_enabled: bool = Field(default=False, alias="V3_SETTINGS_ENABLED")
+    # Owner-attested cutover reference required to start enforced outside APP_ENV=test.
+    # Presence allows process start only; it does not flip the mode by itself.
+    # Never log or return the raw value from APIs.
+    v3_workflow_enforced_approval_ref: str = Field(
+        default="", alias="V3_WORKFLOW_ENFORCED_APPROVAL_REF"
+    )
     v3_jwt_hours: int = Field(default=12, alias="V3_JWT_HOURS")
     v3_sla_working_days: int = Field(default=3, alias="V3_SLA_WORKING_DAYS")
     v3_default_shift_capacity: int = Field(default=17000, alias="V3_DEFAULT_SHIFT_CAPACITY")

@@ -110,6 +110,33 @@ async def password_change(body: PasswordChange, request: Request, session=Depend
 async def capabilities(access=Depends(director)):
     return {'revision': access.revision, 'items': [asdict(c) for c in CATALOG.values()]}
 
+@router.get('/authorization-status')
+async def authorization_status_view(access=Depends(director), session=Depends(transaction)):
+    """Director-visible cutover status. Read-only; never activates enforced."""
+    from app.core.config import get_settings
+    from app.authorization.mode import authorization_status
+    from app.authorization.inventory import build, summarize
+    state = await session.get(AccessState, 1)
+    bootstrapped = bool(state and state.bootstrapped)
+    inventory_summary = None
+    try:
+        inventory_summary = summarize(await build(session, declare_readonly=False))
+    except Exception:
+        inventory_summary = {
+            'cutover_review_clear': False,
+            'blocking_user_ids': [],
+            'automatic_import_allowed': False,
+            'writes_performed': False,
+            'error': 'inventory_unavailable',
+        }
+    payload = authorization_status(
+        get_settings(),
+        bootstrapped=bootstrapped,
+        inventory_summary=inventory_summary,
+    )
+    payload['revision'] = access.revision
+    return payload
+
 @router.get('/users')
 async def users(q: str = Query('', max_length=64), offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100), access=Depends(director), session=Depends(transaction)):
     rows = await session.scalars(select(User).where(User.username.contains(q, autoescape=True)).order_by(User.id).offset(offset).limit(limit))
