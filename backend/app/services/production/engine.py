@@ -769,6 +769,203 @@ async def invalidate_receipt(
 # ---- Schedule ----
 
 
+async def _resolve_operator(
+    session: AsyncSession, job: ProductionJob, operator_user_id: int | None
+) -> User | None:
+    """Official operator identity: active, same-branch, authorized for output input."""
+    if operator_user_id is None:
+        return None
+    target = await session.get(User, operator_user_id)
+    if target is None or not target.is_active:
+        raise HTTPException(422, "Operator harus user aktif")
+    from app.authorization.evaluator import Resource, evaluate
+    from app.authorization.service import load_access
+
+    scoped = False
+    try:
+        access = await load_access(session, target.id, lock=False)
+        scoped = evaluate(access, "output.record", Resource(job.branch_id, None)).allowed
+    except Exception:
+        scoped = False
+    legacy = (
+        "production.output.confirm" in (target.permissions or [])
+        and job.branch_id in (target.branch_ids or [])
+    )
+    if not (scoped or legacy):
+        raise HTTPException(409, "Operator tidak berwenang input output pada cabang job ini")
+    return target
+
+
+async def _assert_machine_capacity(
+    session: AsyncSession,
+    job: ProductionJob,
+    *,
+    machine_name: str,
+    work_date,
+    add_qty: Decimal,
+    so_line_id: str,
+    color_pass: int = 1,
+    exclude_assignment_id: int | None = None,
+) -> None:
+    """Machine/day capacity from the configured master. No master means no check.
+
+    Passes of one line are the same physical cups, so per line the day load is
+    the largest single pass, not the sum of passes.
+    """
+    from app.models.production.operations import ProductionMachine
+
+    configured = await session.scalar(
+        select(func.count())
+        .select_from(ProductionMachine)
+        .where(ProductionMachine.branch_id == job.branch_id, ProductionMachine.active.is_(True))
+    )
+    if not int(configured or 0):
+        return
+    machine = await session.scalar(
+        select(ProductionMachine).where(
+            ProductionMachine.branch_id == job.branch_id,
+            ProductionMachine.name == machine_name,
+            ProductionMachine.active.is_(True),
+        )
+    )
+    if machine is None:
+        raise HTTPException(409, "Mesin tidak terdaftar/aktif pada master mesin cabang")
+    await session.execute(
+        select(func.pg_advisory_xact_lock(func.hashtext(f"machine:{job.branch_id}:{machine.id}:{work_date}")))
+    )
+    q = (
+        select(
+            ScheduleAssignment.job_id,
+            ScheduleAssignment.so_line_id,
+            ScheduleAssignment.color_pass,
+            func.sum(ScheduleAssignment.qty_planned - ScheduleAssignment.qty_cancelled_remaining),
+        )
+        .where(
+            ScheduleAssignment.branch_id == job.branch_id,
+            ScheduleAssignment.machine_name == machine_name,
+            ScheduleAssignment.work_date == work_date,
+        )
+        .group_by(ScheduleAssignment.job_id, ScheduleAssignment.so_line_id, ScheduleAssignment.color_pass)
+    )
+    if exclude_assignment_id is not None:
+        q = q.where(ScheduleAssignment.id != exclude_assignment_id)
+    passes: dict[tuple, dict[int, Decimal]] = {}
+    for jid, line, pass_no, qty in (await session.execute(q)).all():
+        passes.setdefault((jid, line), {})[int(pass_no or 1)] = Decimal(qty or 0)
+    mine = passes.pop((job.id, so_line_id), {})
+    others = sum((max(v.values()) for v in passes.values()), Decimal(0))
+    mine[int(color_pass)] = mine.get(int(color_pass), Decimal(0)) + add_qty
+    total = others + max(mine.values())
+    day_cap = Decimal(machine.capacity_per_shift) * int(machine.shifts_per_day or 1)
+    if total > day_cap:
+        raise HTTPException(
+            409,
+            f"Kapasitas mesin {machine.name} terlampaui pada {work_date} ({total} > {day_cap})",
+        )
+
+
+REQUIRE_SYNCED_LINE_QTY = True
+
+_UNCLASSIFIED_PACKING = (
+    "Proses produksi line belum resmi (unknown). Packing ditolak sampai "
+    "klasifikasi print atau non-print tersedia."
+)
+_UNCLASSIFIED_LOADING = (
+    "Proses produksi line belum resmi (unknown). Loading ditolak sampai "
+    "klasifikasi print atau non-print tersedia."
+)
+_MISSING_LINE_LOADING = (
+    "Line SO belum memiliki JobLineQty. Loading ditolak sampai identitas line resmi tersedia."
+)
+_NON_PRINT_NOT_PRINT_CHAIN = (
+    "Line non-print tidak masuk alur cetak. Packing langsung setelah payment dan bukti fisik."
+)
+
+
+def _classification_enforced() -> bool:
+    """Production defaults reject unclassified physical moves. Legacy fixtures opt out."""
+    return bool(REQUIRE_SYNCED_LINE_QTY or ENFORCE_LOADING_PACKING_CAP)
+
+
+async def _require_payment_released(session: AsyncSession, job: ProductionJob) -> None:
+    from app.services.production.payment_gate import effective_status
+
+    if await effective_status(session, job.id) not in {"approved", "bypassed"}:
+        raise HTTPException(409, "Payment belum disetujui/bypass")
+
+
+async def _line_production_process(
+    session: AsyncSession, job_id: int, so_line_id: str | None
+) -> str | None:
+    if not (so_line_id or "").strip():
+        return None
+    from app.models.production.prep import JobLineQty
+
+    line = await session.scalar(
+        select(JobLineQty).where(
+            JobLineQty.job_id == job_id, JobLineQty.so_line_id == so_line_id
+        )
+    )
+    if line is None:
+        return None
+    return (line.production_process or "").strip() or "unknown"
+
+
+async def _reject_non_print_print_chain(
+    session: AsyncSession, job_id: int, so_line_id: str | None
+) -> None:
+    if await _line_production_process(session, job_id, so_line_id) == "non_print":
+        raise HTTPException(409, _NON_PRINT_NOT_PRINT_CHAIN)
+
+
+async def _assert_schedule_cap(
+    session: AsyncSession,
+    job: ProductionJob,
+    *,
+    so_line_id: str,
+    color_pass: int,
+    add_qty: Decimal,
+) -> None:
+    """Per-line, per-pass planned qty may never exceed PO qty (caller holds job lock).
+
+    Passes describe print layers over the same physical cups, so each pass is
+    capped independently at the PO line qty; passes are never summed together.
+    """
+    from app.models.production.prep import JobLineQty
+
+    line = await session.scalar(
+        select(JobLineQty).where(
+            JobLineQty.job_id == job.id, JobLineQty.so_line_id == so_line_id
+        )
+    )
+    if line is None:
+        if not REQUIRE_SYNCED_LINE_QTY:
+            return
+        raise HTTPException(409, "Qty PO untuk line ini belum tersinkron; jadwal ditolak")
+    planned = await session.scalar(
+        select(
+            func.coalesce(
+                func.sum(
+                    ScheduleAssignment.qty_planned
+                    - ScheduleAssignment.qty_cancelled_remaining
+                ),
+                0,
+            )
+        ).where(
+            ScheduleAssignment.job_id == job.id,
+            ScheduleAssignment.so_line_id == so_line_id,
+            func.coalesce(ScheduleAssignment.color_pass, 1) == int(color_pass),
+        )
+    )
+    planned = Decimal(planned or 0)
+    cap = Decimal(line.po_qty or 0)
+    if planned + add_qty > cap:
+        raise HTTPException(
+            409,
+            f"Qty jadwal melebihi qty PO line ({planned + add_qty} > {cap}); sisa {max(cap - planned, Decimal(0))}",
+        )
+
+
 async def create_assignment(
     session: AsyncSession,
     user: User,
@@ -783,13 +980,27 @@ async def create_assignment(
     qty_planned: Decimal,
     location_provenance: str | None = None,
     note: str | None = None,
+    operator_user_id: int | None = None,
 ) -> ScheduleAssignment:
     _require(user, P.SCHEDULE_MANAGE)
     job = await _lock_payment_job(session, user, job)
     await _refresh_payment_gate(session, job)
+    await _reject_non_print_print_chain(session, job.id, so_line_id)
     await gates_open_for_schedule(job, session)
     if qty_planned <= 0:
         raise HTTPException(422, "Qty rencana harus > 0")
+    if int(color_pass) < 1:
+        raise HTTPException(422, "color_pass tidak valid")
+    await _assert_schedule_cap(
+        session, job, so_line_id=so_line_id, color_pass=color_pass, add_qty=qty_planned
+    )
+    operator = await _resolve_operator(session, job, operator_user_id)
+    if operator is not None:
+        operator_name = operator.display_name
+    await _assert_machine_capacity(
+        session, job, machine_name=machine_name, work_date=work_date,
+        add_qty=qty_planned, so_line_id=so_line_id, color_pass=color_pass,
+    )
     seq = await session.scalar(
         select(func.coalesce(func.max(ScheduleAssignment.sequence_no), 0)).where(
             ScheduleAssignment.job_id == job.id,
@@ -803,6 +1014,7 @@ async def create_assignment(
         product_id=product_id,
         color_pass=color_pass,
         operator_name=operator_name,
+        operator_user_id=operator.id if operator is not None else None,
         machine_name=machine_name,
         work_date=work_date,
         branch_id=job.branch_id,
@@ -827,7 +1039,12 @@ async def cancel_remaining(
     reason: str,
 ) -> ScheduleAssignment:
     _require(user, P.SCHEDULE_MANAGE)
-    row = await session.get(ScheduleAssignment, assignment_id)
+    row = await session.scalar(
+        select(ScheduleAssignment)
+        .where(ScheduleAssignment.id == assignment_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if row is None:
         raise HTTPException(404, "Assignment tidak ditemukan")
     job = await get_job(session, row.job_id)
@@ -853,16 +1070,34 @@ async def transfer_remaining(
     machine_name: str,
     work_date,
     reason: str,
+    operator_user_id: int | None = None,
 ) -> ScheduleAssignment:
     _require(user, P.SCHEDULE_MANAGE)
-    src = await session.get(ScheduleAssignment, assignment_id)
+    src = await session.scalar(
+        select(ScheduleAssignment)
+        .where(ScheduleAssignment.id == assignment_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
     if src is None:
         raise HTTPException(404, "Assignment tidak ditemukan")
     job = await get_job(session, src.job_id)
-    _branch(user, job.branch_id)
+    job = await _lock_payment_job(session, user, job)
+    src = await session.scalar(
+        select(ScheduleAssignment)
+        .where(ScheduleAssignment.id == assignment_id)
+        .execution_options(populate_existing=True)
+    )
     remaining = src.qty_planned - src.qty_confirmed - src.qty_cancelled_remaining
     if remaining <= 0:
         raise HTTPException(409, "Tidak ada sisa untuk dipindahkan")
+    operator = await _resolve_operator(session, job, operator_user_id)
+    if operator is not None:
+        operator_name = operator.display_name
+    await _assert_machine_capacity(
+        session, job, machine_name=machine_name, work_date=work_date,
+        add_qty=remaining, so_line_id=src.so_line_id, color_pass=src.color_pass,
+    )
     src.qty_cancelled_remaining = src.qty_cancelled_remaining + remaining
     src.status = "transferred"
     new_row = ScheduleAssignment(
@@ -871,6 +1106,7 @@ async def transfer_remaining(
         product_id=src.product_id,
         color_pass=src.color_pass,
         operator_name=operator_name,
+        operator_user_id=operator.id if operator is not None else None,
         machine_name=machine_name,
         work_date=work_date,
         branch_id=job.branch_id,
@@ -902,6 +1138,20 @@ async def upload_sample(
 ) -> SampleVersion:
     _require(user, P.SAMPLE_UPLOAD)
     _branch(user, job.branch_id)
+    if assignment_id is not None:
+        sample_asg = await session.get(ScheduleAssignment, assignment_id)
+        if sample_asg is not None and sample_asg.job_id == job.id:
+            await _reject_non_print_print_chain(session, job.id, sample_asg.so_line_id)
+    else:
+        from app.models.production.prep import JobLineQty
+
+        sample_lines = (
+            await session.scalars(select(JobLineQty).where(JobLineQty.job_id == job.id))
+        ).all()
+        if sample_lines and all(
+            (ln.production_process or "").strip() == "non_print" for ln in sample_lines
+        ):
+            raise HTTPException(409, _NON_PRINT_NOT_PRINT_CHAIN)
     max_v = await session.scalar(
         select(func.coalesce(func.max(SampleVersion.version_no), 0)).where(
             SampleVersion.job_id == job.id
@@ -985,6 +1235,7 @@ async def confirm_output(
     assignment = await session.get(ScheduleAssignment, assignment_id)
     if assignment is None or assignment.job_id != job.id:
         raise HTTPException(404, "Assignment tidak valid")
+    await _reject_non_print_print_chain(session, job.id, assignment.so_line_id)
     if assignment.status not in {"active", "completed"}:
         raise HTTPException(409, "Assignment tidak aktif")
     # Block print confirmation until required sample approved.
@@ -1259,6 +1510,7 @@ async def record_helper_output_verification(
     src = await session.get(ProductionEvent, source_output_event_id)
     if src is None or src.job_id != job.id or src.event_type != "output_confirmed":
         raise HTTPException(404, "Output operator sumber tidak ditemukan")
+    await _reject_non_print_print_chain(session, job.id, src.so_line_id)
     # Operator net for this source = confirmed + corrections tied to it.
     corrections = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
@@ -1462,6 +1714,71 @@ async def record_packing(
     _branch(user, job.branch_id)
     if qty_physical <= 0:
         raise HTTPException(422, "Qty packing harus > 0")
+    from app.models.production.prep import JobLineQty
+
+    locked = await session.scalar(
+        select(ProductionJob).where(ProductionJob.id == job.id).with_for_update()
+    )
+    if locked is None:
+        raise HTTPException(404, "Production job tidak ditemukan")
+    line_row = await session.scalar(
+        select(JobLineQty).where(
+            JobLineQty.job_id == job.id, JobLineQty.so_line_id == so_line_id
+        )
+    )
+    process = ((line_row.production_process or "") if line_row is not None else "").strip()
+    if process not in {"print", "non_print"}:
+        if _classification_enforced():
+            raise HTTPException(409, _UNCLASSIFIED_PACKING)
+        process = "print"
+    if process == "non_print":
+        await _require_payment_released(session, job)
+        if line_row is None or line_row.po_qty is None:
+            raise HTTPException(422, "Line non-print belum tersinkron")
+        if not (evidence_ref and evidence_ref.strip()):
+            raise HTTPException(422, "Bukti konfirmasi gudang wajib")
+        packed = Decimal(
+            await session.scalar(
+                select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+                    ProductionEvent.job_id == job.id,
+                    ProductionEvent.event_type.in_(list(PACKING_EVENT_TYPES)),
+                    ProductionEvent.so_line_id == so_line_id,
+                )
+            )
+            or 0
+        )
+        if packed + qty_physical > Decimal(line_row.po_qty):
+            raise HTTPException(
+                409,
+                f"Konfirmasi gudang melebihi sisa PO (po={line_row.po_qty}, sudah={packed})",
+            )
+        event = ProductionEvent(
+            job_id=job.id,
+            event_type=CANONICAL_PACKING_EVENT,
+            so_line_id=so_line_id,
+            lot_code=lot_code,
+            qty_physical=qty_physical,
+            idempotency_key=idempotency_key,
+            actor_user_id=user.id,
+            evidence_ref=evidence_ref.strip(),
+            payload_json=json.dumps(
+                {
+                    "authority": "warehouse_confirmation",
+                    "so_line_id": so_line_id,
+                    "evidence_ref": evidence_ref.strip(),
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        )
+        session.add(event)
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise HTTPException(409, "Idempotency key duplikat") from exc
+        await session.refresh(event)
+        return event
     # Required passes from schedule for this SO line (default pass 1 if none).
     asg_rows = (
         await session.scalars(
@@ -1474,7 +1791,7 @@ async def record_packing(
     required = required_color_passes_from_assignments(asg_rows, so_line_id=so_line_id)
     # Packing authority = helper-verified pool (min across required passes).
     # Operator output alone is never packable stock. Never sum multi-color passes.
-    # Loading remains independent (SJ-line PCS) — packing is monitoring only for Loading.
+    # Owner decision: Loading is capped by this packing-verified quantity per SO line.
     pass_nets: list[Decimal] = []
     for pass_no in sorted(required):
         verified = await session.scalar(
@@ -1809,6 +2126,70 @@ def _loading_cancel_identity_matches(
     return True
 
 
+ENFORCE_LOADING_PACKING_CAP = True
+
+
+async def _confirmed_packing_qty(
+    session: AsyncSession, job_id: int, so_line_id: str
+) -> tuple[int, Decimal]:
+    evidence = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(ProductionEvent)
+            .where(
+                ProductionEvent.job_id == job_id,
+                ProductionEvent.event_type.in_(list(PACKING_EVENT_TYPES)),
+                ProductionEvent.so_line_id == so_line_id,
+            )
+        )
+        or 0
+    )
+    packed = Decimal(
+        await session.scalar(
+            select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
+                ProductionEvent.job_id == job_id,
+                ProductionEvent.event_type.in_(list(PACKING_EVENT_TYPES)),
+                ProductionEvent.so_line_id == so_line_id,
+            )
+        )
+        or 0
+    )
+    return evidence, packed
+
+
+async def _physical_readiness_qty(
+    session: AsyncSession, job_id: int, so_line_id: str
+) -> tuple[Decimal | None, Decimal | None, str]:
+    """Qty that may be loaded, the PO line qty, and a gap code.
+
+    Print and non-print share one physical authority: confirmed packing.
+    Confirmed print output is gesut progress and does not make goods READY.
+    Unknown process and a missing JobLineQty fail closed when classification
+    is enforced. None is missing evidence, never a verified zero.
+    """
+    from app.models.production.prep import JobLineQty
+
+    line = await session.scalar(
+        select(JobLineQty).where(
+            JobLineQty.job_id == job_id, JobLineQty.so_line_id == so_line_id
+        )
+    )
+    if line is None:
+        if _classification_enforced():
+            return None, None, "missing_line"
+        _count, packed = await _confirmed_packing_qty(session, job_id, so_line_id)
+        return packed, None, ""
+    po_qty = Decimal(line.po_qty) if line.po_qty is not None else None
+    process = (line.production_process or "").strip()
+    if process not in {"print", "non_print"}:
+        if _classification_enforced():
+            return None, po_qty, "unknown_process"
+    evidence, packed = await _confirmed_packing_qty(session, job_id, so_line_id)
+    if evidence <= 0:
+        return None, po_qty, "no_evidence"
+    return packed, po_qty, ""
+
+
 async def record_loading(
     session: AsyncSession,
     user: User,
@@ -1822,7 +2203,7 @@ async def record_loading(
     idempotency_key: str,
     evidence_ref: str | None = None,
 ) -> ProductionEvent:
-    """Confirm Loading against Accurate SJ line capacity only (not Packing)."""
+    """Confirm Loading within SJ line capacity and valid packed qty."""
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
     sj_id = (accurate_sj_id or "").strip()
@@ -1903,7 +2284,7 @@ async def record_loading(
         )
 
     # Owner authority: SJ line verified PCS − net confirmed Loading for that line.
-    # Packing is monitoring-only — never a hard Loading cap.
+    # Owner decision: Loading <= SJ-line remaining and <= packing-verified qty minus prior Loading.
     net_loaded = await _net_confirmed_loading_sum(
         session,
         job.id,
@@ -1917,6 +2298,30 @@ async def record_loading(
             409,
             f"Loading melebihi sisa otorisasi baris SJ (sisa={remaining_sj})",
         )
+
+    readiness, po_qty, readiness_gap = await _physical_readiness_qty(session, job.id, so_line)
+    if readiness_gap == "unknown_process":
+        raise HTTPException(409, _UNCLASSIFIED_LOADING)
+    if readiness_gap == "missing_line":
+        raise HTTPException(409, _MISSING_LINE_LOADING)
+    if await _line_production_process(session, job.id, so_line) == "non_print":
+        await _require_payment_released(session, job)
+    if ENFORCE_LOADING_PACKING_CAP:
+        loaded_line = await _net_confirmed_loading_sum(
+            session, job.id, so_line_id=so_line
+        )
+        if readiness is None or loaded_line + qty_physical > readiness:
+            raise HTTPException(
+                409,
+                "Loading melebihi qty packing sah "
+                f"(kesiapan={readiness if readiness is not None else 'UNVERIFIED'}, "
+                f"sudah loading={loaded_line})",
+            )
+        if po_qty is not None and loaded_line + qty_physical > po_qty:
+            raise HTTPException(
+                409,
+                f"Loading melebihi sisa pemenuhan PO (po={po_qty}, sudah loading={loaded_line})",
+            )
 
     payload = {
         "event_type": LOADING_EVENT,
@@ -2619,6 +3024,72 @@ async def reject_loading_return(
     return event
 
 
+def _pod_line_rows(lines: list[dict] | None) -> list[dict] | None:
+    """Normalize an actual per-line receipt. None means the POD has no line proof."""
+    if not lines:
+        return None
+    rows = []
+    seen: set[tuple[str, str]] = set()
+    for raw in lines:
+        sj_line = str(raw.get("accurate_sj_line_id") or "").strip()
+        so_line = str(raw.get("so_line_id") or "").strip()
+        if not sj_line or not so_line:
+            raise HTTPException(422, "Penerimaan per item wajib menyebut line SJ dan line SO")
+        key = (sj_line, so_line)
+        if key in seen:
+            raise HTTPException(422, "Line SJ disebut dua kali pada POD yang sama")
+        seen.add(key)
+        raw_qty = raw.get("qty_physical")
+        if raw_qty is None or (isinstance(raw_qty, str) and not raw_qty.strip()):
+            raise HTTPException(422, "Qty penerimaan per item wajib diisi; kosong bukan nol")
+        try:
+            qty = Decimal(str(raw_qty))
+        except Exception as exc:
+            raise HTTPException(422, "Qty penerimaan per item tidak valid") from exc
+        if not qty.is_finite():
+            raise HTTPException(422, "Qty penerimaan per item tidak valid")
+        if qty < 0:
+            raise HTTPException(422, "Qty penerimaan per item tidak boleh negatif")
+        row = {"accurate_sj_line_id": sj_line, "so_line_id": so_line, "qty_physical": format(qty, "f")}
+        if qty == 0:
+            row["explicit_zero"] = True
+        rows.append(row)
+    return rows
+
+
+async def _loaded_sj_lines(session: AsyncSession, job_id: int, sj_id: str) -> dict[tuple[str, str], dict]:
+    """Net loaded qty and official document qty per SJ line, from Loading events only."""
+    rows = (
+        await session.scalars(
+            select(ProductionEvent).where(
+                ProductionEvent.job_id == job_id,
+                ProductionEvent.accurate_sj_id == sj_id,
+                ProductionEvent.event_type.in_([LOADING_EVENT, LOADING_CANCEL_EVENT]),
+            )
+        )
+    ).all()
+    out: dict[tuple[str, str], dict] = {}
+    for ev in rows:
+        sj_line = (ev.accurate_sj_line_id or "").strip()
+        so_line = (ev.so_line_id or "").strip()
+        if not sj_line or not so_line:
+            continue
+        slot = out.setdefault((sj_line, so_line), {"loaded": Decimal(0), "document_qty": None})
+        qty = Decimal(ev.qty_physical or 0)
+        if ev.event_type == LOADING_EVENT:
+            slot["loaded"] += qty
+            raw = None
+            try:
+                raw = json.loads(ev.payload_json or "{}").get("authorized_base")
+            except ValueError:
+                raw = None
+            if raw is not None:
+                slot["document_qty"] = Decimal(str(raw))
+        else:
+            slot["loaded"] -= qty
+    return out
+
+
 async def record_pod(
     session: AsyncSession,
     user: User,
@@ -2630,6 +3101,7 @@ async def record_pod(
     receiver_name: str,
     attachment_ids: dict[str, int],
     evidence_ref: str | None = None,
+    lines: list[dict] | None = None,
 ) -> ProductionEvent:
     """Confirm POD with four verified private attachments (photos + signatures).
 
@@ -2639,13 +3111,17 @@ async def record_pod(
     """
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
-    if not (receiver_name or "").strip():
-        raise HTTPException(422, "POD memerlukan nama penerima")
+    receiver_name = (receiver_name or "").strip()
+    if len(receiver_name) < 2:
+        raise HTTPException(422, "Nama penerima minimal 2 karakter")
     sj = (accurate_sj_id or "").strip()
     if not sj:
         raise HTTPException(422, "Identitas SJ Accurate wajib")
 
-    # Idempotent replay — do not rebind attachments or invent a second POD.
+    # Idempotent replay — do not rebind attachments, invent a second POD, or rewrite a stored receipt.
+    line_rows = _pod_line_rows(lines)
+    if line_rows is not None and sum(Decimal(row["qty_physical"]) for row in line_rows) != qty_physical:
+        raise HTTPException(422, "Jumlah qty per item harus sama dengan qty POD")
     existing = await session.scalar(
         select(ProductionEvent).where(
             ProductionEvent.job_id == job.id,
@@ -2653,8 +3129,14 @@ async def record_pod(
         )
     )
     if existing is not None:
-        if existing.event_type != "pod":
+        if existing.event_type != "pod" or (existing.accurate_sj_id or "") != sj or Decimal(existing.qty_physical or 0) != qty_physical:
             raise HTTPException(409, "Idempotency key duplikat")
+        try:
+            stored_lines = json.loads(existing.payload_json or "{}").get("lines")
+        except ValueError:
+            stored_lines = None
+        if (stored_lines or None) != (line_rows or None):
+            raise HTTPException(409, "Idempotency key dipakai untuk penerimaan lain")
         return existing
 
     cancelled = await session.scalar(
@@ -2699,6 +3181,14 @@ async def record_pod(
             expected_so_number=job.accurate_so_number,
             expected_branch_id=job.branch_id,
         )
+    loaded_lines = await _loaded_sj_lines(session, job.id, sj)
+    active = {key: slot for key, slot in loaded_lines.items() if slot["loaded"] > 0}
+    if len(active) > 1 and line_rows is None:
+        raise HTTPException(422, "POD multi-item wajib qty aktual setiap item SJ")
+    if len(active) > 1 and line_rows is not None:
+        got = {(row["accurate_sj_line_id"], row["so_line_id"]) for row in line_rows}
+        if got != set(active):
+            raise HTTPException(422, "Setiap item SJ yang sudah di-loading wajib punya qty penerimaan")
     loaded = await _net_confirmed_loading_sum(
         session, job.id, accurate_sj_id=sj
     )
@@ -2714,6 +3204,16 @@ async def record_pod(
         raise HTTPException(409, "POD tidak boleh bypass Loading")
     if qty_physical <= 0 or qty_physical > remaining:
         raise HTTPException(409, "Qty POD tidak valid terhadap sisa Loading SJ")
+    if line_rows is not None:
+        for row in line_rows:
+            slot = loaded_lines.get((row["accurate_sj_line_id"], row["so_line_id"]))
+            qty = Decimal(row["qty_physical"])
+            if slot is None or slot["loaded"] <= 0:
+                raise HTTPException(409, "Line penerimaan tidak ada pada Loading SJ ini")
+            if qty > slot["loaded"]:
+                raise HTTPException(409, "Qty penerimaan item melebihi loading line")
+            if slot["document_qty"] is not None and qty > slot["document_qty"]:
+                raise HTTPException(409, "Qty penerimaan item melebihi qty dokumen SJ")
 
     from app.services.production import attachments as attach_svc
 
@@ -2736,7 +3236,10 @@ async def record_pod(
         evidence_ref=note
         or ("pod_attachments:" + ",".join(f"{k}:{v}" for k, v in attach_map.items())),
         reason=f"receiver:{receiver_name.strip()}",
-        payload_json=json.dumps({"attachments": attach_map}, separators=(",", ":")),
+        payload_json=json.dumps(
+            {"attachments": attach_map, **({"lines": line_rows} if line_rows else {})},
+            separators=(",", ":"),
+        ),
     )
     session.add(event)
     try:
@@ -2859,6 +3362,16 @@ async def resolve_loading_line_authority(
         note = str(exc.detail)
 
     remaining = None if qty_sj is None else max(Decimal("0"), qty_sj - net)
+    readiness, po_qty, _gap = await _physical_readiness_qty(session, job.id, so_line)
+    loaded_line = await _net_confirmed_loading_sum(session, job.id, so_line_id=so_line)
+    pack_left = None if readiness is None else max(Decimal("0"), readiness - loaded_line)
+    if po_qty is not None and pack_left is not None:
+        pack_left = min(pack_left, max(Decimal("0"), po_qty - loaded_line))
+    available = None
+    if remaining is not None and pack_left is not None:
+        available = min(remaining, pack_left) if ENFORCE_LOADING_PACKING_CAP else remaining
+    elif remaining is not None and not ENFORCE_LOADING_PACKING_CAP:
+        available = remaining
 
     def _pcs_str(value: Decimal) -> str:
         integral = value.to_integral_value()
@@ -2877,7 +3390,10 @@ async def resolve_loading_line_authority(
         "loading_cancelled": _pcs_str(cancelled),
         "loading_net": _pcs_str(net),
         "remaining_loading": _pcs_str(remaining) if remaining is not None else None,
-        "packing_monitoring_only": True,
+        "packing_cap_enforced": ENFORCE_LOADING_PACKING_CAP,
+        "packed_qty": _pcs_str(readiness) if readiness is not None else None,
+        "loaded_qty_line": _pcs_str(loaded_line),
+        "loading_available": _pcs_str(available) if available is not None else None,
         "actions_enabled": verification == "VERIFIED",
         "note": note,
     }
@@ -3039,6 +3555,7 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                 "so_line_id": a.so_line_id,
                 "color_pass": a.color_pass,
                 "operator_name": a.operator_name,
+                "operator_user_id": a.operator_user_id,
                 "machine_name": a.machine_name,
                 "work_date": str(a.work_date),
                 "qty_planned": str(a.qty_planned),
@@ -3090,6 +3607,15 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                 "accurate_item_id": ln.accurate_item_id,
                 "po_qty": str(ln.po_qty),
                 "production_process": ln.production_process or "unknown",
+                "accurate_qty": str(ln.source_qty) if ln.source_qty is not None else None,
+                "drift_detected_at": ln.drift_detected_at.isoformat() if ln.drift_detected_at else None,
+                "drift_acknowledged": ln.source_qty is not None
+                and any(
+                    e.event_type == "qty_drift_ack"
+                    and e.so_line_id == ln.so_line_id
+                    and str(ln.source_qty) in (e.payload_json or "")
+                    for e in events
+                ),
             }
             for ln in lines
         ],
@@ -3211,6 +3737,152 @@ _TASK_META = {
 }
 
 
+def _task_qty_text(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    return format(value.normalize(), "f") if value != value.to_integral_value() else str(int(value))
+
+
+def _loading_readiness_rows(lines: list, events: list) -> list[dict]:
+    """One loading status per SO line. Packing is the ready quantity. Missing SJ stays null."""
+    rows: list[dict] = []
+    for ln in lines:
+        process = (getattr(ln, "production_process", None) or "").strip()
+        lid = str(getattr(ln, "so_line_id", "") or "").strip()
+        po = getattr(ln, "po_qty", None)
+        packed_events = [
+            e
+            for e in events
+            if lid
+            and getattr(e, "so_line_id", None) == lid
+            and getattr(e, "event_type", None) in PACKING_EVENT_TYPES
+        ]
+        packed = sum(
+            (Decimal(getattr(e, "qty_physical", 0) or 0) for e in packed_events),
+            Decimal("0"),
+        )
+        gross = sum(
+            (
+                Decimal(getattr(e, "qty_physical", 0) or 0)
+                for e in events
+                if lid
+                and getattr(e, "so_line_id", None) == lid
+                and getattr(e, "event_type", None) == LOADING_EVENT
+            ),
+            Decimal("0"),
+        )
+        cancelled = sum(
+            (
+                Decimal(getattr(e, "qty_physical", 0) or 0)
+                for e in events
+                if lid
+                and getattr(e, "so_line_id", None) == lid
+                and getattr(e, "event_type", None) == LOADING_CANCEL_EVENT
+            ),
+            Decimal("0"),
+        )
+        loaded: Decimal | None
+        if cancelled > gross:
+            loaded = None
+        else:
+            loaded = gross - cancelled
+        sj_remaining = _sj_remaining_for_line(events, lid) if lid else None
+        status = "Belum terverifikasi"
+        ready: Decimal | None = None
+        if process in {"print", "non_print"} and lid and loaded is not None:
+            if not packed_events:
+                status = "Menunggu Packing"
+            elif loaded > packed:
+                status = "Belum terverifikasi"
+            elif loaded == 0 and packed > 0:
+                status = "Siap Loading"
+                ready = packed
+            elif 0 < loaded < packed:
+                status = "Loading Parsial"
+                ready = packed - loaded
+            elif packed > 0 and loaded == packed:
+                status = "Sudah Loading"
+                ready = Decimal("0")
+        rows.append(
+            {
+                "so_line_id": lid or None,
+                "production_process": process or None,
+                "status": status,
+                "po_qty": _task_qty_text(Decimal(po)) if po is not None else None,
+                "packed_qty": _task_qty_text(packed) if packed_events else None,
+                "loaded_qty": _task_qty_text(loaded) if loaded is not None and lid else None,
+                "ready_qty": _task_qty_text(ready),
+                "sj_remaining_qty": _task_qty_text(sj_remaining),
+            }
+        )
+    return rows
+
+
+def _sj_remaining_for_line(events: list, so_line_id: str) -> Decimal | None:
+    """Remaining authorized SJ qty already tied to this SO line. No SJ evidence stays unknown."""
+    buckets: dict[tuple[str, str], dict] = {}
+    for ev in events:
+        if getattr(ev, "so_line_id", None) != so_line_id:
+            continue
+        kind = getattr(ev, "event_type", None)
+        if kind not in {LOADING_EVENT, LOADING_CANCEL_EVENT}:
+            continue
+        sj = str(getattr(ev, "accurate_sj_id", "") or "").strip()
+        sj_line = str(getattr(ev, "accurate_sj_line_id", "") or "").strip()
+        if not sj or not sj_line:
+            return None
+        slot = buckets.setdefault(sj, {}).setdefault(
+            sj_line, {"auth": None, "net": Decimal("0")}
+        )
+        qty = Decimal(getattr(ev, "qty_physical", 0) or 0)
+        if kind == LOADING_EVENT:
+            raw = getattr(ev, "payload_json", None) or ""
+            try:
+                payload = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                return None
+            if not isinstance(payload, dict) or payload.get("authorized_base") in (None, ""):
+                return None
+            try:
+                auth = Decimal(str(payload["authorized_base"]))
+            except Exception:
+                return None
+            if slot["auth"] is not None and slot["auth"] != auth:
+                return None
+            slot["auth"] = auth
+            slot["net"] += qty
+        else:
+            slot["net"] -= qty
+    if not buckets:
+        return None
+    total = Decimal("0")
+    for lines in buckets.values():
+        for slot in lines.values():
+            if slot["auth"] is None or slot["net"] < 0 or slot["net"] > slot["auth"]:
+                return None
+            total += slot["auth"] - slot["net"]
+    return total
+
+
+def _loading_card_state(rows: list[dict]) -> tuple[str, str | None]:
+    if not rows:
+        return "blocked", "Belum terverifikasi"
+    statuses = [row["status"] for row in rows]
+    if all(status == "Sudah Loading" for status in statuses):
+        return "done", None
+    if all(status == "Siap Loading" for status in statuses):
+        return "actionable", None
+    if all(status == "Menunggu Packing" for status in statuses):
+        return "blocked", "Menunggu packing sah"
+    if all(status == "Belum terverifikasi" for status in statuses):
+        return "blocked", "Belum terverifikasi"
+    if any(status in {"Siap Loading", "Loading Parsial", "Sudah Loading"} for status in statuses):
+        return "partial", "Belum semua line siap loading"
+    if any(status == "Belum terverifikasi" for status in statuses):
+        return "blocked", "Belum terverifikasi"
+    return "blocked", "Menunggu packing sah"
+
+
 def _task_row(
     job: ProductionJob,
     kind: str,
@@ -3218,19 +3890,20 @@ def _task_row(
     *,
     reason: str | None = None,
     so_line_id: str | None = None,
+    lines: list | None = None,
 ) -> dict:
     meta = _TASK_META[kind]
     business_id = f"{job.accurate_so_number}::{kind}"
     if so_line_id:
         business_id = f"{business_id}::{so_line_id}"
-    return {
+    row = {
         "id": business_id,
         "kind": kind,
         "group": meta["group"],
         "role": meta["role"],
         "label": meta["label"],
         "verb": meta["verb"],
-        "state": state,  # pending | blocked | actionable | done
+        "state": state,  # pending | blocked | actionable | done | partial
         "visible": True,
         "reason": reason,
         "job_id": job.id,
@@ -3242,6 +3915,9 @@ def _task_row(
         "payment_status": job.payment_status,
         "processing_status": job.processing_status,
     }
+    if lines is not None:
+        row["lines"] = lines
+    return row
 
 
 def derive_team_tasks_for_job(
@@ -3298,10 +3974,39 @@ def derive_team_tasks_for_job(
     sample_uploaded = bool(samples)
     # Cups that entered print (pass 1 ledger) — progress signal, not pack eligibility.
     print_qty = physical_cup_qty_from_events(events)
-    # Packable = helper-verified min across required scheduled color passes.
+    # Print packing becomes available after helper-verified output. It is not READY.
     required_passes = required_color_passes_from_assignments(active_assignments)
     finished_qty = eligible_verified_qty_from_events(events, required_passes)
     pack_qty = packing_qty_from_events(events)
+    print_lines = [
+        ln
+        for ln in lines
+        if (getattr(ln, "production_process", None) or "") == "print"
+        and getattr(ln, "so_line_id", None)
+    ]
+    if print_lines:
+        finished_qty = sum(
+            (
+                eligible_verified_qty_from_events(
+                    events,
+                    required_color_passes_from_assignments(
+                        active_assignments, so_line_id=str(ln.so_line_id)
+                    ),
+                    so_line_id=str(ln.so_line_id),
+                )
+                for ln in print_lines
+            ),
+            Decimal("0"),
+        )
+        print_pack = sum(
+            (
+                packing_qty_from_events(events, so_line_id=str(ln.so_line_id))
+                for ln in print_lines
+            ),
+            Decimal("0"),
+        )
+    else:
+        print_pack = pack_qty
 
     tasks: list[dict] = []
 
@@ -3380,7 +4085,7 @@ def derive_team_tasks_for_job(
                     tasks.append(_task_row(job, "print", "actionable"))
                 # Packing only when cups completed ALL required color passes.
                 if finished_qty > 0:
-                    if pack_qty > 0:
+                    if print_pack > 0:
                         tasks.append(_task_row(job, "packing", "done"))
                     else:
                         tasks.append(_task_row(job, "packing", "actionable"))
@@ -3394,7 +4099,38 @@ def derive_team_tasks_for_job(
                         )
                     )
 
-        # Loading → Pengiriman (POD) — SJ-line authority; Packing is monitoring only.
+    if has_non_print:
+        # Non-print skips design, schedule, screen, sample, and print. Payment still binds.
+        np_lines = [
+            ln
+            for ln in lines
+            if (getattr(ln, "production_process", None) or "") == "non_print"
+        ]
+        if payment_ok:
+            identified = [ln for ln in np_lines if getattr(ln, "so_line_id", None)]
+            if identified:
+                packed_enough = all(
+                    packing_qty_from_events(events, so_line_id=str(ln.so_line_id))
+                    >= Decimal(getattr(ln, "po_qty", 0) or 0)
+                    for ln in identified
+                )
+            else:
+                packed_enough = pack_qty > 0
+            tasks.append(
+                _task_row(job, "stockpack", "done" if packed_enough else "actionable")
+            )
+        else:
+            tasks.append(
+                _task_row(
+                    job,
+                    "stockpack",
+                    "pending",
+                    reason="Menunggu payment approved/bypassed",
+                )
+            )
+
+    if has_print or has_non_print:
+        # Loading follows confirmed packing for every physical line. Print output is not enough.
         load_gross = sum(
             (
                 Decimal(getattr(e, "qty_physical", 0) or 0)
@@ -3422,8 +4158,6 @@ def derive_team_tasks_for_job(
             ),
             Decimal("0"),
         )
-        # Compliant POD = event with payload attachments map (Slice 1K+).
-        # Legacy POD without attachments remains readable but does not mark delivery done.
         compliant_pod = False
         for e in events:
             if getattr(e, "event_type", None) != "pod":
@@ -3432,13 +4166,37 @@ def derive_team_tasks_for_job(
             if '"attachments"' in str(raw) and "pod_photo_1" in str(raw):
                 compliant_pod = True
                 break
-        # Loading is not gated on Packing qty (Owner rule).
+        line_rows = _loading_readiness_rows(lines, events)
+        card_state, card_reason = _loading_card_state(line_rows)
         if payment_ok:
-            if load_qty > 0:
-                tasks.append(_task_row(job, "loading", "done"))
-            else:
-                tasks.append(_task_row(job, "loading", "actionable"))
-            if load_qty > 0:
+            if pack_qty <= 0:
+                tasks.append(
+                    _task_row(
+                        job,
+                        "loading",
+                        card_state,
+                        reason=card_reason,
+                        lines=line_rows,
+                    )
+                )
+                tasks.append(
+                    _task_row(
+                        job,
+                        "delivery",
+                        "blocked",
+                        reason="Menunggu Loading SJ resmi",
+                    )
+                )
+            elif load_qty > 0:
+                tasks.append(
+                    _task_row(
+                        job,
+                        "loading",
+                        card_state,
+                        reason=card_reason,
+                        lines=line_rows,
+                    )
+                )
                 if compliant_pod and pod_qty > 0:
                     if pod_qty >= load_qty:
                         tasks.append(_task_row(job, "delivery", "done"))
@@ -3464,49 +4222,20 @@ def derive_team_tasks_for_job(
                 tasks.append(
                     _task_row(
                         job,
+                        "loading",
+                        card_state,
+                        reason=card_reason,
+                        lines=line_rows,
+                    )
+                )
+                tasks.append(
+                    _task_row(
+                        job,
                         "delivery",
                         "blocked",
                         reason="Menunggu Loading SJ resmi",
                     )
                 )
-
-    if has_non_print:
-        # Non-cetak: no fake screen/sample/print. Payment opens visibility.
-        if payment_ok:
-            # Use prep helper qty as stockprep evidence when non-print lines exist.
-            non_print_prep = any(
-                getattr(p, "role", None) == "helper"
-                and Decimal(getattr(p, "qty", 0) or 0) > 0
-                for p in prep_states
-            )
-            if non_print_prep:
-                tasks.append(_task_row(job, "stockprep", "done"))
-                if pack_qty > 0:
-                    tasks.append(_task_row(job, "stockpack", "done"))
-                else:
-                    tasks.append(_task_row(job, "stockpack", "actionable"))
-            else:
-                # Non-print-only: design not required. Mixed: stockprep after payment.
-                if has_print and not design_ok:
-                    tasks.append(
-                        _task_row(
-                            job,
-                            "stockprep",
-                            "pending",
-                            reason="Print gate design masih terbuka (mixed SO)",
-                        )
-                    )
-                else:
-                    tasks.append(_task_row(job, "stockprep", "actionable"))
-        else:
-            tasks.append(
-                _task_row(
-                    job,
-                    "stockprep",
-                    "pending",
-                    reason="Menunggu payment approved/bypassed",
-                )
-            )
 
     # Unknown-only: no fake print/non-print task chain — classification lives on Jadwal/Inbox.
     # (empty list on purpose)
@@ -3514,6 +4243,152 @@ def derive_team_tasks_for_job(
     for task in tasks:
         task["payment_status"] = payment_status
     return tasks
+
+
+async def list_payment_receipts(
+    session: AsyncSession,
+    user: User,
+    *,
+    q: str | None = None,
+    payment_status: str | None = None,
+    receipt_status: str | None = None,
+    receipts: str | None = None,
+    branch: str | None = None,
+    page: int = 1,
+    page_size: int = 25,
+) -> dict:
+    """Per-PO payment monitor: one row per job (with or without receipts), read-only.
+
+    Derived from PaymentReceiptRef/PaymentBypass through the existing payment gate; no ledger copy.
+    """
+    _require(user, P.JOB_READ)
+    from app.authorization.workflow import branch_allowed
+    from app.services.production.payment_gate import status_expression
+
+    page = max(1, int(page))
+    page_size = min(100, max(1, int(page_size)))
+    # Separate subqueries so EXISTS clauses cannot auto-correlate to the outer tables and a PO
+    # with many receipts stays one row.
+    st = select(ProductionJob.id.label("job_id"), status_expression().label("payment_status")).subquery()
+    agg = (
+        select(
+            PaymentReceiptRef.job_id.label("job_id"),
+            func.count(PaymentReceiptRef.id).label("receipt_count"),
+            func.sum(PaymentReceiptRef.amount).filter(
+                PaymentReceiptRef.status == "valid",
+                PaymentReceiptRef.evidence_verified.is_(True),
+                PaymentReceiptRef.amount > 0,
+            ).label("verified_amount"),
+        )
+        .group_by(PaymentReceiptRef.job_id)
+        .subquery()
+    )
+    count_col = func.coalesce(agg.c.receipt_count, 0)
+    branches = (await session.scalars(select(ProductionJob.branch_id).distinct())).all()
+    allowed = [b for b in branches if branch_allowed(user, b)]
+    if branch:
+        allowed = [b for b in allowed if b == branch]
+    base = (
+        select(ProductionJob, st.c.payment_status, count_col.label("receipt_count"), agg.c.verified_amount)
+        .join(st, st.c.job_id == ProductionJob.id)
+        .outerjoin(agg, agg.c.job_id == ProductionJob.id)
+        .where(ProductionJob.branch_id.in_(allowed or [""]))
+    )
+    if payment_status:
+        base = base.where(st.c.payment_status == payment_status)
+    if receipts == "with":
+        base = base.where(count_col > 0)
+    elif receipts == "without":
+        base = base.where(count_col == 0)
+    if receipt_status:
+        base = base.where(
+            select(PaymentReceiptRef.id)
+            .where(PaymentReceiptRef.job_id == ProductionJob.id, PaymentReceiptRef.status == receipt_status)
+            .exists()
+        )
+    term = (q or "").strip()
+    if term:
+        like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        base = base.where(or_(
+            ProductionJob.accurate_so_number.ilike(like, escape="\\"),
+            ProductionJob.customer_name.ilike(like, escape="\\"),
+            select(PaymentReceiptRef.id).where(
+                PaymentReceiptRef.job_id == ProductionJob.id,
+                or_(
+                    PaymentReceiptRef.accurate_receipt_id.ilike(like, escape="\\"),
+                    PaymentReceiptRef.accurate_receipt_number.ilike(like, escape="\\"),
+                ),
+            ).exists(),
+        ))
+    total = await session.scalar(select(func.count()).select_from(base.order_by(None).subquery())) or 0
+    rows = (await session.execute(
+        base.order_by(ProductionJob.id.desc()).limit(page_size).offset((page - 1) * page_size)
+    )).all()
+    job_ids = [job.id for job, *_ in rows]
+    by_job: dict[int, list] = {}
+    bypassed: set[int] = set()
+    if job_ids:
+        for r in (await session.scalars(
+            select(PaymentReceiptRef).where(PaymentReceiptRef.job_id.in_(job_ids)).order_by(PaymentReceiptRef.id.desc())
+        )).all():
+            by_job.setdefault(r.job_id, []).append(r)
+        bypassed = set((await session.scalars(
+            select(PaymentBypass.job_id).where(PaymentBypass.job_id.in_(job_ids), PaymentBypass.active.is_(True))
+        )).all())
+    items = [
+        {
+            "job_id": job.id,
+            "so_number": job.accurate_so_number,
+            "customer_name": job.customer_name,
+            "branch_id": job.branch_id,
+            "payment_status": status,
+            "bypass_active": job.id in bypassed,
+            "receipt_count": int(count),
+            "verified_amount": str(verified) if verified is not None else None,
+            "receipts": [
+                {
+                    "receipt_id": r.id,
+                    "accurate_receipt_id": r.accurate_receipt_id,
+                    "accurate_receipt_number": r.accurate_receipt_number,
+                    "amount": str(r.amount) if r.amount is not None else None,
+                    "receipt_status": r.status,
+                    "evidence_verified": bool(r.evidence_verified),
+                    "recorded_at": r.created_at.isoformat() if r.created_at else None,
+                }
+                for r in by_job.get(job.id, [])
+            ],
+        }
+        for job, status, count, verified in rows
+    ]
+    return {"items": items, "total": total, "page": page, "page_size": page_size,
+            "has_more": page * page_size < total}
+
+
+def _assignment_is_mine(assignment, user: User) -> bool:
+    """Official id wins; legacy rows without an id match only by exact display name."""
+    if assignment.operator_user_id is not None:
+        return assignment.operator_user_id == user.id
+    return (assignment.operator_name or "").strip().lower() == (user.display_name or "").strip().lower()
+
+
+_TASK_ROLE_PERMISSIONS = {
+    "Designer": (P.DESIGN_UPLOAD, P.DESIGN_APPROVE, P.DESIGN_BYPASS),
+    "Screener": (P.PREP_SCREENER,),
+    "Helper": (P.PREP_HELPER, P.OUTPUT_HELPER_VERIFY),
+    "Operator": (P.OUTPUT_CONFIRM, P.REJECT_RECORD),
+    "Driver": (P.DELIVERY_MANAGE,),
+    "Kepala Produksi": (P.SCHEDULE_MANAGE,),
+}
+
+
+def _role_task_visible(user: User, role: str | None) -> bool:
+    """A non-manager sees only tasks for roles the account is actually permitted to perform."""
+    from app.authorization.workflow import legacy_allowed
+
+    perms = _TASK_ROLE_PERMISSIONS.get(role or "")
+    if perms is None:
+        return True
+    return any(legacy_allowed(user, (perm,)) for perm in perms)
 
 
 async def list_team_tasks(
@@ -3590,6 +4465,9 @@ async def list_team_tasks(
 
     from app.services.production.payment_gate import effective_statuses
     payment_states = await effective_statuses(session, [job.id for job in jobs])
+    from app.authorization.workflow import legacy_allowed
+
+    sees_all = legacy_allowed(user, (P.SCHEDULE_MANAGE,))
     tasks: list[dict] = []
     job_summaries: list[dict] = []
     for job in jobs:
@@ -3635,6 +4513,18 @@ async def list_team_tasks(
             events=list(events),
             payment_status=payment_states[job.id],
         )
+        if not sees_all:
+            derived = [t for t in derived if _role_task_visible(user, t.get("role"))]
+            derived = [
+                t
+                for t in derived
+                if t.get("role") != "Operator"
+                or any(
+                    _assignment_is_mine(a, user)
+                    and (not t.get("so_line_id") or a.so_line_id == t.get("so_line_id"))
+                    for a in assignments
+                )
+            ]
         tasks.extend(derived)
         job_summaries.append(
             {
@@ -3651,6 +4541,15 @@ async def list_team_tasks(
                 "has_non_print": any(
                     (ln.production_process or "") == "non_print" for ln in lines
                 ),
+                "qty_drift": [
+                    {
+                        "so_line_id": ln.so_line_id,
+                        "po_qty": str(ln.po_qty),
+                        "accurate_qty": str(ln.source_qty),
+                    }
+                    for ln in lines
+                    if ln.source_qty is not None
+                ],
             }
         )
 

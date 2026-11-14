@@ -155,6 +155,25 @@ class ReadGateway:
         ).as_http()
 
 
+def _person_name(value) -> str | None:
+    """Official person name only. An id without a name is not a Sales PIC."""
+    if isinstance(value, dict):
+        value = value.get("name")
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _line_text(line: dict, item: dict, *keys: str) -> str | None:
+    for source in (line, item):
+        for key in keys:
+            raw = source.get(key)
+            if raw is not None and str(raw).strip():
+                return str(raw).strip()
+    return None
+
+
 def sanitize_so_number(number: str) -> str:
     number = (number or "").strip()
     if not number or len(number) > 120 or any(ord(c) < 32 for c in number):
@@ -194,9 +213,9 @@ def normalize_summary(row: dict) -> dict:
     urgent_state = row.get("urgent_state")
     if urgent_state is not None:
         urgent_state = str(urgent_state).strip() or None
-    sales = row.get("sales")
-    if sales is not None:
-        sales = str(sales).strip() or None
+    sales = _person_name(row.get("sales"))
+    if sales is None:
+        sales = _person_name(row.get("salesman") if row.get("salesman") is not None else row.get("sales_person"))
     sales_source = row.get("sales_source")
     if sales_source is not None:
         sales_source = str(sales_source).strip() or None
@@ -295,17 +314,18 @@ async def get_sales_order(gateway: ReadGateway, number: str) -> dict:
             all_qty_verified = False
             qty = None
             qty_verified = False
+        item = line.get("item") if isinstance(line.get("item"), dict) else {}
         parsed_lines.append(
             {
-                "accurate_line_id": line.get("accurate_line_id") or line.get("id"),
-                "accurate_item_id": line.get("accurate_item_id")
-                or line.get("item_id"),
-                "item_code": line.get("item_code") or line.get("sku"),
-                "name": line.get("name") or line.get("description"),
+                # Line identity stays the document line id, never the product name.
+                "accurate_line_id": _line_text(line, {}, "accurate_line_id", "id", "detail_id"),
+                "accurate_item_id": _line_text(line, {}, "accurate_item_id", "item_id") or _line_text(item, {}, "id"),
+                "item_code": _line_text(line, {}, "item_code", "sku") or _line_text(item, {}, "no", "code", "item_code"),
+                "name": _line_text(line, {}, "name", "description") or _line_text(item, {}, "name"),
                 "quantity": qty,
                 "qty_verified": qty_verified,
-                "unit": line.get("unit") or line.get("uom"),
-                "color": line.get("color"),
+                "unit": _line_text(line, item, "unit", "uom"),
+                "color": _line_text(line, {}, "color", "variant", "item_variant"),
                 "notes": line.get("notes"),
                 "production_process": process,
             }
@@ -345,7 +365,7 @@ async def get_sales_order(gateway: ReadGateway, number: str) -> dict:
             "branch_name": so.get("branch_name")
             or result.get("branch_name")
             or result.get("outlet"),
-            "sales": so.get("sales") if so.get("sales") is not None else result.get("sales"),
+            "sales": _person_name(so.get("sales")) if so.get("sales") is not None else result.get("sales"),
             "sales_source": so.get("sales_source")
             if so.get("sales_source") is not None
             else result.get("sales_source"),

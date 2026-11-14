@@ -249,13 +249,22 @@ async def _seed_packed(
     *,
     so: str = "SO-MSJ",
     lines: list[tuple[str, str]],
+    synced: bool = False,
 ) -> int:
-    """Create job through design/payment/schedule/sample/output/packing."""
-    job = await client.post(
-        "/api/v1/production/jobs",
-        headers=h,
-        json={"accurate_so_number": so, "branch_id": "branch-a"},
-    )
+    """Create job through design/payment/schedule/sample/output/packing.
+
+    Lines are always classified print so packing and loading have an official identity.
+    """
+    del synced
+    body = {
+        "accurate_so_number": so,
+        "branch_id": "branch-a",
+        "line_items": [
+            {"accurate_line_id": lid, "quantity": qty, "production_process": "print"}
+            for lid, qty in lines
+        ],
+    }
+    job = await client.post("/api/v1/production/jobs", headers=h, json=body)
     assert job.status_code == 200, job.text
     jid = job.json()["id"]
 
@@ -464,26 +473,30 @@ async def test_04_partial_and_05_sj_overload(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_06_packing_not_hard_cap_for_loading(client: AsyncClient):
-    """Owner rule: Packing is monitoring-only — SJ line authorizes Loading."""
+@pytest.mark.strict_loading_cap
+async def test_06_loading_capped_by_packing_even_when_sj_allows_more(client: AsyncClient):
+    """Owner decision: Loading <= packing-verified qty, even if the SJ line allows more."""
     h = await _login(client)
-    # L1 packed 100, L2 packed 500 — Loading 200 on L1 allowed when SJ allows 1000
-    jid = await _seed_packed(client, h, lines=[("L1", "100"), ("L2", "500")])
+    jid = await _seed_packed(client, h, lines=[("L1", "100"), ("L2", "500")], synced=True)
     client._msj["catalog"]["SJ1"] = [  # type: ignore[attr-defined]
         sj_line_item(accurate_sj_line_id="SL1", so_line_id="L1", quantity=1000)
     ]
+    body = dict(accurate_sj_id="SJ1", accurate_sj_line_id="SL1", so_line_id="L1")
+    over = await client.post(
+        f"/api/v1/production/jobs/{jid}/loading", headers=h,
+        json=loading_body(qty_physical="200", idempotency_key="msj-06-over-cap", **body),
+    )
+    assert over.status_code == 409 and "packing sah" in over.text
     ok = await client.post(
-        f"/api/v1/production/jobs/{jid}/loading",
-        headers=h,
-        json=loading_body(
-            accurate_sj_id="SJ1",
-            accurate_sj_line_id="SL1",
-            so_line_id="L1",
-            qty_physical="200",
-            idempotency_key="msj-06-sj-authority",
-        ),
+        f"/api/v1/production/jobs/{jid}/loading", headers=h,
+        json=loading_body(qty_physical="100", idempotency_key="msj-06-at-cap1", **body),
     )
     assert ok.status_code == 200, ok.text
+    auth = await client.get(
+        f"/api/v1/production/jobs/{jid}/loading-authority", headers=h,
+        params={"accurate_sj_id": "SJ1", "accurate_sj_number": "SJ1", "accurate_sj_line_id": "SL1", "so_line_id": "L1"},
+    )
+    assert auth.json()["packed_qty"] == "100" and auth.json()["loading_available"] == "0"
 
 
 @pytest.mark.asyncio

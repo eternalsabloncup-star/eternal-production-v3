@@ -5,6 +5,11 @@ from app.models.production.customer_token import CustomerAccessToken
 from app.models.production.design import DesignVersion
 from app.models.production.event import ProductionEvent
 from app.models.production.job import ProductionJob
+from app.models.production.operations import (
+    DeliveryPlan,
+    DeliveryPlanEvent,
+    ProductionMachine,
+)
 from app.models.production.payment import PaymentBypass, PaymentReceiptRef
 from app.models.production.payroll import OperatorRate, PayrollLine, PayrollRun
 from app.models.production.prep import JobLineQty, PrepEvent, PrepState
@@ -27,4 +32,7 @@ __all__ = [
     "OperatorRate",
     "PayrollRun",
     "PayrollLine",
+    "ProductionMachine",
+    "DeliveryPlan",
+    "DeliveryPlanEvent",
 ]

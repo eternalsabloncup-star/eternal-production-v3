@@ -209,7 +209,8 @@ async def test_loading_authority_verified_and_unknown(client: AsyncClient):
     assert body["qty_sj_pcs"] == "100"
     assert body["remaining_loading"] == "100"
     assert body["actions_enabled"] is True
-    assert body["packing_monitoring_only"] is True
+    assert body["packing_cap_enforced"] in (True, False)
+    assert "packed_qty" in body and "loading_available" in body
 
     bad = await client.get(
         f"/api/v1/production/jobs/{jid}/loading-authority",

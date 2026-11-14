@@ -200,3 +200,18 @@ Chromium E2E scripts run against disposable loopback sandboxes only. The two
 Settings E2E lines marked BLOCKED are fixed text in the legacy-mode script; the
 workflow scenarios are covered by `workflow-permission-e2e.py` (enforced sandbox).
 Migration head: 20261116_0012. Payment migration 0010 unchanged.
+
+## Monitoring Penerimaan and safe activation (PR #9)
+
+`GET /api/v1/production/jobs/payment/receipts` is a read-only cross-PO view over `payment_receipt_refs`
+(joined to `production_jobs`; payment status from `payment_gate.status_expression`). It needs `job.read`
+(legacy) / `payment.evidence.read` with a branch-wide grant (enforced), is branch scoped in SQL, paginated
+(`page`, `page_size` <= 100) and filterable (`q`, `payment_status`, `receipt_status`, `branch`). An absent
+amount is `null` and the UI shows "Belum terverifikasi", never zero. No ledger copy, no Accurate call.
+The UI uses it outside preview mode; the demo view is kept only for `epv3_preview=fixture`.
+
+Settings activation order (Owner approval required for each step; nothing is done by the code):
+1. Back up and confirm migrations at `20261116_0012`.
+2. Bootstrap the Director with an Owner-attested reference (`bootstrap_director`), verify on staging.
+3. Set `V3_SETTINGS_ENABLED=true`, restart, log in as the Director, Pengaturan must show AKTIF.
+4. Keep `V3_WORKFLOW_AUTHORIZATION=legacy`; enforced cutover remains held.

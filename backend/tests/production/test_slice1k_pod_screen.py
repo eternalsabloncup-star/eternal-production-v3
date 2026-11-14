@@ -494,7 +494,7 @@ async def test_pod_requires_four_attachments_and_partials(client_1k: AsyncClient
         for t in tasks.json()["tasks"]
         if t["accurate_so_number"] == "SO/1K/POD"
     }
-    assert kinds.get("loading") == "done"
+    assert kinds.get("loading") == "partial"
     assert kinds.get("delivery") == "done"
 
 

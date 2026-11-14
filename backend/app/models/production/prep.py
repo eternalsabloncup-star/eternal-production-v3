@@ -36,6 +36,11 @@ class JobLineQty(Base):
     po_qty: Mapped[Decimal] = mapped_column(Numeric(18, 3))
     # print | non_print | unknown — NULL means not synced; never invent print.
     production_process: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Accurate qty seen after scheduling/production began; po_qty is never silently rewritten.
+    source_qty: Mapped[Decimal | None] = mapped_column(Numeric(18, 3), nullable=True)
+    drift_detected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

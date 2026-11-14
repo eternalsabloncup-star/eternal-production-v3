@@ -54,7 +54,63 @@
     return rows;
   }
 
+
+  // Single connection-state controller: updated only by real results (health probe at boot,
+  // Inbox request outcomes, auth failures). Never by render(); no polling.
+  const conn = { api: "checking", gateway: "unchecked", sync: "none", auth: "ok", syncAt: null };
+  function connReduce(st, ev) {
+    const n = Object.assign({}, st);
+    if (ev.t === "health") {
+      n.api = ev.ok ? "ok" : "down";
+      if (!ev.ok) { n.gateway = "unchecked"; n.sync = "failed"; }
+    } else if (ev.t === "auth") {
+      n.auth = "login"; n.sync = "none"; n.gateway = "unchecked";
+    } else if (ev.t === "inbox_start") {
+      n.gateway = "checking";
+    } else if (ev.t === "inbox_ok") {
+      n.api = "ok"; n.gateway = "ok"; n.sync = "ok"; n.auth = "ok"; n.syncAt = ev.at || null;
+    } else if (ev.t === "inbox_fail") {
+      n.syncAt = null;
+      if (ev.kind === "auth") { n.auth = "login"; n.sync = "none"; n.gateway = "unchecked"; }
+      else if (ev.kind === "network") { n.api = "down"; n.gateway = "unchecked"; n.sync = "failed"; }
+      else if (ev.kind === "gateway") { n.api = "ok"; n.gateway = "down"; n.sync = "failed"; }
+      else { n.api = "ok"; n.gateway = "unchecked"; n.sync = "failed"; }
+    }
+    return n;
+  }
+  function connLabels(st, preview) {
+    if (preview) return { api: "PREVIEW SIMULASI", gateway: "PREVIEW SIMULASI", sync: "PREVIEW SIMULASI" };
+    const api = st.auth === "login" ? "PERLU LOGIN" : { checking: "MEMERIKSA", ok: "TERHUBUNG", down: "GANGGUAN" }[st.api];
+    const gwKnown = st.auth !== "login" && st.api !== "down";
+    const gateway = !gwKnown ? "BELUM DIPERIKSA" : { checking: "MEMERIKSA", ok: "TERHUBUNG", down: "GANGGUAN", unchecked: "BELUM DIPERIKSA" }[st.gateway];
+    const sync = st.sync === "ok" ? "BERHASIL" + (st.syncAt ? " (" + st.syncAt + ")" : "") : st.sync === "failed" ? "GAGAL" : "BELUM TERSEDIA";
+    return { api: api, gateway: gateway, sync: sync };
+  }
+  function connDispatch(ev) {
+    const next = connReduce(conn, ev);
+    Object.assign(conn, next);
+    window.v3ApplyConnectionStatus();
+  }
+  window.v3ApplyConnectionStatus = function () {
+    const l = connLabels(conn, isPreviewFixture());
+    const set = function (id, text) { const el = document.getElementById(id); if (el) el.textContent = text; };
+    set("v3-conn-api", "API: " + l.api);
+    set("v3-conn-gw", "Gateway Accurate: " + l.gateway);
+    set("v3-conn-sync", "Sinkronisasi PO: " + l.sync);
+    set("save-indicator", "API " + l.api + " · Gateway " + l.gateway);
+  };
+  window.v3ConnectionState = function () { return Object.assign({}, conn, { labels: connLabels(conn, isPreviewFixture()) }); };
+  async function probeBackendHealth() {
+    try {
+      const r = await fetch(API + "/health", { cache: "no-store", credentials: "same-origin" });
+      connDispatch({ t: "health", ok: r.ok });
+    } catch (_) {
+      connDispatch({ t: "health", ok: false });
+    }
+  }
+
   function redirectToLogin() {
+    connDispatch({ t: "auth" });
     try {
       localStorage.removeItem(TOKEN_KEY);
     } catch (_) {}
@@ -646,16 +702,25 @@
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(opts.body);
     }
-    const response = await fetch(path, {
-      method: opts.method || "GET",
-      credentials: "same-origin",
-      headers: headers,
-      cache: "no-store",
-      body: body,
-    });
+    let response;
+    try {
+      response = await fetch(path, {
+        method: opts.method || "GET",
+        credentials: "same-origin",
+        headers: headers,
+        cache: "no-store",
+        body: body,
+      });
+    } catch (netErr) {
+      const e = new Error("Backend API tidak dapat dihubungi");
+      e.kind = "network";
+      throw e;
+    }
     if (response.status === 401) {
       redirectToLogin();
-      throw new Error("Sesi V3 tidak valid — login ulang");
+      const e = new Error("Sesi V3 tidak valid — login ulang");
+      e.kind = "auth";
+      throw e;
     }
     if (response.status === 403) {
       throw new Error("Akses ditolak (izin/cabang)");
@@ -690,7 +755,14 @@
         );
       }
       if (response.status === 503) {
-        throw new Error("Gateway Accurate belum siap / tidak berwenang");
+        const e = new Error("Gateway Accurate belum siap / tidak berwenang");
+        e.kind = "gateway";
+        throw e;
+      }
+      if (response.status === 502 || response.status === 504) {
+        const e = new Error("Backend API tidak merespons (HTTP " + response.status + ")");
+        e.kind = "network";
+        throw e;
       }
       throw new Error(detail || "API V3 HTTP " + response.status);
     }
@@ -698,8 +770,9 @@
     return response.json();
   }
 
+  const monitorOrders = Object.create(null);
   function orderBySo(so) {
-    return (window.orders || []).find((x) => x.id === so) || null;
+    return (window.orders || []).find((x) => x.id === so) || monitorOrders[so] || null;
   }
 
   const detailCache = Object.create(null);
@@ -1196,6 +1269,7 @@
     const paymentDraft = selectedSo === so ? snapshotDeliveryDraft() : null;
     paymentEpoch++;
     taskRequestSequence++;
+    if (typeof window.v3PaymentMonitorRefresh === "function") window.v3PaymentMonitorRefresh();
     delete boardCache[so];
     delete jobCache[so];
     window.__V3_OFFICIAL_TASKS__ = [];
@@ -1218,6 +1292,7 @@
     const affectedSo = opts && opts.so ? opts.so : selectedSo;
     try {
       const result = await fn();
+      try { ops.ts = {}; mm.ts = 0; delete detailCache[so]; for (const k in bufTried) delete bufTried[k]; for (const k in bufFailed) delete bufFailed[k]; } catch (_) { /* views not initialised yet */ }
       // Soft actions (lookup / field-select) must not wipe Delivery form inputs.
       if (opts && opts.soft) return result;
       if (opts && opts.payment) {
@@ -1242,9 +1317,24 @@
       if (typeof window.render === "function") window.render();
       return result;
     } catch (err) {
-      // A failed response can follow a committed payment write: fail closed.
-      if (opts && opts.payment) invalidatePaymentView(affectedSo);
       toast(err.message || "Transaksi gagal");
+      // A failed response can follow a committed payment write: fail closed, then reload.
+      if (opts && opts.payment) {
+        try {
+          invalidatePaymentView(affectedSo);
+        } catch (invalidateError) {
+          console.error("invalidatePaymentView", invalidateError);
+        }
+        try {
+          await lookupJob(affectedSo);
+          if (jobCache[affectedSo]) await loadBoard(affectedSo, true);
+          await refreshOfficialTasks(undefined, true);
+          if (selectedSo === affectedSo) renderWorkflowDrawer(affectedSo);
+          if (typeof window.render === "function") window.render();
+        } catch (restoreError) {
+          console.error("restore after failed payment action", restoreError);
+        }
+      }
       throw err;
     } finally {
       inFlight.delete(lockKey);
@@ -1435,7 +1525,7 @@
     const auth = authorityRows(board, so);
     if (!auth.length && !(events || []).some((e) => e.event_type === "loading")) {
       return (
-        '<p class="v49-quiet" id="v3-sj-authority">Qty SJ: isi identitas SJ line lalu Lookup. Packing monitoring only.</p>'
+        '<p class="v49-quiet" id="v3-sj-authority">Qty SJ: isi identitas SJ line lalu Lookup. Loading dibatasi qty packing sah dan sisa SJ.</p>'
       );
     }
     const views = auth.map(function (row) {
@@ -1493,7 +1583,7 @@
           );
         })
         .join("") +
-      '<p class="v49-quiet">Packing monitoring only — tidak membatasi Loading.</p></div>'
+      '<p class="v49-quiet">Loading dibatasi qty packing sah, qty SJ, dan sisa yang belum diloading.</p></div>'
     );
   }
 
@@ -1868,8 +1958,11 @@
       "</b> · Cabang " +
       escapeHtml(order.branch) +
       " · Qty SO " +
-      escapeHtml(order.qty) +
+      escapeHtml(order.qty === "" || order.qty == null ? "Belum terverifikasi" : order.qty) +
       "</p>" +
+      (order.v3Monitor && order.accurateDetailNote
+        ? '<p class="v49-quiet">' + escapeHtml(order.accurateDetailNote) + "</p>"
+        : "") +
       (job
         ? "<p>Job #<b>" +
           escapeHtml(job.id) +
@@ -1935,22 +2028,29 @@
           historyList("Riwayat payment + audit", payHist),
       ) +
       section(
+        "Perubahan qty Accurate",
+        driftHtml(board) +
+          '<p class="v49-quiet">Qty PO V3 (snapshot job) tidak diubah otomatis. Tinjau perubahan di Accurate, lalu catat peninjauan; penyesuaian jadwal dilakukan lewat Cancel/Transfer remaining.</p>',
+      ) +
+      section(
         "Scheduling",
-        '<label>SO line<input id="v3-asg-line" value="' +
+        '<div id="v3-asg-info" class="flat-notice" role="status">Memuat ringkasan qty...</div>' +
+          '<label>SO line<input id="v3-asg-line" value="' +
           escapeHtml(firstLineId(order)) +
           '"/></label>' +
-          '<label>Operator<input id="v3-asg-op" value="Operator A"/></label>' +
-          '<label>Machine<input id="v3-asg-mc" value="Semi Auto 01"/></label>' +
+          '<label>Operator (akun resmi, cabang ' + escapeHtml(order.branch || "") + ')<select id="v3-asg-op"><option value="">Memuat operator...</option></select></label>' +
+          '<label>Mesin (master mesin)<select id="v3-asg-mc"><option value="">Memuat mesin...</option></select></label>' +
+          '<div id="v3-asg-cap" class="v49-quiet"></div>' +
           '<label>Date<input id="v3-asg-date" type="date"/></label>' +
           '<label>Color pass<input id="v3-asg-pass" type="number" min="1" value="1"/></label>' +
           '<label>Qty planned<input id="v3-asg-qty" type="number" min="1" value="' +
-          escapeHtml(order.qty || 1) +
+          escapeHtml(order.v3Monitor && !order.qty ? "" : order.qty || 1) +
           '"/></label>' +
           '<button type="button" class="btn sm" data-v3="asg-create">Buat assignment</button>' +
           '<label>Assignment id<input id="v3-asg-id" type="number"/></label>' +
           '<button type="button" class="btn sm" data-v3="asg-cancel">Cancel remaining</button>' +
-          '<label>Transfer to operator<input id="v3-asg-top"/></label>' +
-          '<label>Transfer machine<input id="v3-asg-tmc" value="Semi Auto 02"/></label>' +
+          '<label>Transfer ke operator<select id="v3-asg-top"><option value="">Memuat operator...</option></select></label>' +
+          '<label>Transfer ke mesin<select id="v3-asg-tmc"><option value="">Memuat mesin...</option></select></label>' +
           '<button type="button" class="btn sm" data-v3="asg-transfer">Transfer remaining</button>' +
           historyList("Riwayat assignment", asgHist),
       ) +
@@ -1960,12 +2060,12 @@
           escapeHtml(firstLineId(order)) +
           '"/></label>' +
           '<label>PO qty ceiling<input id="v3-prep-po" type="number" value="' +
-          escapeHtml(order.qty || 1) +
+          escapeHtml(order.v3Monitor && !order.qty ? "" : order.qty || 1) +
           '"/></label>' +
           '<label>Screen qty<input id="v3-prep-screen" type="number" value="1"/></label>' +
           '<label>Screen size<select id="v3-prep-screen-size"><option value="kecil">Kecil</option><option value="besar">Besar</option></select></label>' +
           '<label>Helper qty<input id="v3-prep-helper" type="number" value="' +
-          escapeHtml(order.qty || 1) +
+          escapeHtml(order.v3Monitor && !order.qty ? "" : order.qty || 1) +
           '"/></label>' +
           '<label>Evidence<input id="v3-prep-ev" value="prep-evidence"/></label>' +
           '<button type="button" class="btn sm" data-v3="prep-screen">Simpan screener</button>' +
@@ -2016,11 +2116,12 @@
           '<label>Qty<input id="v3-pack-qty" type="number" min="1" value="1"/></label>' +
           '<label>Lot<input id="v3-pack-lot"/></label>' +
           '<button type="button" class="btn sm" data-v3="pack">Confirm packing batch</button>' +
-          '<p class="v49-quiet">Packing dari qty helper-verified (bukan operator saja). Loading tetap otoritas SJ-line.</p>',
+          '<p class="v49-quiet">Print: packing tidak boleh melebihi output cetak yang sudah dikonfirmasi. Non-print: packing tidak boleh melebihi qty PO. READY gudang = packing sah dikurangi loading aktif.</p>',
       ) +
       section(
         "Delivery / POD",
-        '<label>Accurate SJ id<input id="v3-sj-id"/></label>' +
+        loadingReadinessTable(so) +
+          '<label>Accurate SJ id<input id="v3-sj-id"/></label>' +
           '<label>Accurate SJ number<input id="v3-sj-no"/></label>' +
           '<label>Accurate SJ line id<input id="v3-sj-line"/></label>' +
           '<label>SO line id<input id="v3-load-so-line" value="' +
@@ -2051,7 +2152,7 @@
           (canPerm("production.delivery.manage")
             ? '<button type="button" class="btn sm" data-v3="sj-cancel">Cancel/supersede SJ</button>'
             : "") +
-          '<p class="v49-quiet">Loading max = Accurate SJ-line PCS. Packing monitoring only. POD resmi butuh Loading + 2 foto + 2 TTD + nama penerima.</p>',
+          '<p class="v49-quiet">Loading max = min(qty packing sah, sisa SJ-line Accurate). POD resmi butuh Loading + 2 foto + 2 TTD + nama penerima.</p>',
       ) +
       section(
         "Tracking",
@@ -2080,6 +2181,7 @@
         if (el && !el.value) el.value = today;
       },
     );
+    hydrateScheduling(so);
     request(API + "/production/jobs/evidence/capability")
       .then(function (cap) {
         const note = document.getElementById("v3-evidence-note");
@@ -2114,6 +2216,7 @@
     }
     modal.querySelectorAll("[data-v3]").forEach(function (btn) {
       btn.addEventListener("click", function () {
+        window.__v3DriftLine = btn.getAttribute("data-line");
         handleAction(btn.getAttribute("data-v3"), so, order);
       });
     });
@@ -2141,6 +2244,81 @@
       body +
       "</section>"
     );
+  }
+
+
+
+  function driftHtml(board) {
+    const lines = ((board && board.job_lines) || []).filter(function (ln) { return ln.accurate_qty != null; });
+    if (!lines.length) return '<p class="v49-quiet">Tidak ada perbedaan qty dengan Accurate.</p>';
+    return lines.map(function (ln) {
+      return '<div class="flat-notice" role="alert"><b>Line ' + escapeHtml(ln.so_line_id) + "</b>: snapshot job V3 " + opsNum(ln.po_qty) + " ≠ Accurate terbaru " + opsNum(ln.accurate_qty) +
+        (ln.drift_detected_at ? " (terdeteksi " + escapeHtml(ln.drift_detected_at.slice(0, 10)) + ")" : "") + "<br>" +
+        (ln.drift_acknowledged ? "Sudah ditinjau (tercatat di audit)." :
+          '<input id="v3-drift-reason-' + escapeHtml(ln.so_line_id) + '" placeholder="Alasan/tindak lanjut"> <button type="button" class="btn sm" data-v3="drift-ack" data-line="' + escapeHtml(ln.so_line_id) + '">Catat peninjauan</button>') + "</div>";
+    }).join("");
+  }
+  const sch = { people: {}, machines: {}, couriers: {} };
+  function selText(id) {
+    const el = document.getElementById(id);
+    return el && el.selectedIndex >= 0 ? el.options[el.selectedIndex].text : "";
+  }
+  function operatorFields(id) {
+    const v = field(id);
+    if (!v) throw new Error("Pilih operator dari daftar akun resmi terlebih dahulu");
+    return { operator_user_id: Number(v), operator_name: selText(id) };
+  }
+  function pickMachine(id) {
+    const v = field(id);
+    if (!v) throw new Error("Pilih mesin dari master mesin terlebih dahulu");
+    return v;
+  }
+  function fillSelect(id, items, labelOf, valueOf, emptyText) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const keep = el.value;
+    el.innerHTML = '<option value="">' + escapeHtml(items.length ? "— pilih —" : emptyText) + "</option>" +
+      items.map(function (i) { return '<option value="' + escapeHtml(valueOf(i)) + '">' + escapeHtml(labelOf(i)) + "</option>"; }).join("");
+    if (keep) el.value = keep;
+  }
+  function lineSummary(so) {
+    const board = boardCache[so];
+    if (!board) return "Ringkasan qty akan tampil setelah board dimuat.";
+    const rows = (board.job_lines || []).map(function (ln) {
+      const asg = (board.assignments || []).filter(function (a) { return a.so_line_id === ln.so_line_id && Number(a.color_pass) === 1; });
+      const planned = asg.reduce(function (n, a) { return n + Number(a.qty_planned) - Number(a.qty_cancelled_remaining || 0); }, 0);
+      const done = asg.reduce(function (n, a) { return n + Number(a.qty_confirmed || 0); }, 0);
+      const po = Number(ln.po_qty);
+      return "Line " + escapeHtml(ln.so_line_id) + ": PO " + opsNum(po) + " · terjadwal " + opsNum(planned) + " · belum terjadwal " + opsNum(Math.max(po - planned, 0)) + " · selesai " + opsNum(done);
+    });
+    return rows.length ? rows.join("<br>") : "Belum ada line PO tersinkron; jadwal akan ditolak sampai qty line tersedia.";
+  }
+  function showCapacity(branchId) {
+    const el = document.getElementById("v3-asg-cap");
+    const sel = document.getElementById("v3-asg-mc");
+    if (!el || !sel) return;
+    const d = sch.machines[branchId];
+    const m = d && sel.value ? d.items.find(function (x) { return x.name === sel.value; }) : null;
+    el.textContent = m
+      ? "Kapasitas sah: " + opsNum(m.capacity_per_shift) + " per shift × " + m.shifts_per_day + " shift = " + opsNum(m.capacity_per_day) + " per hari (divalidasi backend)."
+      : d && !d.enforced ? "Belum ada mesin terdaftar di cabang ini: kapasitas tidak divalidasi. Referensi default " + opsNum(d.default_capacity_per_shift) + " per shift hanya acuan." : "";
+  }
+  function hydrateScheduling(so) {
+    const job = jobCache[so];
+    const branchId = job && job.branch_id;
+    const info = document.getElementById("v3-asg-info");
+    if (info) info.innerHTML = lineSummary(so);
+    if (!branchId) return;
+    const paint = function () {
+      const p = sch.people[branchId], m = sch.machines[branchId];
+      if (p) { ["v3-asg-op", "v3-asg-top"].forEach(function (id) { fillSelect(id, p.items, function (i) { return i.display_name; }, function (i) { return i.id; }, "Tidak ada operator berizin di cabang ini"); }); }
+      if (m) { ["v3-asg-mc", "v3-asg-tmc"].forEach(function (id) { fillSelect(id, m.items.filter(function (x) { return x.active; }), function (i) { return i.name + " (" + opsNum(i.capacity_per_shift) + "/shift)"; }, function (i) { return i.name; }, "Belum ada mesin di master mesin"); }); showCapacity(branchId); }
+    };
+    paint();
+    if (!sch.people[branchId]) request(API + "/production/ops/assignees?kind=operator&branch=" + encodeURIComponent(branchId)).then(function (d) { sch.people[branchId] = d; paint(); }).catch(function (e) { fillSelect("v3-asg-op", [], null, null, String((e && e.message) || "Gagal memuat operator")); });
+    if (!sch.machines[branchId]) request(API + "/production/ops/machines?branch=" + encodeURIComponent(branchId)).then(function (d) { sch.machines[branchId] = d; paint(); }).catch(function (e) { fillSelect("v3-asg-mc", [], null, null, String((e && e.message) || "Gagal memuat mesin")); });
+    const mc = document.getElementById("v3-asg-mc");
+    if (mc) mc.onchange = function () { showCapacity(branchId); };
   }
 
   async function handleAction(action, so, order) {
@@ -2298,14 +2476,25 @@
         toast("Receipt diinvalidasi + audit event");
         return;
       }
+      if (action === "drift-ack") {
+        const line = window.__v3DriftLine;
+        const reason = field("v3-drift-reason-" + line);
+        if (!reason) throw new Error("Alasan peninjauan wajib diisi");
+        await request(API + "/production/ops/jobs/" + jid + "/qty-drift/acknowledge", {
+          method: "POST",
+          body: { so_line_id: line, reason: reason, idempotency_key: idemKey("drift") },
+        });
+        toast("Peninjauan perubahan qty Accurate dicatat; qty PO tidak diubah");
+        return;
+      }
       if (action === "asg-create") {
         await request(API + "/production/jobs/" + jid + "/schedule/assignments", {
           method: "POST",
           body: {
             so_line_id: field("v3-asg-line") || firstLineId(order),
             color_pass: Number(field("v3-asg-pass") || 1),
-            operator_name: field("v3-asg-op") || "Operator A",
-            machine_name: field("v3-asg-mc") || "Semi Auto 01",
+            ...operatorFields("v3-asg-op"),
+            machine_name: pickMachine("v3-asg-mc"),
             work_date: field("v3-asg-date"),
             qty_planned: field("v3-asg-qty") || "1",
           },
@@ -2337,8 +2526,8 @@
           {
             method: "POST",
             body: {
-              operator_name: field("v3-asg-top") || "Operator B",
-              machine_name: field("v3-asg-tmc") || "Semi Auto 02",
+              ...operatorFields("v3-asg-top"),
+              machine_name: pickMachine("v3-asg-tmc"),
               work_date: field("v3-asg-date"),
               reason: "transfer remaining from V3 panel",
             },
@@ -2543,8 +2732,12 @@
             (auth.loading_cancelled || "0") +
             " · Net " +
             (auth.loading_net || "0") +
-            " · Remaining " +
+            " · Sisa SJ " +
             view.displayRemaining +
+            " · Qty siap sah " +
+            (auth.packed_qty != null ? auth.packed_qty : "UNKNOWN") +
+            " · Tersedia Loading " +
+            (auth.loading_available != null ? auth.loading_available : "UNKNOWN") +
             (view.actionsEnabled ? " · Loading OK" : " · Loading DISABLED (UNKNOWN)");
         }
         const loadBtn = document.getElementById("v3-load-btn");
@@ -3102,6 +3295,7 @@
           : "Sumber belum terhubung: " + fetchError;
     const content = root.querySelector(".content");
     if (content && !status.parentElement) content.prepend(status);
+    window.v3ApplyConnectionStatus();
 
     // Step 163: remove global Accurate pager (Halaman Accurate / Prev / Next / Refresh)
     // on every V3 page. Keep refreshInbox() API for programmatic sync — no UI chrome.
@@ -3157,6 +3351,7 @@
     }
     loading = true;
     inboxPage = page || 1;
+    connDispatch({ t: "inbox_start" });
     if (typeof window.render === "function") window.render();
     try {
       if (!localStorage.getItem(TOKEN_KEY)) {
@@ -3208,6 +3403,7 @@
       window.taskEntries = {};
       // Do not assign window.history — browser History API is read-only.
       lastSync = new Date().toLocaleTimeString("id-ID");
+      connDispatch({ t: "inbox_ok", at: lastSync });
       // Bounded background enrich — fills produk/qty from Accurate detail (not list).
       enrichInboxPage(
         mapped.map(function (o) {
@@ -3220,6 +3416,7 @@
       enrichGeneration += 1;
       inboxTotal = null;
       fetchError = err && err.message ? err.message : "Tidak dapat membaca Accurate";
+      connDispatch({ t: "inbox_fail", kind: (err && err.kind) || "other" });
       publishOrders([]);
       window.taskEntries = {};
       window.__V3_OFFICIAL_TASKS__ = [];
@@ -3237,7 +3434,42 @@
   function officialStateToUi(state) {
     if (state === "done") return "Selesai";
     if (state === "actionable") return "Siap";
+    if (state === "partial") return "Loading Parsial";
     return "Menunggu";
+  }
+
+  function loadingReadinessTable(soNumber) {
+    const row = (window.__V3_OFFICIAL_TASKS__ || []).find(function (item) {
+      return item && item.o && item.o.id === soNumber && item.t && item.t.id === "loading";
+    });
+    const lines = row && row.official && row.official.lines;
+    if (!lines || !lines.length) {
+      return '<p class="v49-quiet">Kesiapan loading per line belum terverifikasi.</p>';
+    }
+    const body = lines
+      .map(function (ln) {
+        const ready = ln.ready_qty == null ? "Belum terverifikasi" : String(ln.ready_qty);
+        const sj = ln.sj_remaining_qty == null ? "Belum terverifikasi" : String(ln.sj_remaining_qty);
+        return (
+          "<tr><td>" +
+          escapeHtml(ln.so_line_id || "—") +
+          "</td><td>" +
+          escapeHtml(ln.production_process || "—") +
+          "</td><td>" +
+          escapeHtml(ln.status || "Belum terverifikasi") +
+          "</td><td>" +
+          escapeHtml(ready) +
+          "</td><td>" +
+          escapeHtml(sj) +
+          "</td></tr>"
+        );
+      })
+      .join("");
+    return (
+      '<p class="sectionlabel">Kesiapan loading per line</p><div class="v36-table-container"><table class="v36-table"><thead><tr><th>SO line</th><th>Proses</th><th>Status</th><th>Ready qty</th><th>Sisa SJ</th></tr></thead><tbody>' +
+      body +
+      "</tbody></table></div>"
+    );
   }
 
   function mapOfficialTaskRows(tasks) {
@@ -3588,8 +3820,395 @@
     // Intentionally empty of progress UI — demo path removed.
   };
 
+
+  // Operational (non-preview) views for features without an official backend list.
+  // Preview fixture keeps the original demo views, isolated by epv3_preview=fixture.
+  function notOperational(title, desc, text) {
+    const h = typeof window.heading === "function" ? window.heading : function (t, d) { return "<h1>" + t + "</h1><p>" + d + "</p>"; };
+    return h(title, desc) + "<div class=\"flat-notice\" role=\"status\"><b>Belum tersedia secara operasional.</b> " + text + "</div>";
+  }
+  function guardDemoView(name, build) {
+    if (typeof window[name] !== "function") return;
+    const original = window[name];
+    window[name] = function () {
+      return isPreviewFixture() ? original.apply(this, arguments) : build.apply(this, arguments);
+    };
+  }
+  const ops = { ts: {}, plan: null, payroll: null, couriers: {}, del: null, rep: null, slip: null, unsynced: null, err: {}, busy: {}, slipId: "", status: "", from: "", to: "" };
+  const OPS_TTL_MS = 4000;
+  function opsLoad(key, url, assign) {
+    if (ops.busy[key]) return;
+    ops.busy[key] = true; ops.err[key] = "";
+    request(API + url).then(function (d) { assign(d); }).catch(function (e) {
+      assign(null); ops.err[key] = String((e && e.message) || "Gagal memuat");
+    }).then(function () {
+      ops.busy[key] = false; ops.ts[key] = Date.now();
+      if (typeof window.render === "function") window.render();
+    });
+  }
+  function opsStale(key) { return !ops.busy[key] && (!ops.ts[key] || Date.now() - ops.ts[key] > OPS_TTL_MS); }
+  function opsHead(title, desc) {
+    const h = typeof window.heading === "function" ? window.heading : function (t, d) { return "<h1>" + t + "</h1><p>" + d + "</p>"; };
+    return h(title, desc);
+  }
+  function opsNum(v) { const n = Number(v); return Number.isFinite(n) ? n.toLocaleString("id-ID") : "—"; }
+  function opsDash(v) { return v == null || v === "" ? '<span class="muted">Belum tersedia</span>' : escapeHtml(String(v)); }
+  const DEL_STATUS = { belum_dikirim: "Belum dikirim", sebagian: "Sebagian", terkirim: "Terkirim", dibatalkan: "Dibatalkan" };
+  const DEL_SCHEDULE = { belum_dijadwalkan: "Belum dijadwalkan", terjadwal: "Terjadwal", hari_ini: "Hari ini", terlambat: "Terlambat" };
+  guardDemoView("shippingScheduleView", function () {
+    if (opsStale("del") && !ops.err.del) opsLoad("del", "/production/ops/deliveries" + (ops.status ? "?status=" + encodeURIComponent(ops.status) : ""), function (d) { ops.del = d; });
+    const d = ops.del;
+    let body;
+    if (ops.err.del) body = '<div class="flat-notice" role="alert">' + escapeHtml(ops.err.del) + ' <button type="button" class="btn sm" data-ops="del-reload">Coba lagi</button></div>';
+    else if (!d) body = '<div class="flat-notice" role="status">Memuat jadwal pengiriman...</div>';
+    else if (!d.items.length) body = '<div class="flat-notice">Belum ada SJ yang sudah di-loading pada cabang Anda.</div>';
+    else body = '<div class="v36-table-container"><table class="v36-table"><thead><tr><th>PO</th><th>SJ</th><th>Pelanggan</th><th>Cabang</th><th>Alamat / penerima</th><th>Tgl rencana</th><th>Kurir</th><th>Qty SJ</th><th>Loading</th><th>Terkirim</th><th>Sisa kirim</th><th>Status</th><th>SLA</th><th>Aksi</th></tr></thead><tbody>' +
+      d.items.map(function (r) {
+        const sla = r.sla && r.sla.date ? r.sla.date : null;
+        const act = r.delivery_status === "terkirim" || r.delivery_status === "dibatalkan" ? "" :
+          '<button type="button" class="btn sm" data-ops="plan" data-jid="' + escapeHtml(r.job_id) + '" data-sj="' + escapeHtml(r.accurate_sj_id) + '" data-courier="' + escapeHtml(r.courier_user_id == null ? "" : r.courier_user_id) + '" data-so="' + escapeHtml(r.accurate_so_number) + '" data-branch="' + escapeHtml(r.branch_id) + '" data-date="' + escapeHtml(r.planned_date || "") + '">' + (r.planned_date ? "Jadwal ulang" : "Jadwalkan") + "</button>";
+        return "<tr><td><b>" + escapeHtml(r.accurate_so_number) + "</b></td><td>" + opsDash(r.accurate_sj_number) + "</td><td>" + opsDash(r.customer_name) + "</td><td>" + opsDash(r.branch_id) + "</td><td>" + (r.address || r.recipient_name ? escapeHtml([r.address, r.recipient_name].filter(Boolean).join(" · ")) : '<span class="muted">Belum tersedia</span>') + "</td><td>" + opsDash(r.planned_date) + "</td><td>" + opsDash(r.courier_name) + "</td><td>" + opsNum(r.qty_sj) + "</td><td>" + opsNum(r.qty_loaded) + "</td><td>" + opsNum(r.qty_delivered) + "</td><td>" + opsNum(r.qty_remaining_to_deliver) + "</td><td>" + escapeHtml(DEL_STATUS[r.delivery_status] || r.delivery_status) + " · " + escapeHtml(DEL_SCHEDULE[r.schedule_status] || r.schedule_status) + (r.po_complete ? " · PO selesai" : "") + "</td><td>" + opsDash(sla) + "</td><td>" + act + "</td></tr>";
+      }).join("") + "</tbody></table></div><small>Alamat belum tersedia dan tidak menjadi syarat jadwal, Loading, atau POD; penerima hanya tampil dari POD (" + escapeHtml((d.coverage || "")) + ").</small>";
+    let planForm = "";
+    if (ops.plan) {
+      const cs = ops.couriers[ops.plan.branch];
+      planForm = '<section class="flat-notice" id="v3-plan-form"><b>' + (ops.plan.date ? "Jadwal ulang" : "Jadwalkan") + " SJ " + escapeHtml(ops.plan.sj) + " · PO " + escapeHtml(ops.plan.so) + '</b><br><label>Tanggal <input id="v3-plan-date" type="date" value="' + escapeHtml(ops.plan.date) + '"></label> <label>Kurir <select id="v3-plan-courier"><option value="">' + (cs ? (cs.length ? "— belum ditentukan —" : "Tidak ada akun kurir berizin") : "Memuat...") + "</option>" + (cs || []).map(function (c) { return '<option value="' + escapeHtml(c.id) + '"' + (String(c.id) === String(ops.plan.courier) ? " selected" : "") + ">" + escapeHtml(c.display_name) + "</option>"; }).join("") + "</select></label> " + (ops.plan.date ? '<label>Alasan <input id="v3-plan-reason" placeholder="wajib"></label> ' : '<input id="v3-plan-reason" type="hidden" value="">') + '<button type="button" class="btn sm" data-ops="plan-save">Simpan</button> <button type="button" class="btn sm" data-ops="plan-cancel">Batal</button></section>';
+    }
+    return opsHead("Jadwal Pengiriman", "Daftar SJ dari event Loading/POD resmi V3") + planForm +
+      '<div class="v36-toolbar"><label>Status <select id="v3-ops-status">' + [["", "Semua"], ["belum_dikirim", "Belum dikirim"], ["sebagian", "Sebagian"], ["terkirim", "Terkirim"], ["terlambat", "Terlambat"]].map(function (o) { return '<option value="' + o[0] + '"' + (ops.status === o[0] ? " selected" : "") + ">" + o[1] + "</option>"; }).join("") + '</select></label> <button type="button" class="btn sm" data-ops="del-reload">Muat ulang</button></div>' + body;
+  });
+  guardDemoView("salarySlipView", function () {
+    if (opsStale("payroll") && !ops.err.payroll) opsLoad("payroll", "/production/ops/payroll/runs", function (d) { ops.payroll = d; });
+    const runs = ops.payroll && ops.payroll.items.length ? '<div class="v36-table-container"><table class="v36-table"><thead><tr><th>Run</th><th>Status</th><th>Cabang</th><th>Periode</th><th>Total bruto (Rp)</th><th>Aksi</th></tr></thead><tbody>' + ops.payroll.items.map(function (r) { return "<tr><td>#" + escapeHtml(r.id) + "</td><td>" + escapeHtml(r.status) + "</td><td>" + opsDash(r.branch_id) + "</td><td>" + escapeHtml(r.period_start) + " s/d " + escapeHtml(r.period_end) + "</td><td>" + opsNum(r.amount_gross_total) + '</td><td><button type="button" class="btn sm" data-ops="slip" data-id="' + escapeHtml(r.id) + '">Buka</button></td></tr>'; }).join("") + "</tbody></table></div>" : ops.err.payroll ? '<div class="flat-notice" role="alert">' + escapeHtml(ops.err.payroll) + "</div>" : ops.payroll ? '<div class="flat-notice">Belum ada payroll run resmi.</div>' : '<div class="flat-notice">Memuat daftar payroll run...</div>';
+    let body = runs + '<div class="flat-notice">Masukkan nomor payroll run resmi. Nominal berasal dari backend (payroll/runs); komponen harian dan lembur belum diverifikasi V1 dan tidak dihitung.</div>' +
+      '<form class="v36-toolbar" id="v3-slip-form"><label>Run # <input id="v3-slip-id" type="number" min="1" value="' + escapeHtml(ops.slipId) + '"></label> <button class="btn sm" type="submit">Tampilkan</button></form>';
+    if (ops.err.slip) body += '<div class="flat-notice" role="alert">' + escapeHtml(ops.err.slip) + "</div>";
+    else if (ops.busy.slip) body += '<div class="flat-notice">Memuat...</div>';
+    else if (ops.slip) {
+      const r = ops.slip;
+      body += "<h3>Run #" + escapeHtml(r.id) + " · " + escapeHtml(r.status) + " · " + escapeHtml(r.period_start) + " s/d " + escapeHtml(r.period_end) + '</h3><div class="v36-table-container"><table class="v36-table"><thead><tr><th>Operator</th><th>Cabang</th><th>Qty 1</th><th>Qty 2</th><th>Qty 3</th><th>Qty 4</th><th>Screen</th><th>Total (Rp)</th></tr></thead><tbody>' +
+        r.lines.map(function (l) { return "<tr><td>" + escapeHtml(l.operator_name) + "</td><td>" + escapeHtml(l.branch_id) + "</td><td>" + opsNum(l.qty_one) + "</td><td>" + opsNum(l.qty_two) + "</td><td>" + opsNum(l.qty_three) + "</td><td>" + opsNum(l.qty_four) + "</td><td>" + opsNum(l.qty_screen) + "</td><td>" + opsNum(l.amount_gross) + "</td></tr>"; }).join("") + "</tbody></table></div>";
+    }
+    return opsHead("Cetak Slip Gaji", "Slip gaji dari payroll run resmi") + body;
+  });
+  guardDemoView("productionReportView", function () {
+    if (opsStale("rep") && !ops.err.rep) {
+      const q = new URLSearchParams(); if (ops.from) q.set("date_from", ops.from); if (ops.to) q.set("date_to", ops.to);
+      opsLoad("rep", "/production/ops/reports/summary" + (q.toString() ? "?" + q : ""), function (d) { ops.rep = d; });
+    }
+    const d = ops.rep;
+    const cols = [["output", "Output"], ["reject", "Reject"], ["packing", "Packing"], ["loading_net", "Loading"], ["pod", "POD"]];
+    let body;
+    if (ops.err.rep) body = '<div class="flat-notice" role="alert">' + escapeHtml(ops.err.rep) + "</div>";
+    else if (!d) body = '<div class="flat-notice">Memuat laporan...</div>';
+    else body = '<div class="v36-table-container"><table class="v36-table"><thead><tr><th>Cabang</th>' + cols.map(function (c) { return "<th>" + c[1] + "</th>"; }).join("") + "</tr></thead><tbody>" +
+      Object.keys(d.by_branch).map(function (b) { return "<tr><td>" + escapeHtml(b) + "</td>" + cols.map(function (c) { return "<td>" + opsNum(d.by_branch[b][c[0]]) + "</td>"; }).join("") + "</tr>"; }).join("") +
+      '<tr><td><b>Total</b></td>' + cols.map(function (c) { return "<td><b>" + opsNum(d.totals[c[0]]) + "</b></td>"; }).join("") + "</tr></tbody></table></div><small>Sumber: event produksi resmi; pass warna 1 saja yang dihitung sebagai cup fisik.</small>";
+    return opsHead("Laporan Produksi", "Agregat event produksi resmi") +
+      '<form class="v36-toolbar" id="v3-rep-form"><label>Dari <input id="v3-rep-from" type="date" value="' + escapeHtml(ops.from) + '"></label> <label>Sampai <input id="v3-rep-to" type="date" value="' + escapeHtml(ops.to) + '"></label> <button class="btn sm" type="submit">Terapkan</button></form>' + body;
+  });
+  document.addEventListener("submit", function (ev) {
+    const id = ev.target && ev.target.id;
+    if (id === "v3-slip-form") {
+      ev.preventDefault();
+      ops.slipId = document.getElementById("v3-slip-id").value; ops.slip = null; ops.err.slip = "";
+      if (ops.slipId) opsLoad("slip", "/production/payroll/runs/" + encodeURIComponent(ops.slipId), function (d) { ops.slip = d; });
+    } else if (id === "v3-rep-form") {
+      ev.preventDefault();
+      ops.from = document.getElementById("v3-rep-from").value; ops.to = document.getElementById("v3-rep-to").value; ops.rep = null; ops.err.rep = ""; ops.ts = {};
+      if (typeof window.render === "function") window.render();
+    }
+  });
+  document.addEventListener("change", function (ev) {
+    if (ev.target && ev.target.id === "v3-ops-status") {
+      ops.status = ev.target.value; ops.del = null; ops.err.del = ""; ops.ts = {};
+      if (typeof window.render === "function") window.render();
+    }
+  });
+  document.addEventListener("click", function (ev) {
+    const t = ev.target && ev.target.closest ? ev.target.closest("[data-ops]") : null;
+    if (!t) return;
+    const act = t.getAttribute("data-ops");
+    if (act === "buf-open") {
+      rmOpenRow({ job_id: Number(t.getAttribute("data-jid")), so_number: t.getAttribute("data-so"), branch_id: t.getAttribute("data-branch"), customer_name: t.getAttribute("data-cust") });
+      return;
+    }
+    if (act === "buf-reload" || act === "buf-prev" || act === "buf-next") {
+      ops.bufPage = act === "buf-next" ? (ops.bufPage || 1) + 1 : act === "buf-prev" ? Math.max(1, (ops.bufPage || 1) - 1) : (ops.bufPage || 1);
+      ops.buf = null; ops.err.buf = ""; ops.ts = {};
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    if (act === "del-reload") { ops.del = null; ops.err.del = ""; ops.ts = {}; }
+    else if (act === "plan") {
+      ops.plan = { jid: t.getAttribute("data-jid"), sj: t.getAttribute("data-sj"), branch: t.getAttribute("data-branch"), date: t.getAttribute("data-date") || "", so: t.getAttribute("data-so") || "", courier: t.getAttribute("data-courier") || "" };
+      const br = ops.plan.branch;
+      if (!ops.couriers[br]) request(API + "/production/ops/assignees?kind=courier&branch=" + encodeURIComponent(br)).then(function (d) { ops.couriers[br] = d.items; }).catch(function () { ops.couriers[br] = []; }).then(function () { if (typeof window.render === "function") window.render(); });
+    }
+    else if (act === "slip") {
+      ops.slipId = t.getAttribute("data-id"); ops.slip = null; ops.err.slip = "";
+      opsLoad("slip", "/production/payroll/runs/" + encodeURIComponent(ops.slipId), function (d) { ops.slip = d; });
+      return;
+    }
+    else if (act === "plan-cancel") { ops.plan = null; }
+    else if (act === "plan-save") {
+      const pl = ops.plan; if (!pl) return;
+      const date = document.getElementById("v3-plan-date").value;
+      const reason = document.getElementById("v3-plan-reason").value.trim();
+      const courier = document.getElementById("v3-plan-courier").value;
+      if (!date) { toast("Tanggal rencana wajib diisi"); return; }
+      if (pl.date && !reason) { toast("Alasan jadwal ulang wajib diisi"); return; }
+      request(API + "/production/ops/jobs/" + pl.jid + "/delivery-plan", {
+        method: "POST",
+        body: { accurate_sj_id: pl.sj, planned_date: date, reason: reason || null, courier_user_id: courier ? Number(courier) : null, idempotency_key: idemKey("delplan") },
+      }).then(function () { toast("Jadwal pengiriman tersimpan"); ops.plan = null; ops.del = null; ops.ts = {}; })
+        .catch(function (e) { toast(String((e && e.message) || "Gagal menyimpan jadwal")); })
+        .then(function () { if (typeof window.render === "function") window.render(); });
+      return;
+    }
+    else return;
+    if (typeof window.render === "function") window.render();
+  });
+
+  const mm = { data: null, err: "", busy: false, branch: "" };
+  function mmLoad() {
+    if (mm.busy) return;
+    mm.busy = true; mm.err = "";
+    request(API + "/production/ops/machines" + (mm.branch ? "?branch=" + encodeURIComponent(mm.branch) : "")).then(function (d) { mm.data = d; }).catch(function (e) { mm.data = null; mm.err = String((e && e.message) || "Gagal memuat"); }).then(function () { mm.busy = false; mm.ts = Date.now(); if (typeof window.render === "function") window.render(); });
+  }
+  function machineView() {
+    if ((!mm.data || Date.now() - (mm.ts || 0) > OPS_TTL_MS) && !mm.busy && !mm.err) mmLoad();
+    const d = mm.data;
+    let body;
+    if (mm.err) body = '<div class="flat-notice" role="alert">' + escapeHtml(mm.err) + ' <button class="btn sm" type="button" data-mm="reload">Coba lagi</button></div>';
+    else if (!d) body = '<div class="flat-notice">Memuat master mesin...</div>';
+    else body = '<div class="flat-notice">Kapasitas default referensi: ' + opsNum(d.default_capacity_per_shift) + ' per shift (bukan batas universal). Validasi kapasitas aktif ' + (d.enforced ? "karena ada mesin terdaftar." : "setelah mesin pertama didaftarkan.") + "</div>" +
+      (d.items.length ? '<div class="v36-table-container"><table class="v36-table"><thead><tr><th>Cabang</th><th>Mesin</th><th>Jenis</th><th>Kapasitas/shift</th><th>Shift/hari</th><th>Status</th><th>Aksi</th></tr></thead><tbody>' +
+        d.items.map(function (m) { return "<tr><td>" + escapeHtml(m.branch_id) + "</td><td><b>" + escapeHtml(m.name) + "</b></td><td>" + (m.kind === "semi_auto" ? "Semi Auto" : "Auto") + "</td><td>" + opsNum(m.capacity_per_shift) + "</td><td>" + escapeHtml(m.shifts_per_day) + "</td><td>" + (m.active ? "Aktif" : "Nonaktif") + '</td><td><button type="button" class="btn sm" data-mm="cap" data-id="' + escapeHtml(m.id) + '" data-cap="' + escapeHtml(m.capacity_per_shift) + '">Ubah kapasitas</button> <button type="button" class="btn sm" data-mm="toggle" data-id="' + escapeHtml(m.id) + '" data-active="' + (m.active ? "1" : "0") + '">' + (m.active ? "Nonaktifkan" : "Aktifkan") + "</button></td></tr>"; }).join("") + "</tbody></table></div>" : '<div class="flat-notice">Belum ada mesin.</div>');
+    const form = '<form class="v36-toolbar" id="v3-mm-form"><label>Cabang <input id="v3-mm-branch" required value="' + escapeHtml(mm.branch) + '"></label> <label>Nama <input id="v3-mm-name" required></label> <label>Jenis <select id="v3-mm-kind"><option value="auto">Auto</option><option value="semi_auto">Semi Auto</option></select></label> <label>Kapasitas/shift <input id="v3-mm-cap" type="number" min="1" placeholder="default"></label> <label>Shift/hari <input id="v3-mm-shifts" type="number" min="1" value="1"></label> <button class="btn sm" type="submit">Tambah mesin</button></form>';
+    return opsHead("Master Mesin", "Mesin dan kapasitas resmi untuk validasi jadwal") + form + body;
+  }
+  if (typeof window.renderSection === "function") {
+    const baseRenderSection = window.renderSection;
+    window.renderSection = function (a, stats) {
+      return window.section === "machineMaster" ? machineView() : baseRenderSection.call(this, a, stats);
+    };
+  }
+  function mmMutate(promise, okText) {
+    promise.then(function () { toast(okText); mm.data = null; sch.machines = {}; }).catch(function (e) { toast(String((e && e.message) || "Gagal menyimpan mesin")); }).then(function () { if (typeof window.render === "function") window.render(); });
+  }
+  document.addEventListener("submit", function (ev) {
+    if (!ev.target || ev.target.id !== "v3-mm-form") return;
+    ev.preventDefault();
+    const cap = document.getElementById("v3-mm-cap").value;
+    mm.branch = document.getElementById("v3-mm-branch").value.trim();
+    mmMutate(request(API + "/production/ops/machines", { method: "POST", body: { branch_id: mm.branch, name: document.getElementById("v3-mm-name").value.trim(), kind: document.getElementById("v3-mm-kind").value, capacity_per_shift: cap || null, shifts_per_day: Number(document.getElementById("v3-mm-shifts").value || 1) } }), "Mesin ditambahkan");
+  });
+  document.addEventListener("click", function (ev) {
+    const t = ev.target && ev.target.closest ? ev.target.closest("[data-mm]") : null;
+    if (!t) return;
+    const act = t.getAttribute("data-mm"), id = t.getAttribute("data-id");
+    if (act === "reload") { mm.err = ""; mm.data = null; if (typeof window.render === "function") window.render(); }
+    else if (act === "cap") {
+      const v = window.prompt("Kapasitas per shift", t.getAttribute("data-cap") || "");
+      if (v) mmMutate(request(API + "/production/ops/machines/" + id, { method: "PATCH", body: { capacity_per_shift: v } }), "Kapasitas diubah");
+    } else if (act === "toggle") {
+      mmMutate(request(API + "/production/ops/machines/" + id, { method: "PATCH", body: { active: t.getAttribute("data-active") !== "1" } }), "Status mesin diubah");
+    }
+  });
+  if (typeof window.go === "function") {
+    const originalGo = window.go;
+    window.go = function (target) {
+      if (target === "contractMonitor") target = "inbox";
+      return originalGo.apply(this, arguments.length > 1 ? [target].concat([].slice.call(arguments, 1)) : [target]);
+    };
+  }
+  const bufTried = Object.create(null);
+  const bufFailed = Object.create(null);
+  function bufEnrich(items) {
+    const sos = Array.from(new Set(items.map(function (r) { return r.accurate_so_number; })))
+      .filter(function (so) { return so && !bufTried[so] && !orderBySo(so); });
+    if (!sos.length) return;
+    sos.forEach(function (so) { bufTried[so] = true; });
+    (async function () {
+      for (const so of sos) {
+        monitorOrders[so] = { id: so, name: "", branch: "", qty: "", sourceLines: [], v3Monitor: true };
+        try { applyDetailToOrder(so, await fetchOrderDetail(so)); delete bufFailed[so]; } catch (err) { delete monitorOrders[so]; bufFailed[so] = true; }
+      }
+      if (typeof window.render === "function") window.render();
+    })();
+  }
+  function bufItem(r) {
+    const o = orderBySo(r.accurate_so_number);
+    const line = o && (o.sourceLines || []).find(function (x) { return x.id != null && String(x.id) === String(r.so_line_id); });
+    return { o: o, line: line || null };
+  }
+  const NA_BUF = '<span class="muted">Belum terverifikasi</span>';
+  function bufText(v, failed) { return v == null || v === "" ? (failed ? '<span class="muted">Detail Accurate gagal dimuat</span>' : NA_BUF) : escapeHtml(String(v)); }
+  function bufQty(v) { return v == null ? NA_BUF : "<b class=\"right\">" + opsNum(v) + "</b>"; }
+  guardDemoView("monitorBuffer", function () {
+    if (opsStale("buf") && !ops.err.buf) {
+      opsLoad("buf", "/production/ops/buffer?page=" + (ops.bufPage || 1) + "&page_size=50", function (d) { ops.buf = d; if (d) bufEnrich(d.items); });
+    }
+    const d = ops.buf;
+    const h = typeof window.heading === "function" ? window.heading : function (t) { return "<h1>" + t + "</h1>"; };
+    let body;
+    if (ops.err.buf) body = "<div class=\"flat-notice\" role=\"alert\">" + escapeHtml(ops.err.buf) + " <button type=\"button\" class=\"btn sm\" data-ops=\"buf-reload\">Coba lagi</button></div>";
+    else if (!d) body = "<div class=\"flat-notice\" role=\"status\">Memuat monitoring buffer...</div>";
+    else if (!d.items.length) body = "<div class=\"flat-notice\">Tidak ada PO Buffer Stock aktif pada cabang Anda.</div>";
+    else body = "<div class=\"v36-table-container\"><table class=\"v36-table\"><thead><tr><th>Nomor PO Buffer</th><th>Nama Outlet / Gudang</th><th>Kode Barang</th><th>Nama Barang</th><th>Varian</th><th>Total Buffer Dipesan</th><th>Sudah Selesai Gesut</th><th>Sisa Belum Digesut</th><th>Ready Gudang (Siap Ambil)</th><th>Sudah Diambil / Terkirim</th><th>Status Buffer</th><th>Sales PIC</th><th>Detail</th></tr></thead><tbody>" +
+      d.items.map(function (r) {
+        const it = bufItem(r), o = it.o, l = it.line, failed = bufFailed[r.accurate_so_number] === true;
+        const sales = o && o.salesName && o.salesName !== "Belum terverifikasi" ? o.salesName : null;
+        const status = r.integrity === "INTEGRITY_CONFLICT" ? '<span title="' + escapeHtml(r.integrity_detail || "") + '">INTEGRITY_CONFLICT</span>' : bufText(r.buffer_status, failed);
+        return "<tr><td><b>" + escapeHtml(r.accurate_so_number) + "</b></td><td>" + bufText(r.customer_name || (o && o.name), failed) + "</td><td>" + bufText(l && l.item_code, failed) + "</td><td>" + bufText(l && l.name, failed) + "</td><td>" + bufText(l && l.color, failed) + "</td><td>" + bufQty(r.total_buffer) + "</td><td>" + bufQty(r.done_gesut) + "</td><td>" + bufQty(r.remaining_gesut) + "</td><td>" + bufQty(r.ready_warehouse) + "</td><td>" + bufQty(r.delivered) + "</td><td>" + status + "</td><td>" + bufText(sales, failed) + "</td><td><button type=\"button\" class=\"btn sm\" data-ops=\"buf-open\" data-jid=\"" + escapeHtml(r.job_id) + "\" data-so=\"" + escapeHtml(r.accurate_so_number) + "\" data-branch=\"" + escapeHtml(r.branch_id) + "\" data-cust=\"" + escapeHtml(r.customer_name || "") + "\">ⓘ Detail</button></td></tr>";
+      }).join("") + "</tbody></table></div>" +
+      "<small>" + d.items.length + " baris dari " + d.total + " item buffer · halaman " + d.page + (d.page > 1 ? " <button type=\"button\" class=\"btn sm\" data-ops=\"buf-prev\">Sebelumnya</button>" : "") + (d.has_more ? " <button type=\"button\" class=\"btn sm\" data-ops=\"buf-next\">Berikutnya</button>" : "") + "</small>";
+    return h("Monitoring Buffer Stock", "Penanda buffer resmi dari job V3 / detail Accurate") +
+      "<div class=\"flat-notice\">Hanya PO dengan flag Buffer Stock aktif. Qty dihitung dari event produksi V3 (gesut, packing, loading, POD); data tanpa sumber resmi tampil Belum terverifikasi. Buffer tidak menambah qty SO atau stok Accurate.</div>" + body;
+  });
+
+  // Monitoring Penerimaan (operasional): daftar resmi lintas PO dari
+  // GET /production/jobs/payment/receipts. Tidak ada fixture/peran demo/simulasi.
+  const rm = { q: "", paymentStatus: "", receiptStatus: "", receipts: "", page: 1, pageSize: 25, data: null, loading: false, error: "", stale: true, detail: null };
+  const RM_PAY = { approved: ["APPROVED", "Disetujui (terverifikasi)"], bypassed: ["BYPASSED", "Bypass berwenang"], pending: ["PENDING", "Belum terverifikasi"] };
+  function rmAmount(v) {
+    if (v == null || v === "") return "Belum terverifikasi";
+    const n = Number(v);
+    return Number.isFinite(n) ? "Rp " + n.toLocaleString("id-ID") : "Belum terverifikasi";
+  }
+  function unsyncedHtml() {
+    if (opsStale("unsynced") && !ops.err.unsynced) opsLoad("unsynced", "/production/ops/payment/unsynced?page=1&limit=50", function (d) { ops.unsynced = d; });
+    const d = ops.unsynced;
+    let inner;
+    if (ops.err.unsynced) inner = escapeHtml(ops.err.unsynced);
+    else if (!d) inner = "Memuat PO Accurate tanpa job V3...";
+    else if (!d.items.length) inner = "Tidak ada PO Accurate tanpa job V3 pada halaman ini.";
+    else inner = "<ul>" + d.items.map(function (i) { return "<li><b>" + escapeHtml(i.po_number) + "</b> · " + escapeHtml(i.customer_name || "Belum terverifikasi") + " · cabang " + escapeHtml(i.branch_id || "Belum terverifikasi") + " · belum ada penerimaan tercatat</li>"; }).join("") + "</ul>";
+    return '<section class="flat-notice" id="v3-rm-unsynced"><b>PO Accurate tanpa job V3 (hanya baca)</b><br>' + inner + "</section>";
+  }
+  async function rmLoad() {
+    if (rm.loading) return;
+    rm.loading = true; rm.error = "";
+    const params = new URLSearchParams({ page: String(rm.page), page_size: String(rm.pageSize) });
+    if (rm.q) params.set("q", rm.q);
+    if (rm.paymentStatus) params.set("payment_status", rm.paymentStatus);
+    if (rm.receiptStatus) params.set("receipt_status", rm.receiptStatus);
+    if (rm.receipts) params.set("receipts", rm.receipts);
+    try {
+      rm.data = await request(API + "/production/jobs/payment/receipts?" + params.toString());
+      rm.stale = false;
+    } catch (err) {
+      rm.data = null; rm.error = String((err && err.message) || "Gagal memuat penerimaan");
+      rm.stale = false;
+    }
+    rm.loading = false;
+    if (typeof window.render === "function") window.render();
+  }
+  function rmRowHtml(r) {
+    const pay = RM_PAY[r.payment_status] || RM_PAY.pending;
+    const latest = r.receipts && r.receipts[0];
+    const none = !r.receipt_count;
+    const ref = none
+      ? "<span class=\"muted\">Belum ada penerimaan</span>"
+      : escapeHtml(latest.accurate_receipt_number || latest.accurate_receipt_id) + "<br><small>" + escapeHtml(r.receipt_count) + " penerimaan</small>";
+    const amount = none ? "Belum ada penerimaan" : rmAmount(r.verified_amount);
+    const evidence = none ? "—" : latest.evidence_verified ? "Evidence terverifikasi" : "Evidence belum terverifikasi";
+    return "<tr><td><b>" + escapeHtml(r.so_number) + "</b><br><small>" + escapeHtml(r.branch_id) + "</small></td>" +
+      "<td>" + escapeHtml(r.customer_name || "Belum terverifikasi") + "</td><td>" + ref + "</td>" +
+      "<td>" + escapeHtml(amount) + "</td><td>" + evidence + "</td>" +
+      "<td><span class=\"tag v165-status--" + (pay[0] === "APPROVED" ? "done" : pay[0] === "PENDING" ? "pending" : "process") + "\">" + pay[1] + "</span>" + (r.bypass_active ? "<br><small>Bypass aktif</small>" : "") + "</td>" +
+      "<td>" + (none ? "" : "<button type=\"button\" class=\"btn sm\" data-rm=\"detail\" data-jid=\"" + escapeHtml(r.job_id) + "\">Detail</button> ") +
+      "<button type=\"button\" class=\"btn sm\" data-rm=\"open\" data-jid=\"" + escapeHtml(r.job_id) + "\">Buka PO &amp; Payment</button></td></tr>";
+  }
+  async function rmOpen(jobId) {
+    const row = rm.data && rm.data.items.find(function (x) { return x.job_id === jobId; });
+    if (!row) return;
+    return rmOpenRow(row);
+  }
+  async function rmOpenRow(row) {
+    const so = row.so_number;
+    if (!orderBySo(so)) {
+      monitorOrders[so] = { id: so, name: row.customer_name || "", branch: row.branch_id || "", qty: "", sourceLines: [], v3Monitor: true };
+      try {
+        applyDetailToOrder(so, await fetchOrderDetail(so));
+      } catch (err) {
+        monitorOrders[so].accurateDetailNote = "Detail Accurate tidak tersedia: " + String((err && err.message) || "gagal dimuat");
+      }
+    }
+    try {
+      jobCache[so] = { id: row.job_id, accurate_so_number: so, branch_id: row.branch_id };
+      delete boardCache[so];
+      await loadBoard(so, true);
+    } catch (err) {
+      delete jobCache[so];
+      toast((err && err.message) || "Gagal memuat job");
+      return;
+    }
+    if (!boardCache[so]) { toast("Detail Payment tidak dapat dimuat"); return; }
+    renderWorkflowDrawer(so);
+  }
+  function rmView() {
+    const h = typeof window.heading === "function" ? window.heading : function (t, d) { return "<h1>" + t + "</h1><p>" + d + "</p>"; };
+    if (rm.stale && !rm.loading) setTimeout(rmLoad, 0);
+    const d = rm.data;
+    const sel = function (id, label, cur, opts) {
+      return "<label>" + label + " <select id=\"" + id + "\">" + opts.map(function (o) { return "<option value=\"" + o[0] + "\"" + (cur === o[0] ? " selected" : "") + ">" + o[1] + "</option>"; }).join("") + "</select></label>";
+    };
+    let body;
+    if (rm.loading && !d) body = "<div class=\"flat-notice\" role=\"status\">Memuat monitoring pembayaran…</div>";
+    else if (rm.error) body = "<div class=\"flat-notice\" role=\"alert\"><b>Gagal memuat:</b> " + escapeHtml(rm.error) + " <button type=\"button\" class=\"btn sm\" data-rm=\"reload\">Coba lagi</button></div>";
+    else if (!d || !d.items.length) body = "<div class=\"flat-notice\">Tidak ada PO sesuai filter. PO muncul setelah job V3 dibuat dari Inbox/Tugas Tim.</div>";
+    else body = "<div class=\"v36-table-container\"><table class=\"v36-table\"><thead><tr><th>No. PO</th><th>Pelanggan</th><th>Referensi penerimaan</th><th>Nominal terverifikasi</th><th>Evidence</th><th>Status pembayaran</th><th>Aksi</th></tr></thead><tbody>" + d.items.map(rmRowHtml).join("") + "</tbody></table></div>" +
+      "<div class=\"row\"><button type=\"button\" class=\"btn sm\" data-rm=\"prev\"" + (rm.page <= 1 ? " disabled" : "") + ">‹ Sebelumnya</button><span>Halaman " + d.page + " · " + d.total + " PO</span><button type=\"button\" class=\"btn sm\" data-rm=\"next\"" + (d.has_more ? "" : " disabled") + ">Berikutnya ›</button></div>";
+    let detail = "";
+    if (rm.detail && d) {
+      const r = d.items.find(function (x) { return x.job_id === rm.detail; });
+      if (r) detail = "<section class=\"flat-notice\" id=\"v3-rm-detail\"><b>Penerimaan " + escapeHtml(r.so_number) + " · cabang " + escapeHtml(r.branch_id) + "</b><ul>" +
+        r.receipts.map(function (x) { return "<li>#" + escapeHtml(x.receipt_id) + " · " + escapeHtml(x.accurate_receipt_number || x.accurate_receipt_id) + " (ID " + escapeHtml(x.accurate_receipt_id) + ") · " + escapeHtml(rmAmount(x.amount)) + " · " + escapeHtml(x.receipt_status) + " · evidence " + (x.evidence_verified ? "terverifikasi" : "belum terverifikasi") + " · " + escapeHtml(x.recorded_at || "Belum terverifikasi") + "</li>"; }).join("") +
+        "</ul><small>Revalidasi, invalidasi, dan bypass tersedia pada panel Payment (Buka PO &amp; Payment).</small></section>";
+    }
+    return h("Monitoring Penerimaan Penjualan", "Status pembayaran resmi dari backend Payment Gate; tidak ada simulasi.") +
+      "<div class=\"flat-notice\" id=\"v3-rm-coverage\"><b>Cakupan:</b> hanya PO yang sudah menjadi job V3 (dibuka dari Inbox/Tugas Tim). PO Accurate yang belum menjadi job V3 dicantumkan terpisah di bagian bawah (tanpa membuat job). \"Disetujui\" berarti ada receipt valid dengan evidence terverifikasi; ini bukan penanda lunas (nilai PO tidak dibandingkan). Receipt dibatalkan/reversed tidak dihitung.</div>" +
+      "<form class=\"v36-toolbar\" id=\"v3-rm-form\"><label class=\"v36-search\"><span>⌕</span><input id=\"v3-rm-q\" aria-label=\"Cari PO atau penerimaan\" placeholder=\"No. PO / pelanggan / receipt\" value=\"" + escapeHtml(rm.q) + "\"></label>" +
+      sel("v3-rm-pay", "Status pembayaran", rm.paymentStatus, [["", "Semua"], ["approved", "Disetujui"], ["bypassed", "Bypass"], ["pending", "Belum terverifikasi"]]) +
+      sel("v3-rm-has", "Penerimaan", rm.receipts, [["", "Semua"], ["with", "Sudah ada"], ["without", "Belum ada"]]) +
+      sel("v3-rm-rs", "Status receipt", rm.receiptStatus, [["", "Semua"], ["valid", "Valid"], ["invalidated", "Dibatalkan"], ["reversed", "Reversed"]]) +
+      "<button type=\"submit\" class=\"btn sm\">Terapkan</button></form>" + body + detail + unsyncedHtml();
+  }
+  if (typeof window.v36ReceiptView === "function") {
+    const demoReceiptView = window.v36ReceiptView;
+    window.v36ReceiptView = function (a) {
+      return isPreviewFixture() ? demoReceiptView(a) : rmView();
+    };
+  }
+  document.addEventListener("submit", function (ev) {
+    if (!ev.target || ev.target.id !== "v3-rm-form") return;
+    ev.preventDefault();
+    rm.q = document.getElementById("v3-rm-q").value.trim();
+    rm.paymentStatus = document.getElementById("v3-rm-pay").value;
+    rm.receiptStatus = document.getElementById("v3-rm-rs").value;
+    rm.receipts = document.getElementById("v3-rm-has").value;
+    rm.page = 1; rm.detail = null; rm.stale = true;
+    if (typeof window.render === "function") window.render();
+  });
+  document.addEventListener("click", function (ev) {
+    const t = ev.target && ev.target.closest ? ev.target.closest("[data-rm]") : null;
+    if (!t) return;
+    const act = t.getAttribute("data-rm");
+    if (act === "prev" && rm.page > 1) { rm.page--; rm.stale = true; rm.detail = null; }
+    else if (act === "next") { rm.page++; rm.stale = true; rm.detail = null; }
+    else if (act === "reload") { rm.stale = true; }
+    else if (act === "detail") { rm.detail = Number(t.getAttribute("data-jid")); }
+    else if (act === "open") { rmOpen(Number(t.getAttribute("data-jid"))); return; }
+    else return;
+    if (typeof window.render === "function") window.render();
+  });
+  window.v3PaymentMonitorRefresh = function () { rm.stale = true; };
+
   (async function bootLive() {
     clearGhosts();
+    if (!isPreviewFixture()) await probeBackendHealth();
     const ok = await verifySession();
     if (!ok) {
       if (typeof window.render === "function") window.render();

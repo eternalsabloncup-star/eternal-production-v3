@@ -276,7 +276,11 @@ async def test_nonprint_keeps_design_exception(case):
         session.add(JobLineQty(job_id=job.id, so_line_id="line-1", po_qty=10,
                                production_process="non_print"))
         await session.commit()
-    assert (await schedule(case)).job_id == case[1]
+        await session.refresh(job)
+        await engine.gates_open_for_schedule(job, session)
+    with pytest.raises(HTTPException) as exc:
+        await schedule(case)
+    assert exc.value.status_code == 409 and "non-print" in str(exc.value.detail)
 
 
 async def test_invalidation_serializes_stale_schedule_and_preserves_gate(case):

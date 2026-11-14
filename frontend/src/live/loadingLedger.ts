@@ -1,4 +1,4 @@
-/** Loading ledger helpers — SJ-line authority; Packing is monitoring only. */
+/** Loading ledger helpers — SJ-line authority; Loading is capped by packing-verified qty and SJ-line remaining. */
 
 export type LoadingLedgerEvent = {
   id: number;

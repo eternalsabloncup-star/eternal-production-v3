@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -93,6 +93,7 @@ class AssignmentBody(BaseModel):
     qty_planned: Decimal
     location_provenance: str | None = None
     note: str | None = None
+    operator_user_id: int | None = None
 
 
 class TransferBody(BaseModel):
@@ -100,6 +101,7 @@ class TransferBody(BaseModel):
     machine_name: str
     work_date: date
     reason: str
+    operator_user_id: int | None = None
 
 
 class SampleUploadBody(BaseModel):
@@ -150,11 +152,21 @@ class LoadingBody(BaseModel):
     evidence_ref: str | None = None
 
 
+class PodLineBody(BaseModel):
+    """Actual received qty for one SJ line. Never a share of the document qty."""
+
+    accurate_sj_line_id: str
+    so_line_id: str
+    qty_physical: Decimal
+
+
 class PodBody(BaseModel):
     accurate_sj_id: str
     qty_physical: Decimal
     idempotency_key: str = Field(min_length=8, max_length=120)
     receiver_name: str
+    # Absent: POD stays an SJ total. Present: official per-line receipt, sum must match qty_physical.
+    lines: list[PodLineBody] | None = None
     # Four distinct ProductionAttachment ids — required for compliant POD.
     attachment_pod_photo_1: int
     attachment_pod_photo_2: int
@@ -267,6 +279,25 @@ async def evidence_capability(
 
     _ = user
     return cap()
+
+
+@router.get("/payment/receipts")
+async def payment_receipts_list(
+    q: str | None = None,
+    payment_status: str | None = Query(None, pattern="^(approved|bypassed|pending)$"),
+    receipt_status: str | None = Query(None, pattern="^(valid|invalidated|reversed)$"),
+    receipts: str | None = Query(None, pattern="^(with|without)$"),
+    branch: str | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(25, ge=1, le=100),
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_permissions(P.JOB_READ)),
+):
+    """Official per-PO payment monitor, with or without receipts (read-only, branch scoped)."""
+    return await engine.list_payment_receipts(
+        session, user, q=q, payment_status=payment_status, receipt_status=receipt_status,
+        receipts=receipts, branch=branch, page=page, page_size=page_size,
+    )
 
 
 class TeamTaskSyncLine(BaseModel):
@@ -578,6 +609,7 @@ async def schedule_create(
         qty_planned=body.qty_planned,
         location_provenance=body.location_provenance,
         note=body.note,
+        operator_user_id=body.operator_user_id,
     )
     return {"id": row.id, "status": row.status, "qty_planned": str(row.qty_planned)}
 
@@ -614,6 +646,7 @@ async def schedule_transfer(
         machine_name=body.machine_name,
         work_date=body.work_date,
         reason=body.reason,
+        operator_user_id=body.operator_user_id,
     )
     return {"id": row.id, "status": row.status, "qty_planned": str(row.qty_planned)}
 
@@ -1009,6 +1042,7 @@ async def pod_record(
         idempotency_key=body.idempotency_key,
         receiver_name=body.receiver_name,
         evidence_ref=body.evidence_ref,
+        lines=[line.model_dump() for line in body.lines] if body.lines else None,
         attachment_ids={
             "pod_photo_1": body.attachment_pod_photo_1,
             "pod_photo_2": body.attachment_pod_photo_2,

@@ -4,7 +4,8 @@ export type OfficialTaskState =
   | "pending"
   | "blocked"
   | "actionable"
-  | "done";
+  | "done"
+  | "partial";
 
 export type OfficialTask = {
   id: string;
@@ -25,11 +26,12 @@ export type OfficialTask = {
   processing_status?: string;
 };
 
-export type UiTaskStatus = "Siap" | "Menunggu" | "Selesai";
+export type UiTaskStatus = "Siap" | "Menunggu" | "Selesai" | "Loading Parsial";
 
 export function officialStateToUi(state: OfficialTaskState): UiTaskStatus {
   if (state === "done") return "Selesai";
   if (state === "actionable") return "Siap";
+  if (state === "partial") return "Loading Parsial";
   return "Menunggu";
 }
 
