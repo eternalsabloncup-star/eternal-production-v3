@@ -57,6 +57,7 @@ seams() {
   require_root() { :; }
   require_run_user() { :; }
   user_can_write() { [[ -w "$1" ]]; }
+  user_can_read() { [[ -r "$1" && -x "$(dirname "$1")" ]]; }
   list_listening_postmasters() {
     printf 'ci 101 postgres 5433 %s 0::/epv3-ci.slice/postgres.service\n' "$STATE_CI_DATA"
     printf 'live 202 postgres 5432 /var/lib/postgresql/16/main 0::/system.slice/postgresql.service\n'
@@ -157,6 +158,7 @@ prepare_then_run() {
   [[ "$(awk -F= '$1=="TREE"{print $2}' "$MANIFEST")" == "$TARGET_TREE" ]]
   [[ "$(awk -F= '$1=="CREATEDB"{print $2}' "$MANIFEST")" == "t" ]]
   [[ "$(awk -F= '$1=="SUPERUSER"{print $2}' "$MANIFEST")" == "f" ]]
+  [[ "$(awk -F= '$1=="PREPARE_RESULT"{print $2}' "$MANIFEST")" == "PASS" ]]
   [[ "$(grep -c 'ALTER ROLE' "$PEER_LOG")" -eq 1 ]]
   [[ "$(grep -c 5432 "$PEER_LOG")" -eq 0 ]]
   out="$(cmd_prepare)"
@@ -359,6 +361,92 @@ firewall_deletes_only_own_rules() {
   ! grep -q 'find "$ROOT"' "$CLI"
 }
 
+prepare_permission_denied_is_fail() {
+  source_cli
+  eval "$(declare -f prepare_python | sed '1s/prepare_python/prepare_python_real/')"
+  eval "$(declare -f run_limited | sed '1s/run_limited/run_limited_real/')"
+  new_repo
+  seams
+  prepare_python() { prepare_python_real "$@"; }
+  run_limited() { run_limited_real "$@"; }
+  mkdir -p "$VENV/bin" "$VENV_GW/bin"
+  printf '#!/bin/sh\nexit 0\n' > "$VENV/bin/python"
+  printf '#!/bin/sh\nexit 0\n' > "$VENV_GW/bin/python"
+  chmod 0755 "$VENV/bin/python" "$VENV_GW/bin/python"
+  OWN_LOG="$WORK/own.log"
+  : > "$OWN_LOG"
+  own() { printf '%s\n' "$*" >> "$OWN_LOG"; }
+  STATE_NODE_BIN=/usr/bin/node
+  id() {
+    case "$1" in
+      -u|-g) printf '1000\n' ;;
+      *) command id "$@" ;;
+    esac
+  }
+  systemd-run() { return 126; }
+  systemctl() {
+    case "$1" in
+      is-active) return 1 ;;
+      show) printf 'exit-code\n' ;;
+      *) return 0 ;;
+    esac
+  }
+  umask 077
+  mkdir -p "$ROOT/jobs"
+  chmod 0700 "$ROOT/jobs"
+  rm -rf "$REPORT_DIR"
+  set +e
+  local out rc
+  out="$(cmd_prepare 2>&1)"
+  rc=$?
+  set -e
+  [[ "$rc" -eq 126 ]]
+  [[ "$out" == *"PREPARE=FAIL"* ]]
+  [[ "$out" == *"EXIT=126"* ]]
+  [[ "$out" != *"PREPARE=PASS"* ]]
+  [[ ! -e "$MANIFEST" ]]
+  [[ "$(stat -c %a "$ROOT/jobs")" == "750" ]]
+  [[ "$(stat -c %a "$ROOT/jobs/prepare-python.sh")" == "750" ]]
+  [[ -r "$ROOT/jobs/prepare-python.sh" && -x "$ROOT/jobs" ]]
+  grep -qx "$RUN_USER:$RUN_USER $ROOT/jobs" "$OWN_LOG"
+  grep -qx "$RUN_USER:$RUN_USER $ROOT/jobs/prepare-python.sh" "$OWN_LOG"
+  [[ -d "$REPORT_DIR" && -f "$REPORT_DIR/jobs.tsv" ]]
+  grep -qx 'prepare-python 126' "$REPORT_DIR/jobs.tsv"
+  rm -rf "$REPORT_DIR"
+  local direct=0
+  run_limited prepare-python "$ROOT/jobs/prepare-python.sh" || direct=$?
+  [[ "$direct" -eq 126 ]]
+  [[ -f "$REPORT_DIR/jobs.tsv" ]]
+  case $- in
+    *e*) ;;
+    *) return 1 ;;
+  esac
+  printf 'probe\n' > "$ROOT/jobs/tcp_probe.py"
+  install_job_file "$ROOT/jobs/tcp_probe.py" 0640
+  [[ "$(stat -c %a "$ROOT/jobs/tcp_probe.py")" == "640" ]]
+  grep -qx "$RUN_USER:$RUN_USER $ROOT/jobs/tcp_probe.py" "$OWN_LOG"
+  grep -q 'install_job_file "$ROOT/jobs/tcp_probe.py" 0640' "$CLI"
+  user_can_read "$ROOT/jobs/tcp_probe.py"
+}
+
+false_prepare_does_not_run() {
+  source_cli
+  new_repo
+  seams
+  cmd_prepare >/dev/null
+  sed -i '/^PREPARE_RESULT=/d' "$MANIFEST"
+  : > "$WORK/actions"
+  set +e
+  local out rc
+  out="$(cmd_run 2>&1)"
+  rc=$?
+  set -e
+  [[ "$rc" -eq 2 ]]
+  [[ "$out" == *"prepare did not succeed"* ]]
+  [[ "$out" != *"INDEPENDENT_CI=PASS"* && "$out" != *"PREPARE=PASS"* ]]
+  ! grep -q port-block "$WORK/actions"
+}
+
 installer_cases() {
   local dest
   dest="$(mktemp -d)"
@@ -386,6 +474,8 @@ run_case "dirty tree stops" dirty_tree_stops
 run_case "executable ignores override env and stays closed" binary_fail_closed
 run_case "archive without .git still matches the pinned tree" archive_without_git
 run_case "firewall cleanup deletes only its own rules" firewall_deletes_only_own_rules
+run_case "permission denied is PREPARE=FAIL without a success manifest" prepare_permission_denied_is_fail
+run_case "run rejects a prepare manifest that did not succeed" false_prepare_does_not_run
 run_case "installer is idempotent and refuses /opt/epv3" installer_cases
 
 printf 'TEST_PASS=%s\nTEST_FAIL=%s\n' "$PASS" "$FAIL"

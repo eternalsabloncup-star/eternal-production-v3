@@ -349,6 +349,23 @@ own() {
   chown "$@"
 }
 
+ensure_jobs_dir() {
+  mkdir -p "$ROOT/jobs"
+  own "$RUN_USER:$RUN_USER" "$ROOT/jobs"
+  chmod 0750 "$ROOT/jobs"
+}
+
+install_job_file() {
+  local path="$1" mode="$2"
+  ensure_jobs_dir
+  own "$RUN_USER:$RUN_USER" "$path"
+  chmod "$mode" "$path"
+}
+
+user_can_read() {
+  runuser -u "$RUN_USER" -- test -r "$1" && runuser -u "$RUN_USER" -- test -x "$(dirname "$1")"
+}
+
 grant_createdb() {
   [[ "$ROLE" =~ ^[a-z_][a-z0-9_]*$ ]] || die "refusing role name"
   local peer_dir
@@ -460,6 +477,7 @@ ENV_FILE=$ENV_FILE
 VENV=$VENV
 VENV_GATEWAY=$VENV_GW
 LIVE_CHANGES=none
+PREPARE_RESULT=PASS
 EOF
   chmod 0644 "$MANIFEST"
   echo "PREPARE=PASS"
@@ -467,7 +485,8 @@ EOF
 }
 
 prepare_python() {
-  mkdir -p "$HOME_CI" "$ROOT/jobs"
+  local rc=0
+  mkdir -p "$HOME_CI"
   own "$RUN_USER:$RUN_USER" "$HOME_CI"
   if [[ ! -x "$VENV/bin/python" ]]; then
     runuser -u "$RUN_USER" -- python3.12 -m venv "$VENV"
@@ -475,6 +494,7 @@ prepare_python() {
   if [[ ! -x "$VENV_GW/bin/python" ]]; then
     runuser -u "$RUN_USER" -- python3.12 -m venv "$VENV_GW"
   fi
+  ensure_jobs_dir
   cat > "$ROOT/jobs/prepare-python.sh" << EOF
 set -euo pipefail
 set +x
@@ -483,9 +503,10 @@ set +x
 "$VENV_GW/bin/python" -m pip install --upgrade pip
 "$VENV_GW/bin/python" -m pip install -r "$SRC/accurate-gateway/requirements.txt"
 EOF
-  own "$RUN_USER:$RUN_USER" "$ROOT/jobs/prepare-python.sh"
-  chmod 0750 "$ROOT/jobs/prepare-python.sh"
-  run_limited prepare-python "$ROOT/jobs/prepare-python.sh"
+  install_job_file "$ROOT/jobs/prepare-python.sh" 0750
+  user_can_read "$ROOT/jobs/prepare-python.sh" || return 126
+  run_limited prepare-python "$ROOT/jobs/prepare-python.sh" || rc=$?
+  return "$rc"
 }
 
 cmd_prepare() {
@@ -494,13 +515,19 @@ cmd_prepare() {
   load_state
   local reason
   reason="$(decide)" || die "$reason"
+  rm -f "$MANIFEST"
   grant_createdb
   user_can_write "$ROOT" || die "$RUN_USER cannot write $ROOT"
   user_can_write "$SRC/backend" || die "$RUN_USER cannot write the backend tree"
   user_can_write "$SRC/frontend" || die "$RUN_USER cannot write the frontend tree"
   user_can_write "$SRC/accurate-gateway" || die "$RUN_USER cannot write the gateway tree"
   write_env
-  prepare_python
+  local rc=0
+  prepare_python || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    printf 'PREPARE=FAIL\nEXIT=%s\n' "$rc"
+    exit "$rc"
+  fi
   write_manifest
 }
 
@@ -510,6 +537,7 @@ manifest_value() {
 
 require_manifest() {
   [[ -f "$MANIFEST" ]] || die "prepare manifest is missing; run epv3-ci prepare"
+  [[ "$(manifest_value PREPARE_RESULT)" == "PASS" ]] || die "prepare did not succeed"
   [[ "$(manifest_value SHA)" == "$TARGET_SHA" ]] || die "manifest SHA does not match"
   [[ "$(manifest_value TREE)" == "$TARGET_TREE" ]] || die "manifest tree does not match the pinned source"
   [[ "$STATE_TREE" == "$TARGET_TREE" && "$STATE_HEAD" == "$TARGET_SHA" ]] || die "source changed after prepare"
@@ -552,8 +580,10 @@ stop_monitor() {
 }
 
 run_limited() {
-  local name="$1" script="$2" unit runpid rc result
+  local name="$1" script="$2" unit runpid rc result errexit=0
+  [[ $- == *e* ]] && errexit=1
   unit="epv3-ci-${name}"
+  mkdir -p "$REPORT_DIR"
   systemctl reset-failed "$unit" >/dev/null 2>&1 || true
   rm -f "$REPORT_DIR/resource.fail"
   set +e
@@ -587,14 +617,16 @@ run_limited() {
   if [[ -f "$REPORT_DIR/resource.fail" || "$rc" -eq 137 || "$result" == "oom-kill" ]]; then
     RESOURCE_FAIL=1
     echo "$name resource_limit" >> "$REPORT_DIR/jobs.tsv"
-    return 1
+    rc=1
+  else
+    echo "$name $rc" >> "$REPORT_DIR/jobs.tsv"
   fi
-  echo "$name $rc" >> "$REPORT_DIR/jobs.tsv"
+  [[ "$errexit" -eq 1 ]] && set -e
   return "$rc"
 }
 
 write_redactor() {
-  mkdir -p "$ROOT/jobs"
+  ensure_jobs_dir
   cat > "$ROOT/jobs/redact.py" << 'PY'
 import sys
 from pathlib import Path
@@ -619,7 +651,7 @@ PY
 }
 
 write_run_scripts() {
-  mkdir -p "$ROOT/jobs"
+  ensure_jobs_dir
   cat > "$ROOT/jobs/backend.sh" << EOF
 set -euo pipefail
 set +x
@@ -671,8 +703,12 @@ export GATEWAY_M2M_TOKEN=ci-gateway-m2m-token
 cd "$SRC/accurate-gateway"
 "$VENV_GW/bin/python" -m pytest -q
 EOF
-  own "$RUN_USER:$RUN_USER" "$ROOT/jobs/backend.sh" "$ROOT/jobs/frontend.sh" "$ROOT/jobs/gateway.sh"
-  chmod 0750 "$ROOT/jobs/backend.sh" "$ROOT/jobs/frontend.sh" "$ROOT/jobs/gateway.sh"
+  install_job_file "$ROOT/jobs/backend.sh" 0750
+  install_job_file "$ROOT/jobs/frontend.sh" 0750
+  install_job_file "$ROOT/jobs/gateway.sh" 0750
+  user_can_read "$ROOT/jobs/backend.sh" || die "test user cannot read backend.sh"
+  user_can_read "$ROOT/jobs/frontend.sh" || die "test user cannot read frontend.sh"
+  user_can_read "$ROOT/jobs/gateway.sh" || die "test user cannot read gateway.sh"
 }
 
 tcp_state() {
@@ -744,6 +780,7 @@ add_nft_rule() {
 prove_port_block() {
   local uid port before after state
   uid="$(id -u "$RUN_USER")"
+  ensure_jobs_dir
   cat > "$ROOT/jobs/tcp_probe.py" << 'PY'
 import socket, sys
 host, port = sys.argv[1], int(sys.argv[2])
@@ -778,7 +815,9 @@ while time.time() < deadline:
     client.close()
 print(f"accepted {accepted}", flush=True)
 PY
-  chmod 0755 "$ROOT/jobs/tcp_probe.py" "$ROOT/jobs/tcp_listen.py"
+  install_job_file "$ROOT/jobs/tcp_probe.py" 0640
+  install_job_file "$ROOT/jobs/tcp_listen.py" 0640
+  user_can_read "$ROOT/jobs/tcp_probe.py" || die "test user cannot read tcp_probe.py"
   CONTROL_PORT=""
   for port in 15999 15998 15997 15996 15995; do
     if python3 -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
