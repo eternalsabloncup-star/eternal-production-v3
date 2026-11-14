@@ -31,14 +31,28 @@ Direktur. Masing-masing langkah memerlukan persetujuan eksplisit.
 **Tidak diubah:** workflow bisnis, gate Payment/Desain/SoD, password hash, ERP V1/V2,
 hak istimewa grup Direktur (tetap Full Access), tombol/menu yang sudah ada.
 
+## Keputusan Owner (terkunci — 2026-11-14)
+
+1. DIREKTUR_ETERNAL (grup sistem `director`) = Full Access seluruh modul/cabang.
+2. Karyawan = grup/jabatan + cabang yang ditentukan Direktur.
+3. Pengguna baru = MANUAL lewat Pengaturan.
+4. Tidak ada auto-user, auto-import grant, atau permission otomatis ke akun lama.
+5. Grup / permission / keanggotaan / cakupan cabang = manual di Pengaturan.
+6. Perubahan permission wajib AccessAudit dan terlihat Direktur.
+7. Akun lama tidak dinonaktifkan/diubah diam-diam.
+
+Tiga privilege legacy yang tetap ditampilkan (dampak + rekomendasi di
+`GET /settings/authorization-status` → `mapping_review_required`):
+`production.job.read`, `production.delivery.manage`, `production.tracking.read`
+— status Owner: **manual_only_no_auto_import**.
+
 ## Penghambat aktivasi (wajib clear sebelum cutover)
 
 1. Inventory read-only belum `cutover_review_clear` (narrowing / unknown / unresolved).
-2. Keputusan Owner untuk tiga privilege `MAPPING_REVIEW_REQUIRED`.
-3. Grant manual untuk akun operasional (tanpa grant → 403 di `enforced`).
-4. Bootstrap Direktur belum selesai.
-5. `V3_WORKFLOW_ENFORCED_APPROVAL_REF` belum diisi (produksi).
-6. Persetujuan Direktur terpisah untuk merge dan untuk deploy.
+2. Grant manual untuk grup operasional (tiga bundle di atas tidak di-import otomatis).
+3. Bootstrap Direktur (DIREKTUR_ETERNAL) belum selesai.
+4. `V3_WORKFLOW_ENFORCED_APPROVAL_REF` belum diisi (produksi).
+5. Persetujuan Direktur terpisah untuk merge dan untuk deploy.
 
 Selama penghambat ada: **jangan** paksa aktivasi. Tampilkan status ke Direktur
 via Pengaturan → status otorisasi / `authorization-status`.

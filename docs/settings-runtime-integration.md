@@ -160,20 +160,21 @@ unknown permission or unresolved mapping (`job.read`, `delivery.manage`,
    (manual grants), never by automatic import.
 Director widening is expected by policy and not blocking.
 
-### Mapping decisions required from Owner (no mapping below is applied)
+### Mapping decisions (Owner 2026-11-14) — no auto-import
 
-These three legacy permissions bundle several granular capabilities. The
-"proposed" column is a candidate only; automatic import stays disabled and the
-inventory reports every holder as blocking until Owner decides.
+Owner locked policy: Direktur Full Access; karyawan via grup/cabang; pengguna &
+grant MANUAL; tidak ada auto-import; audit trail wajib; akun lama tidak diubah
+diam-diam. The three legacy bundles below stay **manual_only_no_auto_import**.
 
-| Legacy privilege | Granular capabilities it covers today (code) | Sensitive data reachable | Proposed scope (candidate) | Narrowing / widening risk | Owner decision |
-|---|---|---|---|---|---|
-| `production.job.read` | `job.read`, `job.board.read`, `task.read`; engine also lets it reach `loading.authority.read` and `attachment.delivery.read` (list/download) | Board: payment receipts, bypass reasons, events, prep events, evidence refs, design reasons/file names (field-gated by `payment.evidence.read` / `audit.production.read`); SJ loading authority; delivery attachment bytes | `job.read` + `task.read` per branch; `job.board.read` per branch; evidence/audit/attachment/loading-authority stay manual-only | Narrowing: holders lose attachment download, loading authority and sensitive board fields unless granted. Widening: none if manual-only is kept | Which holders keep board/attachment/authority access; per-branch only? |
-| `production.delivery.manage` | `loading.record`, `loading.cancel_confirmation`, `delivery.pod.record`, `delivery.sj.cancel_local`; also `attachment.delivery.create` and (OR rule) `attachment.delivery.read` | POD/return photos, SJ identifiers, delivery attachments | One grant per action, branch-scoped; attachment create/read manual-only; consider `own` ownership for courier/loading roles | Narrowing: attachment read and cancel actions need separate grants. Widening: a bundle holder would receive nothing automatically (no auto-import) | Which roles get cancel/`sj_cancel`; attachment read for couriers? |
-| `production.tracking.read` | `tracking.read`, `tracking.link.create` | Tracking event fields; creating a live customer tracking link (token handed to a customer) | `tracking.read` per branch; `tracking.link.create` separate and manual (externally shareable) | Narrowing: link creation lost unless granted. Widening: none | Is link creation a separate approval-level capability? Which event fields are visible? |
+| Legacy privilege | Dampak jika enforced tanpa grant granular | Rekomendasi | Owner decision |
+|---|---|---|---|
+| `production.job.read` | Hilang board sensitif / attachment / loading authority kecuali grant terpisah | Grup jabatan: `job.read`+`task.read` (+`job.board.read`) per cabang; evidence/audit/attachment/authority manual-only | **Manual only — no auto-import** |
+| `production.delivery.manage` | Loading/POD/cancel/attachment ditolak (403) tanpa grant per tindakan | Grant per action + cabang; attachment manual-only; pertimbangkan ownership `own` untuk kurir | **Manual only — no auto-import** |
+| `production.tracking.read` | Hilang baca tracking dan/atau `tracking.link.create` | `tracking.read` per cabang; `tracking.link.create` terpisah untuk jabatan disetujui | **Manual only — no auto-import** |
 
-Open blockers: Owner-reviewed inventory of real data; mapping decisions for the
-three review-required permissions; Accurate Inbox scoped pagination scans at most `V3_INBOX_SCOPED_SCAN_MAX_PAGES`
+Open blockers before Live enforced: Owner-reviewed inventory of real data (CLI
+`python -m app.authorization.inventory`); manual grants for operational groups;
+Accurate Inbox scoped pagination scans at most `V3_INBOX_SCOPED_SCAN_MAX_PAGES`
 (default 50) upstream pages of 100 because the gateway has no branch filter; `total` is the
 user's own-branch count and only when the list was exhausted, else `null`
 (`scan_incomplete: true`); `has_more` is true only when a further visible row was found.

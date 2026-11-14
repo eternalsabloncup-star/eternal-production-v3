@@ -5,7 +5,11 @@ active mode or invents Director privileges.
 """
 from __future__ import annotations
 
-from app.authorization.catalog import MAPPING_REVIEW_REQUIRED
+from app.authorization.owner_policy import (
+    AUTOMATIC_GRANT_IMPORT_ALLOWED,
+    mapping_review_details,
+    policy_invariants,
+)
 from app.authorization.workflow_map import WORKFLOW, PAYROLL, INBOX
 
 
@@ -67,7 +71,6 @@ def authorization_status(
             "Persetujuan cutover produksi belum tercatat "
             "(V3_WORKFLOW_ENFORCED_APPROVAL_REF kosong)."
         )
-    review = sorted(MAPPING_REVIEW_REQUIRED.keys())
     if inventory_summary is not None:
         if not inventory_summary.get("cutover_review_clear"):
             blockers.append(
@@ -81,11 +84,16 @@ def authorization_status(
             )
         if inventory_summary.get("automatic_import_allowed"):
             blockers.append("automatic_import_allowed unexpectedly true — fail closed.")
+        if inventory_summary.get("automatic_import_allowed") is False:
+            pass  # expected locked policy
+    if AUTOMATIC_GRANT_IMPORT_ALLOWED:
+        blockers.append("Policy broken: automatic grant import must stay disabled.")
     mapped = len(WORKFLOW) + len(PAYROLL) + len(INBOX)
     inventory_clear = bool(
         inventory_summary and inventory_summary.get("cutover_review_clear")
         and not inventory_summary.get("automatic_import_allowed")
     )
+    reviews = mapping_review_details()
     return {
         "workflow_authorization": mode,
         "settings_enabled": settings_on,
@@ -94,15 +102,25 @@ def authorization_status(
         "enforced_approval_ref_configured": approval,
         "enforced_process_start_allowed": can_start_enforced,
         "production_endpoints_mapped": mapped,
-        "mapping_review_required": {
-            key: MAPPING_REVIEW_REQUIRED[key] for key in review
-        },
+        "mapping_review_required": reviews,
+        "owner_policy": policy_invariants(),
         "branch_management": (
             "Cabang dikelola sebagai ID eksplisit pada grant grup (bukan master cabang terpisah). "
-            "Direktur lintas cabang melalui keanggotaan grup sistem director."
+            "DIREKTUR_ETERNAL / grup sistem director: Full Access lintas cabang."
         ),
-        "automatic_grant_import": False,
+        "automatic_grant_import": AUTOMATIC_GRANT_IMPORT_ALLOWED,
         "inventory": inventory_summary,
+        "inventory_audit": {
+            "tool": "python -m app.authorization.inventory",
+            "writes_performed": False,
+            "automatic_import_allowed": AUTOMATIC_GRANT_IMPORT_ALLOWED,
+            "live_connection": False,
+            "summary": inventory_summary,
+            "conclusion": (
+                "clear" if inventory_clear else
+                ("blocked" if inventory_summary is not None else "not_run")
+            ),
+        },
         "blockers": blockers,
         "activation_recommended": bool(
             settings_on
@@ -111,15 +129,14 @@ def authorization_status(
             and inventory_clear
             and mode == "legacy"
             and not any("Inventory cutover belum clear" in b for b in blockers)
+            and not AUTOMATIC_GRANT_IMPORT_ALLOWED
         ),
         "active_now": mode == "enforced",
         "notes": [
-            "Default tetap legacy; dokumen ini tidak mengaktifkan enforced.",
-            "Aktivasi produksi memerlukan persetujuan Direktur terpisah dari merge.",
-            "Akun operasional tanpa managed grant akan ditolak di mode enforced — "
-            "selesaikan inventory/grant sebelum cutover.",
-            "Password akun tidak diubah oleh paket ini; staging_admin tidak dinonaktifkan.",
-            "Katalog mapping_review_required selalu ditampilkan untuk transparansi; "
-            "menjadi blocker hanya jika inventory menemukan unresolved pada pengguna.",
+            "Default tetap legacy; status ini tidak mengaktifkan enforced.",
+            "Aktivasi produksi memerlukan persetujuan Direktur terpisah dari merge/deploy.",
+            "Pengguna baru & grant: MANUAL oleh Direktur; akun lama tidak diubah diam-diam.",
+            "Tiga privilege mapping_review_required ditampilkan dengan dampak + rekomendasi; "
+            "tidak ada auto-import.",
         ],
     }

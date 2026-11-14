@@ -2,9 +2,17 @@
 import pytest
 from types import SimpleNamespace
 
+from app.authorization.catalog import CATALOG, MAPPING_REVIEW_REQUIRED
+from app.authorization.evaluator import Access, Resource, evaluate
 from app.authorization.mode import authorization_status, enforced_startup_allowed
+from app.authorization.owner_policy import (
+    AUTOMATIC_GRANT_IMPORT_ALLOWED,
+    MAPPING_OWNER_RESOLUTIONS,
+    policy_invariants,
+)
 from app.core.config import get_settings
 from app.main import create_app
+from tests.authorization.test_foundation import db  # noqa: F401 — required by runtime
 from tests.authorization.test_runtime import runtime, login
 
 
@@ -83,7 +91,30 @@ def test_status_never_echoes_approval_ref_and_lists_blockers():
     assert payload["production_endpoints_mapped"] == 61
     assert any("Inventory cutover belum clear" in b for b in payload["blockers"])
     assert "production.job.read" in payload["mapping_review_required"]
+    assert payload["mapping_review_required"]["production.job.read"]["impact"]
     assert payload["activation_recommended"] is False
+    assert payload["owner_policy"]["automatic_grant_import_allowed"] is False
+    assert payload["inventory_audit"]["conclusion"] == "blocked"
+
+
+def test_owner_policy_invariants_and_director_full_access():
+    assert AUTOMATIC_GRANT_IMPORT_ALLOWED is False
+    inv = policy_invariants()
+    assert inv["director_full_access"] is True
+    assert inv["manual_user_creation_only"] is True
+    assert inv["no_silent_legacy_account_mutation"] is True
+    assert set(MAPPING_REVIEW_REQUIRED) == set(MAPPING_OWNER_RESOLUTIONS)
+    for key, detail in MAPPING_OWNER_RESOLUTIONS.items():
+        assert "manual_only" in detail["status"]
+        assert detail["impact"] and detail["recommendation"] and detail["owner_decision"]
+    # Director Full Access: every catalog capability allowed across branches.
+    director = Access(user_id=1, active=True, director=True, grants=(), revision=1)
+    for code, cap in CATALOG.items():
+        resource = Resource() if cap.scope == "global" else Resource("ANY-BRANCH")
+        assert evaluate(director, code, resource).allowed, code
+    # Empty grants: non-director default deny.
+    employee = Access(user_id=3, active=True, director=False, grants=(), revision=1)
+    assert evaluate(employee, "job.read", Resource("A")).allowed is False
 
 
 def test_create_app_still_defaults_to_legacy(monkeypatch):
@@ -127,3 +158,7 @@ async def test_director_status_endpoint_and_operator_denied(runtime):
     assert body["automatic_grant_import"] is False
     assert "SECRET" not in str(body)
     assert isinstance(body["blockers"], list) and body["blockers"]
+    assert body["owner_policy"]["director_full_access"] is True
+    assert set(body["mapping_review_required"]) == set(MAPPING_REVIEW_REQUIRED)
+    assert body["mapping_review_required"]["production.tracking.read"]["recommendation"]
+    assert body["inventory_audit"]["writes_performed"] is False
