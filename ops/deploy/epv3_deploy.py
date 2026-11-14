@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Eternal Production V3 dedicated deploy runner (stdlib only, on-demand CLI, no daemon).
 
-Deploys one exact, CI-green GitHub SHA that is an ancestor of main.
+Three stages: check, prepare, deploy. Deploys only the exact main SHA
+of eternalsabloncup-star/eternal-production-v3 after CI, Live, and prepare pass.
+The old prasnda21-tech path is refused. GitHub redirects are not accepted.
 Exit codes: 0 ok/dry-run, 2 refused (nothing mutated), 3 failed and rolled back,
 4 rollback failed (manual intervention), 5 unfinished journal.
 """
@@ -26,6 +28,14 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+OFFICIAL_GITHUB_REPO = "eternalsabloncup-star/eternal-production-v3"
+OLD_GITHUB_REPO = "prasnda21-tech/eternal-production-v3"
+OFFICIAL_REPO_URLS = {
+    "git@github.com:eternalsabloncup-star/eternal-production-v3.git",
+    "ssh://git@github.com/eternalsabloncup-star/eternal-production-v3.git",
+    "https://github.com/eternalsabloncup-star/eternal-production-v3.git",
+}
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 EXIT_OK, EXIT_REFUSED, EXIT_ROLLED_BACK, EXIT_ROLLBACK_FAILED, EXIT_UNFINISHED = 0, 2, 3, 4, 5
@@ -88,9 +98,28 @@ def atomic_write(path: Path, data: str | bytes, mode: int = 0o640) -> None:
 REQUIRED_COMMANDS = ["restart", "pg_dump", "pg_restore_list", "frontend_build", "db_revision"]
 
 
+def _norm_git_url(url: str) -> str:
+    return url.strip().rstrip("/")
+
+
+def repo_identity_errors(cfg: dict) -> list[str]:
+    """Refuse the transferred-away owner and any GitHub URL that is not the new repository."""
+    errs: list[str] = []
+    repo = str(cfg.get("github_repo") or "")
+    url = str(cfg.get("repo_url") or "")
+    if OLD_GITHUB_REPO in repo or OLD_GITHUB_REPO in url:
+        errs.append(f"old GitHub repository {OLD_GITHUB_REPO} is not accepted; "
+                    f"use {OFFICIAL_GITHUB_REPO} directly (redirects are not a source)")
+    github = "github.com" in url or url.startswith("git@github.com:")
+    if github and (_norm_git_url(url) not in OFFICIAL_REPO_URLS or repo != OFFICIAL_GITHUB_REPO):
+        errs.append(f"repo_url and github_repo must be {OFFICIAL_GITHUB_REPO}; redirects are not accepted")
+    return errs
+
+
 def validate_config(cfg: dict) -> list[str]:
     """Fail-closed validation: returns list of problems (empty = usable live config)."""
     errs: list[str] = []
+    errs.extend(repo_identity_errors(cfg))
     if "REPLACE_ME" in json.dumps(cfg):
         errs.append("config still contains REPLACE_ME placeholders")
     for k in ("repo_url", "github_repo", "root", "backup_dir", "components", "commands"):
@@ -154,11 +183,7 @@ class Runner:
         return [str(a).format(**kw) for a in self.cmds[key]]
 
     def git(self, *args, check=True, input_=None) -> subprocess.CompletedProcess:
-        env = {"GIT_TERMINAL_PROMPT": "0"}
-        if self.cfg.get("ssh_key"):
-            env["GIT_SSH_COMMAND"] = (f"ssh -i {self.cfg['ssh_key']} -o IdentitiesOnly=yes "
-                                      "-o StrictHostKeyChecking=yes -o BatchMode=yes")
-        return self.run(["git", f"--git-dir={self.mirror}", *args], env=env, check=check, input_=input_)
+        return self.run(["git", f"--git-dir={self.mirror}", *args], env=self.git_env(), check=check, input_=input_)
 
     @contextlib.contextmanager
     def lock(self):
@@ -206,16 +231,36 @@ class Runner:
         return json.loads(p.read_text())["sha"]
 
     # ---------- source ----------
+    def git_env(self) -> dict:
+        env = {"GIT_TERMINAL_PROMPT": "0"}
+        if self.cfg.get("ssh_key"):
+            env["GIT_SSH_COMMAND"] = (f"ssh -i {self.cfg['ssh_key']} -o IdentitiesOnly=yes "
+                                      "-o StrictHostKeyChecking=yes -o BatchMode=yes")
+        return env
+
     def fetch(self) -> None:
         if not self.mirror.exists():
             self.mirror.parent.mkdir(parents=True, exist_ok=True)
-            env = {}
-            if self.cfg.get("ssh_key"):
-                env["GIT_SSH_COMMAND"] = (f"ssh -i {self.cfg['ssh_key']} -o IdentitiesOnly=yes "
-                                          "-o StrictHostKeyChecking=yes -o BatchMode=yes")
-            self.run(["git", "clone", "--mirror", self.cfg["repo_url"], self.mirror], env=env)
+            self.run(["git", "clone", "--mirror", self.cfg["repo_url"], self.mirror], env=self.git_env())
         else:
+            origin = self.git("remote", "get-url", "origin").stdout.decode().strip()
+            if OLD_GITHUB_REPO in origin:
+                raise Refused(f"mirror origin still points at {OLD_GITHUB_REPO}; "
+                              "point it at the new repository directly (redirects are not used)")
+            if _norm_git_url(origin) != _norm_git_url(self.cfg["repo_url"]):
+                raise Refused("mirror origin URL does not match repo_url")
             self.git("remote", "update", "--prune")
+
+    def ls_remote_main(self) -> str:
+        main = self.cfg.get("main_ref", "main")
+        p = self.run(["git", "ls-remote", self.cfg["repo_url"], f"refs/heads/{main}"], env=self.git_env())
+        lines = [ln for ln in p.stdout.decode().splitlines() if ln.strip()]
+        if len(lines) != 1:
+            raise Refused(f"ls-remote did not return exactly one {main} tip")
+        sha, ref = lines[0].split()
+        if ref != f"refs/heads/{main}" or not SHA_RE.match(sha):
+            raise Refused("ls-remote returned an unexpected main ref")
+        return sha
 
     def validate_sha(self, sha: str) -> None:
         if not SHA_RE.match(sha or ""):
@@ -487,22 +532,147 @@ class Runner:
                         raise DeployFailed(f"index.html references {ref.decode()} missing from artifact")
 
     # ---------- commands ----------
+    def unfinished(self) -> int | None:
+        cur = self.load_current()
+        if cur.get("status") in ("in_progress", "rollback_failed"):
+            log(f"unfinished journal ({cur.get('status')}, id={cur.get('id')}); run `recover`")
+            return EXIT_UNFINISHED
+        return None
+
+    def check_resources(self) -> None:
+        res = self.cfg.get("resources") or {}
+        min_mem = int(res.get("min_mem_kb", 2 * 1024 * 1024))
+        min_disk = int(res.get("min_disk_bytes", 10 * 1024 * 1024 * 1024))
+        if min_mem:
+            avail = 0
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                if line.startswith("MemAvailable:"):
+                    avail = int(line.split()[1])
+            if avail < min_mem:
+                raise Refused(f"MemAvailable {avail} KiB is below {min_mem}")
+        if min_disk:
+            free = shutil.disk_usage(self.backups if self.backups.exists() else self.root).free
+            if free < min_disk:
+                raise Refused(f"free disk {free} bytes is below {min_disk}")
+
+    def check_live_health(self) -> None:
+        for name in ("backend", "gateway"):
+            url = self.comps[name]["health_url"]
+            try:
+                http_get(url, int(self.cfg.get("health_timeout", 45)))
+            except DeployFailed as e:
+                raise Refused(f"live {name} health check failed: {e}") from None
+
+    def assert_github_connection(self) -> None:
+        errs = repo_identity_errors(self.cfg)
+        if errs:
+            raise Refused("; ".join(errs))
+        url = str(self.cfg.get("repo_url") or "")
+        if "github.com" not in url and not url.startswith("git@github.com:"):
+            return
+        ci = self.cfg.get("ci", {})
+        try:
+            token = Path(ci["token_file"]).read_text().strip()
+        except (KeyError, OSError):
+            raise Refused("GitHub connection check failed: token file unreadable")
+        data = github_get(ci.get("api_base", "https://api.github.com"),
+                          f"/repos/{self.cfg['github_repo']}", token)
+        if data.get("full_name") != OFFICIAL_GITHUB_REPO:
+            raise Refused("GitHub API did not confirm eternalsabloncup-star/eternal-production-v3; "
+                          "redirects are not accepted")
+
+    def gate(self, sha: str):
+        """Read Live and GitHub. The only write is the isolated deploy mirror."""
+        self.assert_github_connection()
+        tip = self.ls_remote_main()
+        if not sha:
+            sha = tip
+        elif not SHA_RE.match(sha) or sha != tip:
+            raise Refused(f"{sha} is not the exact main SHA {tip}")
+        self.fetch()
+        main = self.cfg.get("main_ref", "main")
+        local = self.git("rev-parse", f"refs/heads/{main}").stdout.decode().strip()
+        if local != tip:
+            raise Refused("mirror main does not match ls-remote of repo_url")
+        self.validate_sha(sha)
+        self.check_ci(sha)
+        self.check_resources()
+        self.check_live_health()
+        old = self.deployed_sha()
+        plan = self.classify(old, sha)
+        if plan["blockers"]:
+            raise Refused("; ".join(plan["blockers"]))
+        self.verify_db_revision(plan["target_head"] or self.alembic_head(sha), plan["migration"])
+        self.check_drift(old, sha, plan)
+        return old, plan, sha
+
+    def check(self, sha: str) -> int:
+        with self.lock():
+            if (code := self.unfinished()) is not None:
+                return code
+            try:
+                old, plan, sha = self.gate(sha)
+            except Refused as e:
+                log(f"REFUSED: {e}")
+                return EXIT_REFUSED
+            log(f"CHECK=PASS sha={sha} prev={old[:12]} components={json.dumps(plan['components'])} "
+                f"migration={str(plan['migration']).lower()}")
+            return EXIT_OK
+
+    def prepare(self, sha: str) -> int:
+        with self.lock():
+            if (code := self.unfinished()) is not None:
+                return code
+            try:
+                old, plan, sha = self.gate(sha)
+            except Refused as e:
+                log(f"REFUSED: {e}")
+                return EXIT_REFUSED
+            if not self.yes:
+                log("PREPARE dry-run: Live, releases, and backups were not written")
+                return EXIT_OK
+            self.cur = {"id": f"{now()}-prepare-{sha[:12]}", "sha": sha, "prev_sha": old,
+                        "status": "preparing", "kind": "prepare"}
+            self.save(phase="prepare")
+            try:
+                kept = sorted(p.name for p in self.releases.glob("*")) if self.releases.exists() else []
+                release = self.extract(sha)
+                for name in kept:
+                    if name != sha and not (self.releases / name).exists():
+                        raise DeployFailed(f"prepare removed an older release: {name}")
+                dist = self.build(sha, release, plan) if plan["components"] else None
+                bdir = self.backup(sha, plan, old, dist) if plan["components"] else None
+                record = {
+                    "result": "PASS", "sha": sha, "prev": old, "at": now(),
+                    "release": str(release), "backup": str(bdir) if bdir else None,
+                    "dist": str(dist) if dist else None,
+                    "components": plan["components"], "restart": plan["restart"],
+                    "migration": plan["migration"],
+                    "target_head": self.alembic_head(sha),
+                }
+                atomic_write(self.state / "prepared.json", json.dumps(record, indent=1))
+                self.save(status="prepared", phase="prepare-done")
+            except DeployFailed as e:
+                self.save(status="prepare_failed", reason=str(e))
+                log(f"PREPARE=FAIL {e}")
+                return EXIT_REFUSED
+            log(f"PREPARE=PASS sha={sha}")
+            return EXIT_OK
+
     def deploy(self, sha: str) -> int:
         with self.lock():
-            cur = self.load_current()
-            if cur.get("status") in ("in_progress", "rollback_failed"):
-                log(f"unfinished journal ({cur.get('status')}, id={cur.get('id')}); run `recover`")
-                return EXIT_UNFINISHED
+            if (code := self.unfinished()) is not None:
+                return code
             try:
-                old = self.deployed_sha()
-                self.fetch()
-                self.validate_sha(sha)
-                self.check_ci(sha)
-                plan = self.classify(old, sha)
-                if plan["blockers"]:
-                    raise Refused("; ".join(plan["blockers"]))
-                self.verify_db_revision(plan["target_head"] or self.alembic_head(sha), plan["migration"])
-                self.check_drift(old, sha, plan)
+                old, plan, sha = self.gate(sha)
+                prep_path = self.state / "prepared.json"
+                if not prep_path.is_file():
+                    raise Refused("prepare did not succeed for this SHA")
+                prep = json.loads(prep_path.read_text())
+                if prep.get("result") != "PASS" or prep.get("sha") != sha or prep.get("prev") != old:
+                    raise Refused("prepare did not succeed for this exact SHA and baseline")
+                if plan["components"] and not prep.get("backup"):
+                    raise Refused("prepare has no backup for this change")
             except Refused as e:
                 log(f"REFUSED: {e}")
                 return EXIT_REFUSED
@@ -515,18 +685,17 @@ class Runner:
                 log("no deployable component change" + ("; baseline advanced" if self.yes else ""))
                 return EXIT_OK
             if not self.yes:
-                log("DRY-RUN (no --yes): nothing changed")
+                log("DRY-RUN (no --yes): Live was not changed")
                 return EXIT_OK
 
+            release = Path(prep["release"])
+            dist = Path(prep["dist"]) if prep.get("dist") else None
+            bdir = Path(prep["backup"])
+            verify_checksums(bdir)
             self.cur = {"id": f"{now()}-{sha[:12]}", "sha": sha, "prev_sha": old, "status": "in_progress",
-                        "applied": [], "components": plan["components"]}
+                        "applied": [], "components": plan["components"], "backup": str(bdir)}
             self.save(phase="start")
             try:
-                self.phase("build")
-                release = self.extract(sha)
-                dist = self.build(sha, release, plan)
-                self.phase("backup")
-                bdir = self.backup(sha, plan, old, dist)
                 self.phase("apply")
                 for name in plan["components"]:
                     self.save(applied=self.cur["applied"] + [name])
@@ -807,9 +976,9 @@ def main(argv=None) -> int:
     ap.add_argument("--config", default=os.environ.get("EPV3_DEPLOY_CONFIG", "/opt/epv3/deploy/deploy.conf.json"))
     ap.add_argument("--yes", action="store_true", help="execute (default is dry-run)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for n in ("plan", "deploy", "init-baseline", "migrate"):
+    for n in ("check", "prepare", "deploy", "plan", "init-baseline", "migrate"):
         p = sub.add_parser(n)
-        p.add_argument("--sha", required=True)
+        p.add_argument("--sha", default="", help="exact main SHA; default is the current main tip")
         if n == "migrate":
             p.add_argument("--approval-file", required=True)
     sub.add_parser("validate-config")
@@ -828,9 +997,13 @@ def main(argv=None) -> int:
         log("config OK" if not errs else "REFUSED: config not usable")
         return EXIT_REFUSED if errs else EXIT_OK
     signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt("SIGTERM")))
-    r = Runner(cfg, yes=a.yes and a.cmd != "plan")
+    r = Runner(cfg, yes=a.yes and a.cmd not in ("plan", "check"))
     try:
-        if a.cmd in ("plan", "deploy"):
+        if a.cmd in ("plan", "check"):
+            return r.check(a.sha)
+        if a.cmd == "prepare":
+            return r.prepare(a.sha)
+        if a.cmd == "deploy":
             return r.deploy(a.sha)
         if a.cmd == "init-baseline":
             return r.init_baseline(a.sha)

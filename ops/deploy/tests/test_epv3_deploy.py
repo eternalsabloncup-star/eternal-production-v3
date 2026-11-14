@@ -110,6 +110,7 @@ class World:
         self.cfg = {
             "repo_url": str(self.origin), "github_repo": "x/y", "root": str(self.w / "deploy"),
             "backup_dir": str(self.w / "backups"), "keep_backups": 3, "health_timeout": 2, "asset_timeout": 1,
+            "resources": {"min_mem_kb": 1, "min_disk_bytes": 1},
             "ci": {"token_file": str(self.w / "token"), "api_base": f"http://127.0.0.1:{port}",
                    "per_page": 100},
             "proxy_health_url": f"http://127.0.0.1:{port}/proxy-health",
@@ -225,6 +226,12 @@ class World:
         return D.main(a)
 
     def deploy(self, sha, **kw):
+        rc = self.run("check", "--sha", sha)
+        if rc != 0:
+            return rc
+        rc = self.run("prepare", "--sha", sha, yes=True)
+        if rc != 0:
+            return rc
         return self.run("deploy", "--sha", sha, yes=kw.get("yes", True))
 
     def read(self, rel):
@@ -267,7 +274,8 @@ def test_dry_run_default_mutates_nothing(W):
     before = W.snapshot()
     assert W.deploy(sha, yes=False) == 0
     assert W.snapshot() == before and W.restarts() == []
-    assert not list((W.w / "backups").iterdir())
+    backups = list((W.w / "backups").glob("deploy-*"))
+    assert len(backups) == 1
 
 
 def test_frontend_only_no_restart_and_artifact_reuse(W):
@@ -328,10 +336,12 @@ def test_frontend_public_verify_failure_rolls_back_dir(W):
     assert not list((W.w / "opt/frontend").rglob(".*epv3*"))
 
 
-@pytest.mark.parametrize("phase", ["backup", "applied:backend", "restart"])
+@pytest.mark.parametrize("phase", ["apply", "applied:backend", "restart"])
 def test_crash_mid_deploy_then_recover(W, phase):
     before = W.snapshot()
     sha = W.commit("be", **{"backend__app__main.py": "# backend v2\n", "backend__app__new.py": "# n\n"})
+    assert W.run("check", "--sha", sha) == 0
+    assert W.run("prepare", "--sha", sha, yes=True) == 0
     env = dict(os.environ, EPV3_DEPLOY_TEST_HOOKS="1", EPV3_DEPLOY_CRASH_AT=phase)
     p = subprocess.run([sys.executable, str(SCRIPT), "--config", str(W.cfg_path), "--yes",
                         "deploy", "--sha", sha], env=env, capture_output=True)
@@ -453,7 +463,7 @@ def test_dump_failure_aborts_before_mutation(W):
     (W.w / "fail_dump").write_text("")
     before = W.snapshot()
     sha = W.commit("be", **{"backend__app__main.py": "# backend v2\n"})
-    assert W.deploy(sha) == D.EXIT_ROLLED_BACK
+    assert W.deploy(sha) != 0
     assert W.snapshot() == before and W.restarts() == []
 
 
@@ -680,6 +690,8 @@ def test_stale_static_mount_detected_and_rolled_back(W):
 def test_sigterm_during_restart_rolls_back(W):
     before = W.snapshot()
     sha = W.commit("be", **{"backend__app__main.py": "# backend v2\n"})
+    assert W.run("check", "--sha", sha) == 0
+    assert W.run("prepare", "--sha", sha, yes=True) == 0
     env = dict(os.environ, EPV3_DEPLOY_TEST_HOOKS="1", EPV3_DEPLOY_SIGTERM_AT="applied:backend")
     p = subprocess.run([sys.executable, str(SCRIPT), "--config", str(W.cfg_path), "--yes",
                         "deploy", "--sha", sha], env=env, capture_output=True)
@@ -691,6 +703,8 @@ def test_sigterm_during_restart_rolls_back(W):
 def test_recover_restarts_only_units_actually_restarted(W):
     sha = W.commit("gw+be", **{"accurate-gateway__app__main.py": "# gateway v2\n",
                                "backend__app__main.py": "# backend v2\n"})
+    assert W.run("check", "--sha", sha) == 0
+    assert W.run("prepare", "--sha", sha, yes=True) == 0
     env = dict(os.environ, EPV3_DEPLOY_TEST_HOOKS="1", EPV3_DEPLOY_CRASH_AT="healthy:gateway")
     subprocess.run([sys.executable, str(SCRIPT), "--config", str(W.cfg_path), "--yes", "deploy", "--sha", sha],
                    env=env, capture_output=True)
@@ -779,6 +793,47 @@ def test_example_config_matches_vps_facts_but_is_not_live_valid():
     assert c["frontend"]["verify_base"] == "http://127.0.0.1:8180"
     assert c["backend"]["health_url"] == "http://127.0.0.1:8100/api/v1/health"
     assert c["gateway"]["health_url"] == "http://127.0.0.1:8091/health"
+    assert cfg["github_repo"] == "eternalsabloncup-star/eternal-production-v3"
+    assert "prasnda21-tech/eternal-production-v3" not in json.dumps(cfg)
     assert "eternal_production_v3" in json.dumps(cfg["commands"]["db_revision"])
     assert "alembic_upgrade" not in cfg["commands"] and cfg["migrations"]["enabled"] is False
     assert D.validate_config(cfg)
+
+
+def test_old_github_owner_is_refused_and_redirect_is_not_a_source():
+    bad = {"github_repo": "prasnda21-tech/eternal-production-v3",
+           "repo_url": "git@github.com:prasnda21-tech/eternal-production-v3.git"}
+    errs = D.repo_identity_errors(bad)
+    assert errs and "redirects are not" in errs[0]
+    wrong = {"github_repo": "eternalsabloncup-star/eternal-production-v3",
+             "repo_url": "https://github.com/prasnda21-tech/eternal-production-v3"}
+    assert D.repo_identity_errors(wrong)
+    ok = {"github_repo": "eternalsabloncup-star/eternal-production-v3",
+          "repo_url": "git@github.com:eternalsabloncup-star/eternal-production-v3.git"}
+    assert D.repo_identity_errors(ok) == []
+
+
+def test_check_is_read_only_prepare_keeps_older_release_and_deploy_needs_prepare(W):
+    sha = W.commit("be", **{"backend__app__main.py": "# backend v2\n"})
+    before = W.snapshot()
+    assert W.run("check", "--sha", sha) == 0
+    assert W.snapshot() == before
+    assert not list((W.w / "backups").glob("deploy-*"))
+    old_release = W.w / "deploy/source/releases" / ("a" * 40)
+    old_release.mkdir(parents=True)
+    (old_release / "keep").write_text("previous")
+    assert W.run("deploy", "--sha", sha, yes=True) == D.EXIT_REFUSED
+    assert W.snapshot() == before
+    assert W.run("prepare", "--sha", sha, yes=True) == 0
+    assert (old_release / "keep").read_text() == "previous"
+    assert W.snapshot() == before
+    assert W.run("deploy", "--sha", sha, yes=False) == 0
+    assert W.snapshot() == before and W.restarts() == []
+    assert W.run("deploy", "--sha", sha, yes=True) == 0
+    assert W.read("opt/backend/app/main.py") == "# backend v2\n"
+
+
+def test_check_refuses_a_sha_that_is_not_exact_main(W):
+    parent = W.base
+    W.commit("child", **{"backend__app__main.py": "# backend v2\n"})
+    assert W.run("check", "--sha", parent) == D.EXIT_REFUSED
