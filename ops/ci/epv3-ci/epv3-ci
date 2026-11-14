@@ -1,0 +1,1058 @@
+#!/bin/bash
+# epv3-ci — isolated CI for one source SHA. Three commands: check, prepare, run.
+# Does not change /opt/epv3, Live PostgreSQL, Live services, or git history.
+set -euo pipefail
+umask 077
+
+TARGET_SHA=05befb16cd7081751bc9e97f57b239d6da98e8e6
+TARGET_TREE=c6fa7a6ea34dd8397d956fd5fa765c7b6ab26e9f
+ROOT=/var/lib/epv3-ci-test
+SRC="$ROOT/src"
+CI_PGDATA=/var/lib/epv3-ci/pgdata
+RUN_USER=epv3-ci-test
+SLICE=epv3-ci.slice
+PGHOST_CI=127.0.0.1
+PGPORT_CI=5433
+LIVE_PORT=5432
+DB=epv3_ci_05befb16_test
+ROLE=epv3_ci_runner
+PGPASS_SRC="$ROOT/ci-runner.pgpass"
+PGPASS="$ROOT/ci.pgpass"
+ENV_FILE="$ROOT/ci.env"
+PG_BIN=/usr/lib/postgresql/16/bin
+VENV="$ROOT/venv"
+VENV_GW="$ROOT/venv-gateway"
+HOME_CI="$ROOT/home"
+MANIFEST_DIR="$ROOT/manifests/$TARGET_SHA"
+MANIFEST="$MANIFEST_DIR/prepare.manifest"
+REPORT_DIR="$ROOT/reports/$TARGET_SHA"
+REPORT="$REPORT_DIR/REPORT.txt"
+MEM_MAX=2147483648
+SOFT_CAP=$((1800 * 1024 * 1024))
+MIN_MEM_KB=$((2 * 1024 * 1024))
+MIN_DISK=$((10 * 1024 * 1024 * 1024))
+LIVE_API=epv3-api
+LIVE_GATEWAY=epv3-accurate-gateway
+COMMAND=""
+GUARD_ADDED=0
+GUARD_MODE=""
+GUARD_TAG=""
+GUARD_RULES=()
+LISTEN_PID=""
+MONITOR_PID=""
+RESOURCE_FAIL=0
+CONTROL_PORT=15999
+
+die() {
+  printf 'STOP: %s\n' "$*" >&2
+  if [[ "$COMMAND" == "run" && -d "$REPORT_DIR" ]]; then
+    printf 'SHA=%s\nINDEPENDENT_CI=STOPPED\nREASON=%s\n' "$TARGET_SHA" "$*" > "$REPORT"
+  fi
+  exit 2
+}
+
+usage() {
+  cat << 'EOF'
+epv3-ci check
+epv3-ci prepare
+epv3-ci run
+EOF
+}
+
+require_root() {
+  [[ "$(id -u)" -eq 0 ]] || die "run as root"
+}
+
+mem_avail_kb() { awk '/MemAvailable:/ {print $2}' /proc/meminfo; }
+disk_avail_bytes() { df -B1 --output=avail "$ROOT" | awk 'NR==2 {print $1}'; }
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+
+systemctl_value() {
+  systemctl show "$1" -p "$2" --value 2>/dev/null || true
+}
+
+verify_source_tree() {
+  local tmp tree
+  tmp="$(mktemp -d)"
+  if ! git init -q -b main "$tmp/repo"; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! git --git-dir="$tmp/repo/.git" --work-tree="$SRC" \
+    -c core.autocrlf=false -c core.filemode=true -c safe.directory='*' add -A -- .; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  tree="$(git --git-dir="$tmp/repo/.git" --work-tree="$SRC" \
+    -c core.autocrlf=false -c core.filemode=true -c safe.directory='*' write-tree)" || {
+    rm -rf "$tmp"
+    return 1
+  }
+  rm -rf "$tmp"
+  [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s\n' "$tree"
+}
+
+find_node() {
+  local c v major
+  NODE_BIN=""
+  NODE_MAJOR=""
+  shopt -s nullglob
+  local candidates=()
+  candidates+=(/usr/local/bin/node /usr/bin/node /usr/bin/nodejs /usr/local/bin/node22 /usr/bin/node22)
+  candidates+=(/usr/local/n/versions/node/*/bin/node /root/.nvm/versions/node/*/bin/node)
+  shopt -u nullglob
+  if have_cmd node; then candidates+=("$(command -v node)"); fi
+  for c in "${candidates[@]}"; do
+    [[ -x "$c" ]] || continue
+    v="$("$c" -v 2>/dev/null || true)"
+    [[ "$v" =~ ^v([0-9]+) ]] || continue
+    major="${BASH_REMATCH[1]}"
+    if [[ "$major" == "22" ]]; then
+      NODE_BIN="$c"
+      NODE_MAJOR=22
+      return 0
+    fi
+    if [[ "$major" == "24" && -z "$NODE_BIN" ]]; then
+      NODE_BIN="$c"
+      NODE_MAJOR=24
+    fi
+  done
+  [[ -n "$NODE_BIN" ]]
+}
+
+list_listening_postmasters() {
+  local pidfile pid dir port user cg live_pid live_dir live_user live_cg sock
+  pidfile="$CI_PGDATA/postmaster.pid"
+  [[ -f "$pidfile" ]] || die "CI postmaster.pid is missing at $pidfile"
+  pid="$(sed -n '1p' "$pidfile")"
+  dir="$(sed -n '2p' "$pidfile")"
+  port="$(sed -n '4p' "$pidfile")"
+  sock="$(sed -n '5p' "$pidfile")"
+  [[ "$dir" == "$CI_PGDATA" ]] || die "CI postmaster data directory is $dir"
+  [[ "$port" == "$PGPORT_CI" ]] || die "CI postmaster port is $port"
+  [[ "$sock" == /* ]] || die "CI socket directory is not a local path"
+  [[ -d "/proc/$pid" ]] || die "CI postmaster is not running"
+  user="$(ps -o user= -p "$pid" | awk '{print $1}')"
+  cg="$(tr '\n' ' ' < "/proc/$pid/cgroup")"
+  STATE_CI_SOCKET="$sock"
+  printf 'ci %s %s %s %s %s\n' "$pid" "$user" "$port" "$dir" "$cg"
+  live_pid="$(ss -H -ltnp "sport = :$LIVE_PORT" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -n 1)"
+  [[ -n "$live_pid" && -d "/proc/$live_pid" ]] || die "Live PostgreSQL on port $LIVE_PORT was not found"
+  live_dir="$(tr '\0' ' ' < "/proc/$live_pid/cmdline" | sed -n 's/.*-D \([^ ]*\).*/\1/p')"
+  if [[ -z "$live_dir" ]]; then
+    live_dir="$(readlink -f "/proc/$live_pid/cwd")"
+  fi
+  live_user="$(ps -o user= -p "$live_pid" | awk '{print $1}')"
+  live_cg="$(tr '\n' ' ' < "/proc/$live_pid/cgroup")"
+  printf 'live %s %s %s %s %s\n' "$live_pid" "$live_user" "$LIVE_PORT" "$live_dir" "$live_cg"
+}
+
+sql_identity() {
+  runuser -u "$RUN_USER" -- env -i \
+    HOME="$HOME_CI" \
+    PGPASSFILE="$PGPASS_SRC" \
+    PGHOST="$PGHOST_CI" \
+    PGPORT="$PGPORT_CI" \
+    PGUSER="$ROLE" \
+    PATH="$PG_BIN:/usr/bin:/bin" \
+    "$PG_BIN/psql" -X -q -v ON_ERROR_STOP=1 -d "$DB" -Atc \
+    "SELECT current_user || '|' || inet_server_port() || '|' || rolsuper || '|' || rolcreatedb || '|' || coalesce(host(inet_server_addr()), '') FROM pg_roles WHERE rolname = current_user;"
+}
+
+psql_peer() {
+  local sock="${STATE_CI_SOCKET:-}"
+  if [[ -z "$sock" && -n "${STATE_CI_DATA:-}" && -f "$STATE_CI_DATA/postmaster.pid" ]]; then
+    sock="$(sed -n '5p' "$STATE_CI_DATA/postmaster.pid")"
+  fi
+  [[ "$sock" == /* ]] || die "CI socket directory is not a local path"
+  [[ "$PGPORT_CI" == "5433" ]] || die "refusing CI port $PGPORT_CI"
+  runuser -u "$STATE_CI_USER" -- "$PG_BIN/psql" -X -q -v ON_ERROR_STOP=1 \
+    -h "$sock" -p "$PGPORT_CI" -d "$1" -Atc "$2"
+}
+
+read_ci_cluster_settings() {
+  local shown_dir shown_port shown_listen
+  shown_dir="$(psql_peer postgres "SHOW data_directory")" || die "CI owner socket login failed"
+  shown_port="$(psql_peer postgres "SHOW port")" || die "CI owner socket login failed"
+  shown_listen="$(psql_peer postgres "SHOW listen_addresses")" || die "CI owner socket login failed"
+  [[ "$shown_dir" == "$STATE_CI_DATA" ]] || die "CI owner socket is not the CI data directory"
+  [[ "$shown_port" == "$PGPORT_CI" ]] || die "CI owner socket port is $shown_port"
+  STATE_DB_DATA="$shown_dir"
+  STATE_DB_LISTEN="$shown_listen"
+}
+
+user_can_write() {
+  runuser -u "$RUN_USER" -- test -w "$1"
+}
+
+require_run_user() {
+  id "$RUN_USER" >/dev/null 2>&1 || die "user $RUN_USER is missing"
+}
+
+load_state() {
+  require_run_user
+  [[ -d "$SRC" ]] || die "source directory is missing at $SRC"
+  STATE_SOURCE="$(readlink -f "$SRC")"
+  STATE_TREE="$(verify_source_tree)" || die "source tree hash failed"
+  if [[ "$STATE_TREE" == "$TARGET_TREE" ]]; then
+    STATE_HEAD="$TARGET_SHA"
+    STATE_DIRTY=no
+  else
+    STATE_HEAD="$STATE_TREE"
+    STATE_DIRTY=yes
+  fi
+  local line kind
+  STATE_CI_PID=""
+  STATE_LIVE_PID=""
+  while read -r line; do
+    kind="${line%% *}"
+    if [[ "$kind" == "ci" ]]; then
+      read -r _ STATE_CI_PID STATE_CI_USER STATE_CI_PORT STATE_CI_DATA STATE_CI_CGROUP <<<"$line"
+    elif [[ "$kind" == "live" ]]; then
+      read -r _ STATE_LIVE_PID STATE_LIVE_USER STATE_LIVE_PORT STATE_LIVE_DATA STATE_LIVE_CGROUP <<<"$line"
+    fi
+  done < <(list_listening_postmasters)
+  [[ -n "$STATE_CI_PID" && -n "$STATE_LIVE_PID" ]] || die "postmaster inventory is incomplete"
+  local ident
+  read_ci_cluster_settings
+  ident="$(sql_identity)" || die "CI login failed"
+  IFS='|' read -r STATE_DB_USER STATE_DB_PORT STATE_DB_SUPER STATE_DB_CREATEDB STATE_DB_ADDR <<<"$ident"
+  STATE_SLICE_MEM="$(systemctl_value "$SLICE" MemoryMax)"
+  STATE_SLICE_CPU="$(systemctl_value "$SLICE" CPUQuotaPerSecUSec)"
+  STATE_MEM_KB="$(mem_avail_kb)"
+  STATE_DISK="$(disk_avail_bytes)"
+  STATE_API_LOAD="$(systemctl_value "$LIVE_API" LoadState)"
+  STATE_API_SLICE="$(systemctl_value "$LIVE_API" Slice)"
+  STATE_GW_LOAD="$(systemctl_value "$LIVE_GATEWAY" LoadState)"
+  STATE_GW_SLICE="$(systemctl_value "$LIVE_GATEWAY" Slice)"
+  if find_node; then
+    STATE_NODE_BIN="$NODE_BIN"
+    STATE_NODE_MAJOR="$NODE_MAJOR"
+  else
+    STATE_NODE_BIN=""
+    STATE_NODE_MAJOR=""
+  fi
+  if have_cmd python3.12; then STATE_PYTHON=yes; else STATE_PYTHON=no; fi
+  if have_cmd systemd-run; then STATE_SYSTEMD_RUN=yes; else STATE_SYSTEMD_RUN=no; fi
+  if have_cmd runuser; then STATE_RUNUSER=yes; else STATE_RUNUSER=no; fi
+  if have_cmd nft || have_cmd iptables; then STATE_FIREWALL=yes; else STATE_FIREWALL=no; fi
+}
+
+cpu_seconds() {
+  python3 - "$1" << 'PY'
+import sys
+raw = sys.argv[1].strip()
+if raw in ("", "infinity"):
+    sys.exit(1)
+if raw.endswith("ms"):
+    sec = float(raw[:-2]) / 1000
+elif raw.endswith("us"):
+    sec = float(raw[:-2]) / 1_000_000
+elif raw.endswith("s"):
+    sec = float(raw[:-1])
+else:
+    sec = float(raw)
+print(f"{sec:.6f}")
+PY
+}
+
+decide() {
+  [[ "$STATE_DIRTY" == "no" ]] || { echo "source tree is dirty"; return 1; }
+  [[ "$STATE_TREE" == "$TARGET_TREE" ]] || { echo "source tree does not match $TARGET_SHA"; return 1; }
+  [[ "$STATE_HEAD" == "$TARGET_SHA" ]] || { echo "HEAD is $STATE_HEAD"; return 1; }
+  case "$STATE_SOURCE" in
+    /opt/epv3|/opt/epv3/*) echo "source is inside /opt/epv3"; return 1 ;;
+    "$ROOT"/*) ;;
+    *) echo "source is outside $ROOT"; return 1 ;;
+  esac
+  [[ "$STATE_CI_PORT" == "$PGPORT_CI" ]] || { echo "CI postmaster port is $STATE_CI_PORT"; return 1; }
+  [[ "$STATE_CI_DATA" == "$CI_PGDATA" ]] || { echo "CI data directory is $STATE_CI_DATA"; return 1; }
+  case "$STATE_CI_DATA" in
+    "$ROOT"|"$ROOT"/*) echo "CI data directory is inside $ROOT"; return 1 ;;
+  esac
+  [[ "$STATE_CI_CGROUP" == *"$SLICE"* ]] || { echo "CI postmaster is not inside $SLICE"; return 1; }
+  [[ "$STATE_CI_USER" != "$RUN_USER" ]] || { echo "PostgreSQL is running as the test user"; return 1; }
+  [[ "$STATE_LIVE_PORT" == "$LIVE_PORT" ]] || { echo "Live port is $STATE_LIVE_PORT"; return 1; }
+  [[ "$STATE_LIVE_PID" != "$STATE_CI_PID" ]] || { echo "Live and CI postmasters are the same process"; return 1; }
+  case "$STATE_LIVE_DATA" in
+    "$ROOT"/*) echo "Live data directory is inside the CI root"; return 1 ;;
+  esac
+  [[ "$STATE_LIVE_DATA" != "$STATE_CI_DATA" ]] || { echo "Live data directory is the CI cluster"; return 1; }
+  [[ "$STATE_LIVE_CGROUP" != *"$SLICE"* ]] || { echo "Live PostgreSQL is inside $SLICE"; return 1; }
+  [[ "$STATE_DB_USER" == "$ROLE" ]] || { echo "connected as $STATE_DB_USER"; return 1; }
+  [[ "$STATE_DB_PORT" == "$PGPORT_CI" && "$STATE_DB_ADDR" == "$PGHOST_CI" ]] || { echo "CI session is not $PGHOST_CI:$PGPORT_CI"; return 1; }
+  [[ "$STATE_DB_DATA" == "$STATE_CI_DATA" ]] || { echo "session data_directory does not match the CI postmaster"; return 1; }
+  case "$STATE_DB_LISTEN" in
+    127.0.0.1|localhost|127.0.0.1,localhost|localhost,127.0.0.1) ;;
+    *) echo "CI listen_addresses is $STATE_DB_LISTEN"; return 1 ;;
+  esac
+  [[ "$STATE_DB_SUPER" == "f" ]] || { echo "$ROLE is superuser"; return 1; }
+  [[ "$STATE_SLICE_MEM" =~ ^[0-9]+$ && "$STATE_SLICE_MEM" -gt 0 && "$STATE_SLICE_MEM" -le "$MEM_MAX" ]] \
+    || { echo "slice MemoryMax is $STATE_SLICE_MEM"; return 1; }
+  local cpu
+  cpu="$(cpu_seconds "$STATE_SLICE_CPU" 2>/dev/null || true)"
+  [[ -n "$cpu" ]] || { echo "slice CPU quota is unset"; return 1; }
+  python3 - "$cpu" << 'PY' || { echo "slice CPU quota is above 150%"; return 1; }
+import sys
+sys.exit(0 if 0 < float(sys.argv[1]) <= 1.5 + 1e-6 else 1)
+PY
+  [[ "$STATE_MEM_KB" =~ ^[0-9]+$ && "$STATE_MEM_KB" -ge "$MIN_MEM_KB" ]] || { echo "MemAvailable is below 2 GiB"; return 1; }
+  [[ "$STATE_DISK" =~ ^[0-9]+$ && "$STATE_DISK" -ge "$MIN_DISK" ]] || { echo "free disk is below 10 GB"; return 1; }
+  [[ "$STATE_API_LOAD" == "loaded" ]] || { echo "$LIVE_API is not installed"; return 1; }
+  [[ "$STATE_GW_LOAD" == "loaded" ]] || { echo "$LIVE_GATEWAY is not installed"; return 1; }
+  [[ "$STATE_API_SLICE" != "$SLICE" && "$STATE_GW_SLICE" != "$SLICE" ]] || { echo "a Live service is inside $SLICE"; return 1; }
+  [[ "$STATE_PYTHON" == "yes" && "$STATE_SYSTEMD_RUN" == "yes" && "$STATE_RUNUSER" == "yes" && "$STATE_FIREWALL" == "yes" ]] \
+    || { echo "python3.12, systemd-run, runuser, or a firewall tool is missing"; return 1; }
+  [[ "$STATE_NODE_MAJOR" == "22" || "$STATE_NODE_MAJOR" == "24" ]] || { echo "Node 22 or 24 was not found"; return 1; }
+  return 0
+}
+
+print_check() {
+  local equiv=no
+  [[ "$STATE_NODE_MAJOR" == "22" ]] && equiv=major-only
+  cat << EOF
+CHECK=PASS
+SHA=$STATE_HEAD
+TREE=$STATE_TREE
+ISOLATION=proven
+ROLE=$STATE_DB_USER
+SUPERUSER=$STATE_DB_SUPER
+CREATEDB=$STATE_DB_CREATEDB
+CI_PORT=$STATE_CI_PORT
+CI_DATA=$STATE_CI_DATA
+LIVE_PORT=$STATE_LIVE_PORT
+LIVE_DATA=$STATE_LIVE_DATA
+LIVE_API=$STATE_API_LOAD:$STATE_API_SLICE
+LIVE_GATEWAY=$STATE_GW_LOAD:$STATE_GW_SLICE
+SLICE_MEMORY=$STATE_SLICE_MEM
+SLICE_CPU=$STATE_SLICE_CPU
+MEM_AVAIL_KB=$STATE_MEM_KB
+DISK_BYTES=$STATE_DISK
+NODE=$STATE_NODE_BIN
+NODE_MAJOR=$STATE_NODE_MAJOR
+NODE_GITHUB_EQUIVALENT=$equiv
+EOF
+}
+
+cmd_check() {
+  COMMAND=check
+  require_root
+  load_state
+  local reason
+  reason="$(decide)" || die "$reason"
+  print_check
+}
+
+own() {
+  [[ "$(id -u)" -eq 0 ]] || return 0
+  chown "$@"
+}
+
+ensure_jobs_dir() {
+  mkdir -p "$ROOT/jobs"
+  own "$RUN_USER:$RUN_USER" "$ROOT/jobs"
+  chmod 0750 "$ROOT/jobs"
+}
+
+install_job_file() {
+  local path="$1" mode="$2"
+  ensure_jobs_dir
+  own "$RUN_USER:$RUN_USER" "$path"
+  chmod "$mode" "$path"
+}
+
+user_can_read() {
+  runuser -u "$RUN_USER" -- test -r "$1" && runuser -u "$RUN_USER" -- test -x "$(dirname "$1")"
+}
+
+grant_createdb() {
+  [[ "$ROLE" =~ ^[a-z_][a-z0-9_]*$ ]] || die "refusing role name"
+  local peer_dir
+  peer_dir="$(psql_peer postgres "SHOW data_directory")" || die "CI peer login failed"
+  [[ "$peer_dir" == "$STATE_CI_DATA" ]] || die "peer client reached a different data directory"
+  [[ "$STATE_DB_SUPER" == "f" ]] || die "$ROLE is superuser"
+  if [[ "$STATE_DB_CREATEDB" != "t" ]]; then
+    psql_peer postgres "ALTER ROLE ${ROLE} CREATEDB" >/dev/null || die "CREATEDB grant failed"
+  fi
+  psql_peer postgres "GRANT CONNECT ON DATABASE postgres TO ${ROLE}" >/dev/null || die "CONNECT grant failed"
+  psql_peer "$DB" "GRANT CREATE ON SCHEMA public TO ${ROLE}" >/dev/null || die "schema grant failed"
+  load_state
+  local reason
+  reason="$(decide)" || die "$reason"
+  [[ "$STATE_DB_CREATEDB" == "t" && "$STATE_DB_SUPER" == "f" ]] || die "CI role is not a non-superuser with CREATEDB"
+  peer_dir="$(psql_peer postgres "SHOW data_directory")" || die "CI peer check failed after grants"
+  [[ "$peer_dir" == "$STATE_CI_DATA" ]] || die "grant connection was not the CI cluster"
+}
+
+write_env() {
+  [[ -f "$PGPASS_SRC" ]] || die "CI password file is missing"
+  local mode
+  mode="$(stat -c %a "$PGPASS_SRC")"
+  [[ "$mode" == "600" || "$mode" == "400" ]] || die "CI password file mode is $mode"
+  if ! python3 - "$PGPASS_SRC" "$PGPASS" "$ENV_FILE" "$PGHOST_CI" "$PGPORT_CI" "$DB" "$ROLE" << 'PY'
+import sys
+from pathlib import Path
+from urllib.parse import quote
+src, pgpass, dest, host, port, db, user = sys.argv[1:]
+password = None
+try:
+    text = Path(src).read_text()
+except Exception:
+    sys.exit(1)
+for raw in text.splitlines():
+    line = raw.strip()
+    if not line or line.startswith("#") or ":" not in line:
+        continue
+    parts = line.split(":", 4)
+    if len(parts) != 5:
+        continue
+    h, p, d, u, pw = parts
+    if u != user or not pw:
+        continue
+    if h not in (host, "*") or p not in (port, "*") or d not in (db, "*"):
+        continue
+    password = pw
+    if h == host and p == port and d == db:
+        break
+if password is None:
+    sys.exit(1)
+try:
+    Path(pgpass).write_text(f"{host}:{port}:{db}:{user}:{password}\n{host}:{port}:*:{user}:{password}\n")
+    user_q, pass_q = quote(user, safe=""), quote(password, safe="")
+    async_url = f"postgresql+asyncpg://{user_q}:{pass_q}@{host}:{port}/{db}"
+    sync_url = f"postgresql+psycopg2://{user_q}:{pass_q}@{host}:{port}/{db}"
+    Path(dest).write_text("\n".join([
+        f"DATABASE_URL={async_url}",
+        f"DATABASE_URL_SYNC={sync_url}",
+        f"TEST_DATABASE_URL={async_url}",
+        f"TEST_DATABASE_URL_SYNC={sync_url}",
+        f"PGHOST={host}",
+        f"PGPORT={port}",
+        f"PGUSER={user}",
+        f"PGDATABASE={db}",
+        f"PGPASSFILE={pgpass}",
+        "APP_ENV=test",
+        "APP_DEBUG=false",
+        "API_PREFIX=/api/v1",
+        "V3_JWT_SECRET=v3_ci_jwt_secret_not_from_v1",
+        "V3_PASSWORD_PEPPER=v3_ci_password_pepper_distinct",
+        "V3_ACCURATE_READ_GATEWAY_URL=http://127.0.0.1:9",
+        "V3_ACCURATE_READ_GATEWAY_TOKEN=ci-gateway-token",
+        "PYTHONDONTWRITEBYTECODE=1",
+        "PIP_DISABLE_PIP_VERSION_CHECK=1",
+    ]) + "\n")
+except Exception:
+    sys.exit(1)
+print(f"env_written host={host} port={port} db={db} user={user}")
+PY
+  then
+    die "CI password file has no usable entry for this database"
+  fi
+  own "$RUN_USER:$RUN_USER" "$PGPASS" "$ENV_FILE"
+  chmod 600 "$PGPASS" "$ENV_FILE"
+}
+
+write_manifest() {
+  mkdir -p "$MANIFEST_DIR"
+  local req_hash when equiv=no
+  req_hash="$(sha256sum "$SRC/backend/requirements.txt" "$SRC/accurate-gateway/requirements.txt" | sha256sum | awk '{print $1}')"
+  when="$(TZ=Asia/Jakarta date '+%Y-%m-%d %H:%M:%S %Z')"
+  [[ "$STATE_NODE_MAJOR" == "22" ]] && equiv=major-only
+  cat > "$MANIFEST" << EOF
+SHA=$TARGET_SHA
+TREE=$TARGET_TREE
+HEAD=$STATE_HEAD
+PREPARED_AT=$when
+CI_PORT=$STATE_CI_PORT
+CI_DATA=$STATE_CI_DATA
+ROLE=$ROLE
+SUPERUSER=$STATE_DB_SUPER
+CREATEDB=$STATE_DB_CREATEDB
+NODE_BIN=$STATE_NODE_BIN
+NODE_MAJOR=$STATE_NODE_MAJOR
+NODE_GITHUB_EQUIVALENT=$equiv
+REQUIREMENTS_SHA256=$req_hash
+ENV_FILE=$ENV_FILE
+VENV=$VENV
+VENV_GATEWAY=$VENV_GW
+LIVE_CHANGES=none
+PREPARE_RESULT=PASS
+EOF
+  chmod 0644 "$MANIFEST"
+  echo "PREPARE=PASS"
+  echo "MANIFEST=$MANIFEST"
+}
+
+prepare_python() {
+  local rc=0
+  mkdir -p "$HOME_CI"
+  own "$RUN_USER:$RUN_USER" "$HOME_CI"
+  if [[ ! -x "$VENV/bin/python" ]]; then
+    runuser -u "$RUN_USER" -- python3.12 -m venv "$VENV"
+  fi
+  if [[ ! -x "$VENV_GW/bin/python" ]]; then
+    runuser -u "$RUN_USER" -- python3.12 -m venv "$VENV_GW"
+  fi
+  ensure_jobs_dir
+  cat > "$ROOT/jobs/prepare-python.sh" << EOF
+set -euo pipefail
+set +x
+"$VENV/bin/python" -m pip install --upgrade pip
+"$VENV/bin/python" -m pip install -r "$SRC/backend/requirements.txt"
+"$VENV_GW/bin/python" -m pip install --upgrade pip
+"$VENV_GW/bin/python" -m pip install -r "$SRC/accurate-gateway/requirements.txt"
+EOF
+  install_job_file "$ROOT/jobs/prepare-python.sh" 0750
+  user_can_read "$ROOT/jobs/prepare-python.sh" || return 126
+  run_limited prepare-python "$ROOT/jobs/prepare-python.sh" || rc=$?
+  return "$rc"
+}
+
+cmd_prepare() {
+  COMMAND=prepare
+  require_root
+  load_state
+  local reason
+  reason="$(decide)" || die "$reason"
+  rm -f "$MANIFEST"
+  grant_createdb
+  user_can_write "$ROOT" || die "$RUN_USER cannot write $ROOT"
+  user_can_write "$SRC/backend" || die "$RUN_USER cannot write the backend tree"
+  user_can_write "$SRC/frontend" || die "$RUN_USER cannot write the frontend tree"
+  user_can_write "$SRC/accurate-gateway" || die "$RUN_USER cannot write the gateway tree"
+  write_env
+  local rc=0
+  prepare_python || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    printf 'PREPARE=FAIL\nEXIT=%s\n' "$rc"
+    exit "$rc"
+  fi
+  write_manifest
+}
+
+manifest_value() {
+  awk -F= -v k="$1" '$1 == k {print substr($0, index($0, "=") + 1)}' "$MANIFEST"
+}
+
+require_manifest() {
+  [[ -f "$MANIFEST" ]] || die "prepare manifest is missing; run epv3-ci prepare"
+  [[ "$(manifest_value PREPARE_RESULT)" == "PASS" ]] || die "prepare did not succeed"
+  [[ "$(manifest_value SHA)" == "$TARGET_SHA" ]] || die "manifest SHA does not match"
+  [[ "$(manifest_value TREE)" == "$TARGET_TREE" ]] || die "manifest tree does not match the pinned source"
+  [[ "$STATE_TREE" == "$TARGET_TREE" && "$STATE_HEAD" == "$TARGET_SHA" ]] || die "source changed after prepare"
+  [[ "$(manifest_value CI_DATA)" == "$STATE_CI_DATA" ]] || die "CI data directory changed after prepare"
+  [[ "$(manifest_value CREATEDB)" == "t" ]] || die "manifest does not record CREATEDB"
+  [[ "$(manifest_value SUPERUSER)" == "f" ]] || die "manifest records a superuser"
+  [[ "$STATE_DB_CREATEDB" == "t" ]] || die "CI role lost CREATEDB"
+}
+
+start_monitor() {
+  local unit="$1"
+  (
+    set +e
+    while systemctl is-active --quiet "$unit"; do
+      avail="$(mem_avail_kb)"
+      disk="$(disk_avail_bytes)"
+      current="$(systemctl_value "$SLICE" MemoryCurrent)"
+      echo "$(date -Is) mem_kb=${avail:-0} disk=${disk:-0} slice_bytes=${current:-na}" >> "$REPORT_DIR/resource.log"
+      breach=0
+      [[ "${avail:-0}" =~ ^[0-9]+$ && "$avail" -lt "$MIN_MEM_KB" ]] && breach=1
+      [[ "${disk:-0}" =~ ^[0-9]+$ && "$disk" -lt "$MIN_DISK" ]] && breach=1
+      [[ "${current:-0}" =~ ^[0-9]+$ && "$current" -gt "$SOFT_CAP" ]] && breach=1
+      if [[ "$breach" -eq 1 ]]; then
+        echo RESOURCE_LIMIT >> "$REPORT_DIR/resource.fail"
+        systemctl stop "$unit" || true
+        exit 0
+      fi
+      sleep 5
+    done
+  ) &
+  MONITOR_PID=$!
+}
+
+stop_monitor() {
+  if [[ -n "${MONITOR_PID:-}" ]]; then
+    kill "$MONITOR_PID" >/dev/null 2>&1 || true
+    wait "$MONITOR_PID" 2>/dev/null || true
+    MONITOR_PID=""
+  fi
+}
+
+run_limited() {
+  local name="$1" script="$2" unit runpid rc result errexit=0
+  [[ $- == *e* ]] && errexit=1
+  unit="epv3-ci-${name}"
+  mkdir -p "$REPORT_DIR"
+  systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+  rm -f "$REPORT_DIR/resource.fail"
+  set +e
+  systemd-run --wait --collect --pipe \
+    --slice="$SLICE" \
+    --uid="$RUN_USER" \
+    --gid="$(id -g "$RUN_USER")" \
+    --working-directory="$SRC" \
+    --property=MemoryMax=1536M \
+    --property=MemorySwapMax=0 \
+    --unit="$unit" \
+    /usr/bin/env -i \
+      HOME="$HOME_CI" \
+      USER="$RUN_USER" \
+      LOGNAME="$RUN_USER" \
+      PATH="$VENV/bin:$VENV_GW/bin:$(dirname "$STATE_NODE_BIN"):/usr/bin:/bin" \
+      LANG="${LANG:-C.UTF-8}" \
+      /bin/bash --noprofile --norc "$script" &
+  runpid=$!
+  local _
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    systemctl is-active --quiet "$unit" && break
+    kill -0 "$runpid" 2>/dev/null || break
+    sleep 0.2
+  done
+  start_monitor "$unit"
+  wait "$runpid"
+  rc=$?
+  result="$(systemctl show "$unit" -p Result --value 2>/dev/null || true)"
+  stop_monitor
+  if [[ -f "$REPORT_DIR/resource.fail" || "$rc" -eq 137 || "$result" == "oom-kill" ]]; then
+    RESOURCE_FAIL=1
+    echo "$name resource_limit" >> "$REPORT_DIR/jobs.tsv"
+    rc=1
+  else
+    echo "$name $rc" >> "$REPORT_DIR/jobs.tsv"
+  fi
+  [[ "$errexit" -eq 1 ]] && set -e
+  return "$rc"
+}
+
+write_redactor() {
+  ensure_jobs_dir
+  cat > "$ROOT/jobs/redact.py" << 'PY'
+import sys
+from pathlib import Path
+from urllib.parse import unquote
+env = Path(sys.argv[1]).read_text()
+secret = ""
+for line in env.splitlines():
+    if line.startswith("DATABASE_URL="):
+        userinfo = line.split("=", 1)[1].split("://", 1)[1].rsplit("@", 1)[0]
+        secret = userinfo.split(":", 1)[1]
+        break
+if not secret:
+    sys.exit(1)
+needles = {secret, unquote(secret)}
+for line in sys.stdin:
+    for needle in needles:
+        line = line.replace(needle, "[redacted]")
+    sys.stdout.write(line)
+    sys.stdout.flush()
+PY
+  chmod 700 "$ROOT/jobs/redact.py"
+}
+
+write_run_scripts() {
+  ensure_jobs_dir
+  cat > "$ROOT/jobs/backend.sh" << EOF
+set -euo pipefail
+set +x
+unset DATABASE_URL DATABASE_URL_SYNC TEST_DATABASE_URL TEST_DATABASE_URL_SYNC PGPASSWORD
+set -a
+. "$ENV_FILE"
+set +a
+python3 - << 'PY'
+import os
+from urllib.parse import urlparse
+for key in ("DATABASE_URL", "DATABASE_URL_SYNC", "TEST_DATABASE_URL", "TEST_DATABASE_URL_SYNC"):
+    raw = os.environ[key].replace("postgresql+asyncpg://", "postgresql://", 1).replace("postgresql+psycopg2://", "postgresql://", 1)
+    parsed = urlparse(raw)
+    if parsed.hostname != "127.0.0.1" or parsed.port != 5433 or not parsed.path.endswith("/$DB"):
+        raise SystemExit(key)
+print("backend_urls_ok")
+PY
+cd "$SRC/backend"
+"$VENV/bin/python" -m compileall -q app alembic tests
+"$VENV/bin/python" -c 'from app.main import app; print(app.title)'
+"$VENV/bin/python" -m alembic upgrade head
+heads=\$("$VENV/bin/python" -m alembic heads)
+printf '%s\\n' "\$heads"
+count=\$(printf '%s\\n' "\$heads" | grep -c '(head)' || true)
+[[ "\$count" -eq 1 ]]
+"$VENV/bin/python" -m pytest -q -o asyncio_mode=auto
+EOF
+  cat > "$ROOT/jobs/frontend.sh" << EOF
+set -euo pipefail
+set +x
+unset DATABASE_URL DATABASE_URL_SYNC TEST_DATABASE_URL TEST_DATABASE_URL_SYNC PGPASSWORD
+cd "$SRC/frontend"
+test -f package-lock.json
+export npm_config_cache="$HOME_CI/.npm"
+export npm_config_jobs=1
+export VITE_API_BASE_URL=/api/v1
+export NODE_OPTIONS=--max-old-space-size=768
+npm ci
+npm test -- --maxWorkers=1 --minWorkers=1 --pool=forks
+npm run build
+EOF
+  cat > "$ROOT/jobs/gateway.sh" << EOF
+set -euo pipefail
+set +x
+unset DATABASE_URL DATABASE_URL_SYNC TEST_DATABASE_URL TEST_DATABASE_URL_SYNC PGPASSWORD
+unset ACCURATE_API_TOKEN ACCURATE_SIGNATURE_SECRET ACCURATE_DATABASE_ID
+export GATEWAY_MODE=fixture
+export GATEWAY_M2M_TOKEN=ci-gateway-m2m-token
+cd "$SRC/accurate-gateway"
+"$VENV_GW/bin/python" -m pytest -q
+EOF
+  install_job_file "$ROOT/jobs/backend.sh" 0750
+  install_job_file "$ROOT/jobs/frontend.sh" 0750
+  install_job_file "$ROOT/jobs/gateway.sh" 0750
+  user_can_read "$ROOT/jobs/backend.sh" || die "test user cannot read backend.sh"
+  user_can_read "$ROOT/jobs/frontend.sh" || die "test user cannot read frontend.sh"
+  user_can_read "$ROOT/jobs/gateway.sh" || die "test user cannot read gateway.sh"
+}
+
+tcp_state() {
+  local user="$1" host="$2" port="$3" state
+  if [[ "$user" == "root" ]]; then
+    state="$(python3 "$ROOT/jobs/tcp_probe.py" "$host" "$port")"
+  else
+    state="$(runuser -u "$user" -- python3 "$ROOT/jobs/tcp_probe.py" "$host" "$port")"
+  fi
+  [[ "$state" == "open" || "$state" == closed\ * ]] || die "tcp probe returned an unexpected result"
+  printf '%s\n' "$state"
+}
+
+guard_packets() {
+  local family="$1" port="$2" raw count
+  if [[ "$GUARD_MODE" == "nft" ]]; then
+    raw="$(nft -a list chain "$family" epv3_ci_guard output 2>/dev/null || true)"
+    count="$(python3 - "$raw" "$port" "$GUARD_TAG" << 'PY'
+import re, sys
+text, port, tag = sys.argv[1:]
+found = None
+for line in text.splitlines():
+    if f"dport {port}" in line and f'comment "{tag}"' in line and "counter packets" in line:
+        match = re.search(r"counter packets (\d+)", line)
+        if match:
+            found = match.group(1)
+print("missing" if found is None else found)
+PY
+)"
+  else
+    local bin=iptables
+    [[ "$family" == "ip6" ]] && bin=ip6tables
+    count="$(${bin} -L OUTPUT -v -n -x | awk -v p="dpt:${port}" -v tag="$GUARD_TAG" 'index($0, tag) && $0 ~ p {print $1; exit}')"
+    [[ -n "$count" ]] || count="missing"
+  fi
+  [[ "$count" =~ ^[0-9]+$ ]] || die "port rule for $family/$port has no counter"
+  printf '%s\n' "$count"
+}
+
+nft_own_handles() {
+  local family="$1"
+  nft -a list chain "$family" epv3_ci_guard output 2>/dev/null \
+    | sed -n "s/.*comment \"${GUARD_TAG}\".*handle \\([0-9][0-9]*\\).*/\\1/p" \
+    | sort -u
+}
+
+ensure_guard_chain() {
+  local family="$1" policy
+  if ! nft list table "$family" epv3_ci_guard >/dev/null 2>&1; then
+    nft add table "$family" epv3_ci_guard
+  fi
+  if ! nft list chain "$family" epv3_ci_guard output >/dev/null 2>&1; then
+    nft add chain "$family" epv3_ci_guard output '{ type filter hook output priority 0; policy accept; }'
+  fi
+  policy="$(nft list chain "$family" epv3_ci_guard output | sed -n 's/.*policy \([a-z]*\);.*/\1/p' | head -n 1)"
+  [[ "$policy" == "accept" ]] || die "existing $family epv3_ci_guard policy is ${policy:-missing}"
+}
+
+add_nft_rule() {
+  local family="$1" port="$2" before after handle
+  before="$(nft_own_handles "$family")"
+  nft add rule "$family" epv3_ci_guard output meta skuid "$uid" tcp dport "$port" counter reject comment "\"${GUARD_TAG}\""
+  after="$(nft_own_handles "$family")"
+  handle="$(comm -13 <(printf '%s\n' "$before" | sed '/^$/d') <(printf '%s\n' "$after" | sed '/^$/d') | head -n 1)"
+  [[ "$handle" =~ ^[0-9]+$ ]] || die "nft did not record a handle for $family/$port"
+  GUARD_RULES+=("$family $handle")
+}
+
+prove_port_block() {
+  local uid port before after state
+  uid="$(id -u "$RUN_USER")"
+  ensure_jobs_dir
+  cat > "$ROOT/jobs/tcp_probe.py" << 'PY'
+import socket, sys
+host, port = sys.argv[1], int(sys.argv[2])
+family = socket.AF_INET6 if ":" in host else socket.AF_INET
+s = socket.socket(family)
+s.settimeout(2)
+try:
+    s.connect((host, port))
+except OSError as exc:
+    print(f"closed {exc.errno}")
+else:
+    s.close()
+    print("open")
+PY
+  cat > "$ROOT/jobs/tcp_listen.py" << 'PY'
+import socket, sys, time
+port = int(sys.argv[1])
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", port))
+server.listen(5)
+server.settimeout(0.2)
+print("listening", flush=True)
+deadline = time.time() + 15
+accepted = 0
+while time.time() < deadline:
+    try:
+        client, _addr = server.accept()
+    except socket.timeout:
+        continue
+    accepted += 1
+    client.close()
+print(f"accepted {accepted}", flush=True)
+PY
+  install_job_file "$ROOT/jobs/tcp_probe.py" 0640
+  install_job_file "$ROOT/jobs/tcp_listen.py" 0640
+  user_can_read "$ROOT/jobs/tcp_probe.py" || die "test user cannot read tcp_probe.py"
+  CONTROL_PORT=""
+  for port in 15999 15998 15997 15996 15995; do
+    if python3 -c 'import socket,sys; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+ s.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError:
+ sys.exit(1)
+finally:
+ s.close()' "$port"; then
+      CONTROL_PORT="$port"
+      break
+    fi
+  done
+  [[ -n "$CONTROL_PORT" ]] || die "no free control port in 15995-15999"
+  python3 "$ROOT/jobs/tcp_listen.py" "$CONTROL_PORT" > "$REPORT_DIR/control-listen.log" 2>&1 &
+  LISTEN_PID=$!
+  local _
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    grep -q '^listening$' "$REPORT_DIR/control-listen.log" 2>/dev/null && break
+    kill -0 "$LISTEN_PID" 2>/dev/null || die "control listener failed"
+    sleep 0.2
+  done
+  GUARD_TAG="epv3_ci_${$}_${RANDOM}${RANDOM}"
+  GUARD_RULES=()
+  if have_cmd nft; then
+    ensure_guard_chain ip
+    ensure_guard_chain ip6
+    GUARD_MODE=nft
+    GUARD_ADDED=1
+    for port in "$CONTROL_PORT" "$LIVE_PORT"; do
+      add_nft_rule ip "$port"
+      add_nft_rule ip6 "$port"
+    done
+  else
+    have_cmd ip6tables || die "ip6tables is missing"
+    GUARD_MODE=iptables
+    GUARD_ADDED=1
+    for port in "$CONTROL_PORT" "$LIVE_PORT"; do
+      iptables -I OUTPUT 1 -m owner --uid-owner "$uid" -p tcp --dport "$port" -m comment --comment "$GUARD_TAG" -j REJECT
+      ip6tables -I OUTPUT 1 -m owner --uid-owner "$uid" -p tcp --dport "$port" -m comment --comment "$GUARD_TAG" -j REJECT
+      GUARD_RULES+=("iptables $port")
+      GUARD_RULES+=("ip6tables $port")
+    done
+  fi
+  before="$(guard_packets ip "$CONTROL_PORT")"
+  state="$(tcp_state "$RUN_USER" "$PGHOST_CI" "$CONTROL_PORT")"
+  after="$(guard_packets ip "$CONTROL_PORT")"
+  [[ "$state" == closed\ * && "$after" -gt "$before" ]] || die "test-user block was not proven on the control port"
+  before="$after"
+  state="$(tcp_state root "$PGHOST_CI" "$CONTROL_PORT")"
+  after="$(guard_packets ip "$CONTROL_PORT")"
+  [[ "$state" == "open" && "$after" -eq "$before" ]] || die "port rule also blocked root"
+  wait "$LISTEN_PID" || true
+  LISTEN_PID=""
+  local accepted listen_log
+  listen_log="$(cat "$REPORT_DIR/control-listen.log")"
+  accepted="${listen_log##*accepted }"
+  [[ "$accepted" == "1" ]] || die "control listener accepted $accepted connections"
+  before="$(guard_packets ip "$LIVE_PORT")"
+  state="$(tcp_state "$RUN_USER" "$PGHOST_CI" "$LIVE_PORT")"
+  after="$(guard_packets ip "$LIVE_PORT")"
+  [[ "$state" == closed\ * && "$after" -gt "$before" ]] || die "test user can still reach 127.0.0.1:$LIVE_PORT"
+  before="$(guard_packets ip6 "$LIVE_PORT")"
+  state="$(tcp_state "$RUN_USER" "::1" "$LIVE_PORT")"
+  after="$(guard_packets ip6 "$LIVE_PORT")"
+  [[ "$state" != "open" ]] || die "test user can still open ::1:$LIVE_PORT"
+  if [[ "$after" -le "$before" && "$state" == "closed 111" ]]; then
+    die "IPv6 port $LIVE_PORT was refused without matching the test-user rule"
+  fi
+}
+
+remove_port_block() {
+  [[ "$GUARD_ADDED" -eq 1 ]] || return 0
+  local spec family handle port uid
+  uid="$(id -u "$RUN_USER" 2>/dev/null || true)"
+  if [[ "${#GUARD_RULES[@]}" -gt 0 ]]; then
+    for spec in "${GUARD_RULES[@]}"; do
+      family="${spec%% *}"
+      handle="${spec##* }"
+      if [[ "$GUARD_MODE" == "nft" ]]; then
+        [[ "$handle" =~ ^[0-9]+$ ]] || continue
+        nft delete rule "$family" epv3_ci_guard output handle "$handle" >/dev/null 2>&1 || true
+      elif [[ -n "$uid" && "$handle" =~ ^[0-9]+$ ]]; then
+        port="$handle"
+        if [[ "$family" == "iptables" ]]; then
+          iptables -D OUTPUT -m owner --uid-owner "$uid" -p tcp --dport "$port" -m comment --comment "$GUARD_TAG" -j REJECT >/dev/null 2>&1 || true
+        elif [[ "$family" == "ip6tables" ]]; then
+          ip6tables -D OUTPUT -m owner --uid-owner "$uid" -p tcp --dport "$port" -m comment --comment "$GUARD_TAG" -j REJECT >/dev/null 2>&1 || true
+        fi
+      fi
+    done
+  fi
+  GUARD_ADDED=0
+  GUARD_RULES=()
+}
+
+cleanup_run() {
+  if [[ -n "${LISTEN_PID:-}" ]]; then
+    kill "$LISTEN_PID" >/dev/null 2>&1 || true
+    wait "$LISTEN_PID" 2>/dev/null || true
+    LISTEN_PID=""
+  fi
+  stop_monitor || true
+  remove_port_block || true
+}
+
+summarize() {
+  python3 - "$REPORT_DIR" "$TARGET_SHA" "$STATE_NODE_MAJOR" "$STATE_NODE_BIN" "$RESOURCE_FAIL" << 'PY'
+import sys
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+report_dir, sha, node_major, node_bin, resource_fail = sys.argv[1:]
+root = Path(report_dir)
+jobs = {}
+tsv = root / "jobs.tsv"
+if tsv.exists():
+    for line in tsv.read_text().splitlines():
+        if line.strip():
+            name, rc = line.rsplit(" ", 1)
+            jobs[name] = rc
+
+def tail(name):
+    path = root / name
+    if not path.exists():
+        return ""
+    return "\n".join(path.read_text(errors="replace").splitlines()[-40:])
+
+def counts(text):
+    last = ""
+    for line in text.splitlines():
+        low = line.lower()
+        if " passed" in low or " failed" in low or " skipped" in low:
+            last = line
+    found = {"passed": "unknown", "failed": "unknown", "skipped": "unknown"}
+    parts = last.replace(",", " ").replace("|", " ").split()
+    for i, word in enumerate(parts):
+        if word in found and i:
+            found[word] = parts[i - 1]
+    return found["passed"], found["failed"], found["skipped"]
+
+def positive(value):
+    try:
+        return int(value) > 0
+    except ValueError:
+        return False
+
+bp, bf, bs = counts(tail("backend.log"))
+fp, ff, fs = counts(tail("frontend.log"))
+gp, gf, gs = counts(tail("gateway.log"))
+mandatory = ("backend", "frontend", "gateway")
+missing = [name for name in mandatory if jobs.get(name) != "0"]
+skipped = any(positive(x) for x in (bs, fs, gs))
+failed = any(positive(x) for x in (bf, ff, gf))
+status = "PASS" if not missing and resource_fail == "0" and not skipped and not failed else "FAIL"
+equiv = "no"
+finished = datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%Y-%m-%d %H:%M:%S %Z")
+text = f"""SHA={sha}
+INDEPENDENT_CI={status}
+GITHUB_ACTIONS=not this run
+GITHUB_CI_EQUIVALENT={equiv}
+NODE={node_bin}
+NODE_MAJOR={node_major}
+RESOURCE_LIMIT_FAILURE={resource_fail}
+BACKEND_EXIT={jobs.get("backend", "missing")}
+FRONTEND_EXIT={jobs.get("frontend", "missing")}
+GATEWAY_EXIT={jobs.get("gateway", "missing")}
+BACKEND_RESULT={"PASS" if jobs.get("backend") == "0" and not positive(bf) and not positive(bs) else "FAIL"}
+FRONTEND_RESULT={"PASS" if jobs.get("frontend") == "0" and not positive(ff) and not positive(fs) else "FAIL"}
+GATEWAY_RESULT={"PASS" if jobs.get("gateway") == "0" and not positive(gf) and not positive(gs) else "FAIL"}
+BACKEND_PASSED={bp}
+BACKEND_FAILED={bf}
+BACKEND_SKIPPED={bs}
+FRONTEND_PASSED={fp}
+FRONTEND_FAILED={ff}
+FRONTEND_SKIPPED={fs}
+GATEWAY_PASSED={gp}
+GATEWAY_FAILED={gf}
+GATEWAY_SKIPPED={gs}
+E2E=NOT_RUN
+E2E_IS_PASS=no
+SKIPPED_IS_PASS=no
+LIVE_CHANGES=none
+FINISHED={finished}
+"""
+(root / "REPORT.txt").write_text(text)
+print(text)
+sys.exit(0 if status == "PASS" else 1)
+PY
+}
+
+run_one() {
+  local name="$1" rc
+  set +e
+  run_limited "$name" "$ROOT/jobs/$name.sh" > >(python3 "$ROOT/jobs/redact.py" "$ENV_FILE" | tee "$REPORT_DIR/$name.log") 2>&1
+  rc=$?
+  set -e
+  echo "job $name exit=$rc"
+}
+
+cmd_run() {
+  COMMAND=run
+  require_root
+  mkdir -p "$REPORT_DIR"
+  trap cleanup_run EXIT
+  load_state
+  local reason
+  reason="$(decide)" || die "$reason"
+  require_manifest
+  [[ "$STATE_NODE_MAJOR" == "22" || "$STATE_NODE_MAJOR" == "24" ]] || die "Node 22 or 24 was not found"
+  prove_port_block
+  write_redactor
+  write_run_scripts
+  : > "$REPORT_DIR/jobs.tsv"
+  run_one backend
+  if [[ "$RESOURCE_FAIL" -eq 0 ]]; then
+    run_one frontend
+  fi
+  if [[ "$RESOURCE_FAIL" -eq 0 ]]; then
+    run_one gateway
+  fi
+  set +e
+  summarize
+  return $?
+}
+
+main() {
+  case "${1:-}" in
+    check) shift; [[ "$#" -eq 0 ]] || die "check takes no arguments"; cmd_check ;;
+    prepare) shift; [[ "$#" -eq 0 ]] || die "prepare takes no arguments"; cmd_prepare ;;
+    run) shift; [[ "$#" -eq 0 ]] || die "run takes no arguments"; cmd_run; exit $? ;;
+    *) usage >&2; exit 2 ;;
+  esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
