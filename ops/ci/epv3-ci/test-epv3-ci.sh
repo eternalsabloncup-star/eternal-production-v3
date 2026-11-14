@@ -32,6 +32,10 @@ new_repo() {
   git -C "$SRC" add .
   git -C "$SRC" -c user.email=ci@example.com -c user.name=ci commit -q -m fixture
   TARGET_SHA="$(git -C "$SRC" rev-parse HEAD)"
+  TARGET_TREE="$(git -C "$SRC" rev-parse 'HEAD^{tree}')"
+  CI_PGDATA="$WORK/cluster/pgdata"
+  STATE_CI_DATA="$CI_PGDATA"
+  mkdir -p "$CI_PGDATA"
   PGPASS_SRC="$ROOT/ci-runner.pgpass"
   PGPASS="$ROOT/ci.pgpass"
   ENV_FILE="$ROOT/ci.env"
@@ -42,8 +46,6 @@ new_repo() {
   MANIFEST="$MANIFEST_DIR/prepare.manifest"
   REPORT_DIR="$ROOT/reports/$TARGET_SHA"
   REPORT="$REPORT_DIR/REPORT.txt"
-  STATE_CI_DATA="$ROOT/pgdata"
-  mkdir -p "$STATE_CI_DATA"
   SECRET='p@ss/word:secret'
   printf '%s\n' "127.0.0.1:5433:${DB}:${ROLE}:${SECRET}" > "$PGPASS_SRC"
   chmod 600 "$PGPASS_SRC"
@@ -65,17 +67,18 @@ seams() {
       created=t
     fi
     if [[ "${FORCE_SUPER:-}" == "1" ]]; then
-      created=t
-      printf '%s\n' "${ROLE}|5433|${STATE_CI_DATA}|127.0.0.1|t|${created}|127.0.0.1"
+      printf '%s\n' "${ROLE}|5433|t|t|127.0.0.1"
       return 0
     fi
-    printf '%s\n' "${ROLE}|5433|${STATE_CI_DATA}|127.0.0.1|f|${created}|127.0.0.1"
+    printf '%s\n' "${ROLE}|5433|f|${created}|127.0.0.1"
   }
   psql_peer() {
     printf '%s %s\n' "$1" "$2" >> "$PEER_LOG"
-    if [[ "$2" == "SHOW data_directory" ]]; then
-      printf '%s\n' "$STATE_CI_DATA"
-    fi
+    case "$2" in
+      "SHOW data_directory") printf '%s\n' "$STATE_CI_DATA" ;;
+      "SHOW port") printf '%s\n' "5433" ;;
+      "SHOW listen_addresses") printf '%s\n' "127.0.0.1" ;;
+    esac
   }
   systemctl_value() {
     case "$1:$2" in
@@ -133,8 +136,11 @@ check_passes() {
   local out
   out="$(cmd_check)"
   [[ "$out" == *"CHECK=PASS"* ]]
+  [[ "$out" == *"TREE=$TARGET_TREE"* ]]
   [[ "$out" == *"CREATEDB=f"* ]]
   [[ "$out" == *"NODE_GITHUB_EQUIVALENT=no"* ]]
+  grep -q 'SHOW data_directory' "$PEER_LOG"
+  [[ "$(grep -c 'ALTER ROLE' "$PEER_LOG")" -eq 0 ]]
   [[ "$out" != *"$SECRET"* ]]
   [[ ! -e "$MANIFEST" && ! -e "$ENV_FILE" ]]
 }
@@ -148,6 +154,7 @@ prepare_then_run() {
   [[ "$out" == *"PREPARE=PASS"* ]]
   [[ "$out" != *"$SECRET"* ]]
   [[ "$(awk -F= '$1=="SHA"{print $2}' "$MANIFEST")" == "$TARGET_SHA" ]]
+  [[ "$(awk -F= '$1=="TREE"{print $2}' "$MANIFEST")" == "$TARGET_TREE" ]]
   [[ "$(awk -F= '$1=="CREATEDB"{print $2}' "$MANIFEST")" == "t" ]]
   [[ "$(awk -F= '$1=="SUPERUSER"{print $2}' "$MANIFEST")" == "f" ]]
   [[ "$(grep -c 'ALTER ROLE' "$PEER_LOG")" -eq 1 ]]
@@ -310,6 +317,48 @@ binary_fail_closed() {
   [[ "$rc" -eq 2 && "$out" == *"epv3-ci check"* && "$out" == *"epv3-ci prepare"* && "$out" == *"epv3-ci run"* ]]
 }
 
+archive_without_git() {
+  source_cli
+  new_repo
+  seams
+  rm -rf "$SRC/.git"
+  local out
+  out="$(cmd_check)"
+  [[ ! -e "$SRC/.git" ]]
+  [[ "$out" == *"CHECK=PASS"* ]]
+  [[ "$out" == *"SHA=$TARGET_SHA"* ]]
+  [[ "$out" == *"TREE=$TARGET_TREE"* ]]
+  printf 'tamper\n' >> "$SRC/backend/requirements.txt"
+  set +e
+  out="$(cmd_check 2>&1)"
+  local rc=$?
+  set -e
+  [[ "$rc" -eq 2 && "$out" == *"dirty"* ]]
+}
+
+firewall_deletes_only_own_rules() {
+  source_cli
+  new_repo
+  : > "$WORK/nft.log"
+  nft() { printf 'nft %s\n' "$*" >> "$WORK/nft.log"; }
+  iptables() { printf 'iptables %s\n' "$*" >> "$WORK/nft.log"; }
+  ip6tables() { printf 'ip6tables %s\n' "$*" >> "$WORK/nft.log"; }
+  GUARD_ADDED=1
+  GUARD_MODE=nft
+  GUARD_TAG="epv3_ci_test_tag"
+  GUARD_RULES=("ip 9" "ip6 4")
+  remove_port_block
+  grep -qx 'nft delete rule ip epv3_ci_guard output handle 9' "$WORK/nft.log"
+  grep -qx 'nft delete rule ip6 epv3_ci_guard output handle 4' "$WORK/nft.log"
+  ! grep -q 'delete table' "$WORK/nft.log"
+  ! grep -q 'flush' "$WORK/nft.log"
+  ! grep -q 'nft delete table' "$CLI"
+  ! grep -q 'nft flush' "$CLI"
+  ! grep -q 'iptables -F' "$CLI"
+  ! grep -q "current_setting('data_directory')" "$CLI"
+  ! grep -q 'find "$ROOT"' "$CLI"
+}
+
 installer_cases() {
   local dest
   dest="$(mktemp -d)"
@@ -335,6 +384,8 @@ run_case "superuser stops" superuser_stops
 run_case "decide rejects unsafe states" decide_gates
 run_case "dirty tree stops" dirty_tree_stops
 run_case "executable ignores override env and stays closed" binary_fail_closed
+run_case "archive without .git still matches the pinned tree" archive_without_git
+run_case "firewall cleanup deletes only its own rules" firewall_deletes_only_own_rules
 run_case "installer is idempotent and refuses /opt/epv3" installer_cases
 
 printf 'TEST_PASS=%s\nTEST_FAIL=%s\n' "$PASS" "$FAIL"

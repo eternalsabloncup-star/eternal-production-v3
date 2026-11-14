@@ -11,6 +11,10 @@ epv3-ci run
 
 `check` hanya membaca. `prepare` dan `run` mengulang pemeriksaan itu dan berhenti bila gagal.
 
+Source di `/var/lib/epv3-ci-test/src` boleh berupa hasil `git archive` tanpa `.git`. SHA dibuktikan dengan tree `c6fa7a6ea34dd8397d956fd5fa765c7b6ab26e9f`, bukan dengan manifest yang ditulis `prepare`.
+
+PostgreSQL CI ada di `/var/lib/epv3-ci/pgdata` port 5433. `data_directory` hanya dibaca lewat socket cluster oleh user pemilik proses, bukan oleh role `epv3_ci_runner`. Aturan firewall yang dihapus hanyalah aturan yang dipasang proses `run` itu sendiri.
+
 Laporan setelah `run`:
 
 `/var/lib/epv3-ci-test/reports/05befb16cd7081751bc9e97f57b239d6da98e8e6/REPORT.txt`
