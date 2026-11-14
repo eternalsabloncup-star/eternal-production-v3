@@ -1,27 +1,30 @@
 # Eternal Production V3 — Deploy Runner
 
 Satu CLI Python (stdlib saja), dijalankan manual (bukan daemon, bukan GitHub self-hosted runner).
-Deploy satu **exact SHA 40-hex** yang CI-hijau dan merupakan ancestor `main`.
+Sumber resmi: `eternalsabloncup-star/eternal-production-v3`. Path `prasnda21-tech/eternal-production-v3` ditolak. Redirect GitHub tidak dipakai sebagai sumber.
 
-Status: DESAIN + SKRIP + TES SIMULASI. **Belum terpasang di VPS. Tidak ada Live activation.**
+Tiga tahap operasional. SHA yang dipakai adalah tip `main` saat perintah berjalan, atau `--sha` yang persis sama dengan tip itu. `prepare` dan `deploy` tetap dry-run tanpa `--yes`.
+
+Status: DESAIN + SKRIP + TES SIMULASI. **Belum terpasang di VPS. Tidak ada Live activation. Tidak ada migrasi Live.**
 
 ## Perintah
 
 ```bash
-epv3-deploy validate-config                             # config live valid? (fail-closed)
-epv3-deploy init-baseline --sha <sha-terpasang> --yes   # sekali: verifikasi runtime == SHA, DB == head, catat baseline (299a921...)
-epv3-deploy plan   --sha <sha>                          # tanpa mutasi aplikasi (hanya memperbarui mirror git terisolasi)
-epv3-deploy deploy --sha <sha>                          # dry-run (default)
-epv3-deploy deploy --sha <sha> --yes                    # eksekusi setelah persetujuan Owner
-epv3-deploy recover [--yes]                             # rollback jurnal yang terputus
-epv3-deploy status
-epv3-deploy migrate --sha <sha> --approval-file F --yes # TERPISAH, default nonaktif
+epv3-deploy check
+epv3-deploy prepare --yes
+epv3-deploy deploy --yes
 ```
+
+`check` membaca CI, tip main, resource, health Live, dan revisi DB. Satu-satunya tulisannya adalah mirror git di `/opt/epv3/deploy`. `prepare --yes` membuat release dan backup, tanpa mengubah Live dan tanpa menghapus release SHA lain. `deploy --yes` hanya menerapkan SHA yang `prepare`-nya PASS, lalu health check backend dan gateway. Gagal apply/restart/health memicu rollback kode yang sudah ada.
+
+Perintah pengaman yang tetap ada, di luar tiga tahap: `validate-config`, `init-baseline`, `recover`, `status`, dan `migrate` (default nonaktif, tidak dipanggil oleh `deploy`).
 
 Exit code: 0 ok/dry-run, 2 ditolak (tanpa mutasi), 3 gagal+rollback sukses, 4 rollback gagal, 5 jurnal belum selesai.
 Tidak ada opsi menimpa drift. `SIGTERM`/Ctrl-C memicu rollback; `kill -9`/reboot ditangani `recover`.
 
-## Alur `deploy`
+## Alur tiga tahap
+
+`check`, `prepare`, dan `deploy` memakai gate yang sama: lock, tolak jurnal `in_progress`/`rollback_failed`, `git ls-remote` tip `main` pada `repo_url` (bukan redirect), mirror harus sama dengan tip itu, CI Actions read-only, resource, health Live, revisi DB, drift. `deploy` tidak menjalankan Alembic.
 
 1. Lock (`flock` non-blocking) -> tolak jika jurnal `in_progress`/`rollback_failed`.
 2. `git remote update` pada mirror terisolasi `/opt/epv3/deploy/source/mirror.git` (deploy key read-only).
@@ -107,7 +110,7 @@ Rollback pemasangan: hapus `/opt/epv3/deploy` (tidak ada efek pada layanan).
 ```bash
 cd ops/deploy && python3 -m pytest -q tests
 ```
-54 tes simulasi (hasil nyata: 54 passed), semua lokal (git origin sementara, stub systemctl/pg_dump/health), tanpa jaringan/DB/service.
+57 tes simulasi (hasil nyata: 57 passed), semua lokal (git origin sementara, stub systemctl/pg_dump/health), tanpa jaringan/DB/service.
 
 Cakupan tambahan: config fail-closed, DB revision exact (tanpa wrapper), cutover frontend in-place + mount basi,
 drift tanpa override, SIGTERM, recover hanya restart unit yang sempat di-restart, apply parsial + temp stray,
