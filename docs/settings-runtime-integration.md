@@ -82,8 +82,11 @@ are real backend transactions; partial batch completion is disclosed.
 
 Status: implemented and tested in the sandbox; NOT active anywhere else.
 `V3_WORKFLOW_AUTHORIZATION` is `legacy` (default) or `enforced`; `main.py` refuses
-`enforced` unless Settings is enabled and `APP_ENV=test`. Switching it on in any
-other environment needs a code change plus Owner approval.
+`enforced` unless Settings is enabled and either `APP_ENV=test` **or**
+`V3_WORKFLOW_ENFORCED_APPROVAL_REF` is set (Owner-attested cutover reference).
+The approval ref only permits process start; it does not flip the mode by itself.
+Default remains `legacy`. See `docs/authorization-enforced-cutover.md`.
+Direktur can read blockers via `GET /settings/authorization-status` (never echoes the ref).
 
 In `enforced` mode all 48 legacy production endpoints (41 workflow, 4 payroll,
 3 inbox) are resolved through `authorize_request`: capability + branch/assignment/
@@ -214,4 +217,6 @@ Settings activation order (Owner approval required for each step; nothing is don
 1. Back up and confirm migrations at `20261116_0012`.
 2. Bootstrap the Director with an Owner-attested reference (`bootstrap_director`), verify on staging.
 3. Set `V3_SETTINGS_ENABLED=true`, restart, log in as the Director, Pengaturan must show AKTIF.
-4. Keep `V3_WORKFLOW_AUTHORIZATION=legacy`; enforced cutover remains held.
+4. Keep `V3_WORKFLOW_AUTHORIZATION=legacy`; enforced cutover remains held until
+   inventory/mapping/Director approval and a separate deploy step
+   (`docs/authorization-enforced-cutover.md`).

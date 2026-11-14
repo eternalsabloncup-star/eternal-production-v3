@@ -11,14 +11,16 @@ it('menu Pengaturan wires the existing Settings entry without a duplicate endpoi
   expect(html).not.toMatch(/fetch\([^)]*\/settings\//);
 });
 it.each([
-  [{status:'ok'},'NONAKTIF',false],
-  [{status:'ok',settings_enabled:true,system_director:false},'TERBATAS',false],
-  [{status:'ok',settings_enabled:true,system_director:true},'AKTIF',true],
-])('settings access state %#',(auth,state,link)=>{
+  [{status:'ok'},'NONAKTIF',false,'legacy'],
+  [{status:'ok',settings_enabled:true,system_director:false,workflow_authorization:'legacy'},'TERBATAS',false,'legacy'],
+  [{status:'ok',settings_enabled:true,system_director:true,workflow_authorization:'legacy'},'AKTIF',true,'legacy'],
+  [{status:'ok',settings_enabled:true,system_director:true,workflow_authorization:'enforced'},'AKTIF',true,'enforced'],
+])('settings access state %#',(auth,state,link,mode)=>{
   const out=panel(auth);
   expect(out).toContain(`data-state="${state}"`);
+  expect(out).toContain(`data-workflow="${mode}"`);
   expect(out.includes('href="/?view=settings"')).toBe(link);
-  expect(out).toContain('tetap legacy');
+  expect(out).toContain(`Mode otorisasi workflow: ${mode}`);
 });
 it('missing auth object never exposes the link',()=>{
   expect(new Function('window','escape',`${html.slice(start,end)}return settingsAccessPanel();`)({},(s:string)=>s)).not.toContain('href=');

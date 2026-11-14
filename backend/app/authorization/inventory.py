@@ -61,8 +61,11 @@ def user_report(user, access) -> dict:
     }
 
 
-async def build(session) -> dict:
-    await session.execute(text('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'))
+async def build(session, *, declare_readonly: bool = True) -> dict:
+    # CLI starts a fresh txn and declares READ ONLY. HTTP callers already hold a
+    # request transaction that may have read rows; skip SET TRANSACTION there.
+    if declare_readonly:
+        await session.execute(text('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'))
     users = (await session.scalars(select(User).order_by(User.id))).all()
     rows, inactive, revision = [], [], None
     for user in users:
