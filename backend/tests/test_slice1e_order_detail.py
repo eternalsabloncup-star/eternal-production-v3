@@ -74,6 +74,26 @@ async def test_backend_detail_preserves_mixed_print_and_header():
     assert so["buffer_stock"] is None
 
 
+@pytest.mark.asyncio
+async def test_nested_item_and_sales_object_keep_line_identity():
+    class Nested(Gateway):
+        async def get(self, path, *, params=None):
+            return {"sales_order": {
+                "number": "SO-NESTED", "customer": {"name": "Outlet A"}, "sales": {"name": "Sari", "id": "9"},
+                "line_items": [
+                    {"id": "L1", "item": {"id": "501", "no": "CUP-A", "name": "Cup A"}, "quantity": 10, "variant": "Merah", "production_process": "print"},
+                    {"detail_id": "L2", "item": {"id": "502", "code": "CUP-B", "name": "Cup B"}, "quantity": 5, "production_process": "print"},
+                ]}}
+
+    so = await get_sales_order(Nested(), "SO-NESTED")
+    assert so["sales"] == "Sari" and so["customer"] == "Outlet A"
+    assert so["line_items"][0]["accurate_line_id"] == "L1"
+    assert so["line_items"][0]["item_code"] == "CUP-A" and so["line_items"][0]["color"] == "Merah"
+    assert so["line_items"][0]["accurate_item_id"] == "501"
+    assert so["line_items"][1]["accurate_line_id"] == "L2" and so["line_items"][1]["item_code"] == "CUP-B"
+    assert so["line_items"][1]["color"] is None
+
+
 def test_list_summary_keeps_lines_null():
     row = normalize_summary(
         {

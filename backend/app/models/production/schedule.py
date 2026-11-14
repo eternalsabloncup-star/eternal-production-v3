@@ -42,6 +42,9 @@ class ScheduleAssignment(Base):
     product_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     color_pass: Mapped[int] = mapped_column(Integer, default=1)
     operator_name: Mapped[str] = mapped_column(String(120))
+    operator_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
     machine_name: Mapped[str] = mapped_column(String(120))
     work_date: Mapped[date] = mapped_column(Date)
     branch_id: Mapped[str] = mapped_column(String(64))

@@ -43,6 +43,7 @@ async def upsert_job_line_qty(
     po_qty: Decimal,
     accurate_item_id: str | None = None,
     production_process: str | None = None,
+    from_accurate: bool = False,
 ) -> JobLineQty:
     if not (so_line_id or "").strip():
         raise HTTPException(422, "Accurate line id wajib")
@@ -64,7 +65,37 @@ async def upsert_job_line_qty(
         )
         session.add(row)
     else:
+        if from_accurate and row.po_qty != po_qty:
+            committed = await session.scalar(
+                select(func.count()).select_from(ScheduleAssignment).where(
+                    ScheduleAssignment.job_id == job.id,
+                    ScheduleAssignment.so_line_id == so_line_id,
+                )
+            ) or await session.scalar(
+                select(func.count()).select_from(ProductionEvent).where(
+                    ProductionEvent.job_id == job.id,
+                    ProductionEvent.so_line_id == so_line_id,
+                )
+            ) or await session.scalar(
+                select(func.count()).select_from(PrepState).where(
+                    PrepState.job_id == job.id, PrepState.so_line_id == so_line_id
+                )
+            )
+            if committed:
+                # Historical approvals and quantities stay; the change is surfaced for review.
+                row.source_qty = po_qty
+                row.drift_detected_at = func.now()
+                if accurate_item_id is not None:
+                    row.accurate_item_id = accurate_item_id or None
+                await session.flush()
+                return row
+        if from_accurate and row.po_qty == po_qty and row.source_qty is not None:
+            row.source_qty = None
+            row.drift_detected_at = None
         if row.po_qty != po_qty:
+            if from_accurate:
+                row.source_qty = None
+                row.drift_detected_at = None
             # Do not silently raise ceiling below already prepared helper qty.
             helper = await session.scalar(
                 select(PrepState).where(
@@ -138,6 +169,7 @@ async def sync_job_lines_from_so_detail(
             po_qty=po_qty,
             accurate_item_id=item_id_s or None,
             production_process=line.get("production_process"),
+            from_accurate=True,
         )
         synced.append(row)
     return synced
@@ -188,6 +220,16 @@ async def set_preparation(
     else:
         raise HTTPException(422, "Role persiapan tidak valid")
     _branch(user, job.branch_id)
+    existing_line = await session.scalar(
+        select(JobLineQty).where(
+            JobLineQty.job_id == job.id, JobLineQty.so_line_id == so_line_id
+        )
+    )
+    if existing_line is not None and (existing_line.production_process or "").strip() == "non_print":
+        raise HTTPException(
+            409,
+            "Line non-print tidak masuk alur cetak. Packing langsung setelah payment dan bukti fisik.",
+        )
     await gates_open_for_schedule(job, session)
     if qty < 0:
         raise HTTPException(422, "Qty persiapan tidak valid")

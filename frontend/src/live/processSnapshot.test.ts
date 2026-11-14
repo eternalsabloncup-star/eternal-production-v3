@@ -54,6 +54,7 @@ describe("Slice 1H official team tasks mapping", () => {
     expect(officialStateToUi("actionable")).toBe("Siap");
     expect(officialStateToUi("blocked")).toBe("Menunggu");
     expect(officialStateToUi("done")).toBe("Selesai");
+    expect(officialStateToUi("partial")).toBe("Loading Parsial");
     expect(
       syncGateFromJobStatuses({
         design_status: "approved",

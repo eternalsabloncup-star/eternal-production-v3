@@ -35,8 +35,9 @@ def test_manifest_covers_actual_routes():
     from app.api.production.workflow import router as w
     from app.api.production_inbox import router as i
     from app.api.production.payroll import router as p
-    for router,mapping in [(w,WORKFLOW),(i,INBOX),(p,PAYROLL)]:
-        assert {r.endpoint.__name__ for r in router.routes}==set(mapping)
+    from app.api.production.operations import router as o
+    for routers,mapping in [((w,o),WORKFLOW),((i,),INBOX),((p,),PAYROLL)]:
+        assert {r.endpoint.__name__ for router in routers for r in router.routes}==set(mapping)
         assert all(cap in CATALOG for cap,_ in mapping.values())
 
 async def grant(db,cap,ownership='all'):
@@ -136,15 +137,16 @@ async def test_every_legacy_endpoint_denies_empty_settings_grants(enforced):
     from app.api.production.workflow import router as w
     from app.api.production_inbox import router as i
     from app.api.production.payroll import router as p
+    from app.api.production.operations import router as o
     import re
     count=0
-    for router in (w,i,p):
+    for router in (w,i,p,o):
         for route in router.routes:
             path=re.sub(r'\{[^}]+\}','1','/api/v1'+route.path)
             r=await c.request(next(iter(route.methods)),path,headers=operator,json={})
             assert r.status_code==403,(path,r.status_code,r.text)
             count+=1
-    assert count==49
+    assert count==61
 
 async def test_ownership_concurrent_revision_and_atomic_audit(enforced,monkeypatch):
     import asyncio

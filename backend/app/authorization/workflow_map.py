@@ -9,6 +9,18 @@ WORKFLOW = {
  'create_job': ('job.create', ('job.create',)),
  'evidence_capability': ('evidence.capability.read', ()),
  'payment_receipts_list': ('payment.evidence.read', ('job.read',)),
+ 'payment_unsynced_list': ('payment.evidence.read', ('job.read',)),
+ 'deliveries_list': ('delivery.schedule.read', ('job.read',)),
+ 'buffer_monitor': ('delivery.schedule.read', ('job.read',)),
+ 'delivery_plan_save': ('delivery.plan.manage', ('delivery.manage',)),
+ 'delivery_plan_history': ('delivery.schedule.read', ('job.read',)),
+ 'drift_acknowledge': ('job.qty_drift.acknowledge', ('schedule.manage',)),
+ 'payroll_runs_list': ('payroll.run.read', ('payroll.read',)),
+ 'machines_list': ('machine.read', ('job.read',)),
+ 'machine_create': ('machine.manage', ('schedule.manage',)),
+ 'machine_update': ('machine.manage', ('schedule.manage',)),
+ 'report_summary': ('report.production.read', ('job.read',)),
+ 'assignees_list': ('assignee.read', ('job.read',)),
  'list_team_tasks': ('task.read', ('job.read',)),
  'list_team_tasks_with_sync': ('task.read', ('job.read',)),
  'get_job_by_so': ('job.read', ('job.read',)),
@@ -62,5 +74,5 @@ SENSITIVE_FIELDS = {
  'events': 'audit.production.read', 'prep_events': 'audit.production.read',
 }
 # Aggregate job views require branch-wide grants, not an assignment-only grant.
-COLLECTIONS = {'payment_receipts_list', 'list_team_tasks', 'list_team_tasks_with_sync', 'inbox', 'order_detail',
+COLLECTIONS = {'payment_receipts_list', 'payment_unsynced_list', 'deliveries_list', 'buffer_monitor', 'machines_list', 'payroll_runs_list', 'report_summary', 'assignees_list', 'list_team_tasks', 'list_team_tasks_with_sync', 'inbox', 'order_detail',
                'permissions_catalog', 'evidence_capability'}

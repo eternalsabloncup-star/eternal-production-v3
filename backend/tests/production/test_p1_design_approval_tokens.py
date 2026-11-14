@@ -321,7 +321,8 @@ async def test_nonprint_bypasses_design_gate(client):
             "qty_planned": "10",
         },
     )
-    assert sched.status_code == 200, sched.text
+    assert sched.status_code == 409 and "non-print" in sched.text
+    assert "Design" not in sched.text
 
 
 @pytest.mark.asyncio

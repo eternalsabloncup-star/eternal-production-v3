@@ -157,7 +157,9 @@ def test_non_print_no_fake_screen_sample_print():
     assert "sample" not in kinds
     assert "print" not in kinds
     assert "design_upload" not in kinds
-    assert _states(tasks)["stockprep"] == "actionable"
+    assert "stockprep" not in kinds
+    assert "schedule" not in kinds
+    assert _states(tasks)["stockpack"] == "actionable"
 
 
 def test_payment_not_guessed_from_terproses():
@@ -364,7 +366,8 @@ async def test_tasks_api_non_print_no_screen(client: AsyncClient) -> None:
     )
     listed = await client.get("/api/v1/production/jobs/tasks?so=SO/1H/STOCK")
     kinds = {t["kind"] for t in listed.json()["tasks"]}
-    assert "stockprep" in kinds
+    assert "stockpack" in kinds
+    assert "stockprep" not in kinds
     assert "screen" not in kinds
     assert "print" not in kinds
     assert "design_upload" not in kinds

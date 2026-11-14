@@ -93,7 +93,7 @@ def role_for(capability):
 async def authorize_request(session,user,request):
     endpoint=request.scope.get('endpoint')
     module=getattr(endpoint,'__module__',''); name=getattr(endpoint,'__name__','')
-    maps={'app.api.production.workflow':WORKFLOW,'app.api.production.payroll':PAYROLL,'app.api.production_inbox':INBOX}
+    maps={'app.api.production.workflow':WORKFLOW,'app.api.production.operations':WORKFLOW,'app.api.production.payroll':PAYROLL,'app.api.production_inbox':INBOX}
     mapping=maps.get(module)
     if mapping is None:
         if module.startswith('app.authorization.'): return  # separately guarded new routes
@@ -159,6 +159,11 @@ async def authorize_request(session,user,request):
         job=await session.scalar(select(ProductionJob).where(ProductionJob.accurate_so_number==params['so_number']))
         if job is None: raise HTTPException(404,'Job not found')
     branch=job.branch_id if job else body.get('branch_id')
+    if name=='machine_update':
+        from app.models.production.operations import ProductionMachine
+        machine=await session.get(ProductionMachine,number(params['machine_id']))
+        if machine is None: raise HTTPException(404,'Machine not found')
+        branch=machine.branch_id
     if name in {'create_run','get_run'}:
         run=await session.get(PayrollRun,number(params['run_id'])) if name=='get_run' else await session.scalar(select(PayrollRun).where(PayrollRun.idempotency_key==body.get('idempotency_key')))
         if run is not None:
