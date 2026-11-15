@@ -1,8 +1,8 @@
 /**
- * Focused pure checks for Fase 1B final-fix schedule navigation helpers.
+ * Focused Vitest checks for Fase 1B schedule navigation helpers.
  * Mirrors live-runtime selection rules (no DOM / no Live writes).
  */
-import assert from "node:assert/strict";
+import { describe, expect, it } from "vitest";
 
 function scheduleApiItemFor(items, so, opts = {}) {
   const forSo = items.filter((r) => r && r.accurate_so_number === so);
@@ -62,23 +62,41 @@ const items = [
   },
 ];
 
-// Off-inbox dual operators: assignment id must not swap.
-const hitA = scheduleApiItemFor(items, "SO/OFF", {
-  lineId: "L-PRINT",
-  assignmentId: 11,
+describe("schedule navigation focus (Fase 1B)", () => {
+  it("resolves off-Inbox dual operators without swapping assignment identity", () => {
+    const hitA = scheduleApiItemFor(items, "SO/OFF", {
+      lineId: "L-PRINT",
+      assignmentId: 11,
+    });
+    const hitB = scheduleApiItemFor(items, "SO/OFF", {
+      lineId: "L-PRINT",
+      assignmentId: 12,
+    });
+    expect(hitA.row_key).toBe("2:L-PRINT:a11");
+    expect(hitB.row_key).toBe("2:L-PRINT:a12");
+    expect(String(hitA.so_line_id)).toBe("L-PRINT");
+    expect(String(hitB.so_line_id)).toBe("L-PRINT");
+    expect(hitA.assignment_id).toBe(11);
+    expect(hitB.assignment_id).toBe(12);
+  });
+
+  it("resolves Inbox-page SO by so_line_id for Detail / Atur Operator", () => {
+    const hit = scheduleApiItemFor(items, "SO/INBOX", {
+      lineId: "L1",
+      assignmentId: 10,
+    });
+    expect(hit).not.toBeNull();
+    expect(hit.accurate_so_number).toBe("SO/INBOX");
+    expect(hit.so_line_id).toBe("L1");
+    expect(hit.assignment_id).toBe(10);
+  });
+
+  it("keeps Live schedule path independent of Inbox preview flag", () => {
+    expect(isLiveRuntime(false)).toBe(true);
+    expect(isLiveRuntime(true)).toBe(false);
+  });
+
+  it("returns null for missing SO so callers must surface an error", () => {
+    expect(scheduleApiItemFor(items, "SO/MISSING", {})).toBeNull();
+  });
 });
-const hitB = scheduleApiItemFor(items, "SO/OFF", {
-  lineId: "L-PRINT",
-  assignmentId: 12,
-});
-assert.equal(hitA.row_key, "2:L-PRINT:a11");
-assert.equal(hitB.row_key, "2:L-PRINT:a12");
-
-// Live runtime independent of inbox success flag.
-assert.equal(isLiveRuntime(false), true);
-assert.equal(isLiveRuntime(true), false);
-
-// Missing SO → null (caller must surface error, not silent no-op).
-assert.equal(scheduleApiItemFor(items, "SO/MISSING", {}), null);
-
-console.log("schedule-nav-focus.test.mjs PASS");
