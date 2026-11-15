@@ -74,6 +74,27 @@ async def ctx(case, session):
     return await session.get(User, case[0]), await session.get(ProductionJob, case[1])
 
 
+async def enable_bypass_setting(session, user):
+    """Seed bypass_enabled=true on disposable test DB (new installs default false).
+
+    Uses ORM write on the settings row — mirrors Owner enabling via Settings API.
+    """
+    del user  # actor not required for test seed
+    from app.models.production.payment_settings import DEFAULT_PAYMENT_SETTINGS
+    from app.services.production import payment_settings as pay_settings
+
+    row = await pay_settings.get_or_create_settings(session)
+    cfg = dict(DEFAULT_PAYMENT_SETTINGS)
+    if isinstance(row.config_json, dict):
+        cfg.update({k: v for k, v in row.config_json.items() if isinstance(v, bool)})
+    if cfg.get("bypass_enabled") is True:
+        await session.commit()
+        return
+    cfg["bypass_enabled"] = True
+    row.config_json = cfg
+    await session.commit()
+
+
 async def record(case, rid="910", **kwargs):
     async with get_session_factory()() as session:
         user, job = await ctx(case, session)
@@ -90,6 +111,9 @@ def test_monitor_financial_fields_never_invent_outstanding():
     assert fields["invoice_amount"] is None
     assert fields["outstanding_amount"] is None
     assert fields["financial_settlement_known"] is False
+    assert fields["financial_payment_status"] == "UNKNOWN"
+    assert fields["approval_source"] == "Penerimaan"
+    assert fields["invoice_total"] is None
 
 
 async def test_no_verified_payment_stays_pending(case):
@@ -168,6 +192,7 @@ async def test_wrong_so_association_rejected(case):
 async def test_cross_branch_unauthorized(case):
     async with get_session_factory()() as session:
         user, job = await ctx(case, session)
+        await enable_bypass_setting(session, user)
         user.branch_ids = ["BR-OTHER"]
         with pytest.raises(HTTPException) as exc:
             await engine.bypass_payment(session, user, job, reason="wrong branch attempt")
@@ -177,6 +202,7 @@ async def test_cross_branch_unauthorized(case):
 async def test_authorized_bypass_reason_and_audit(case):
     async with get_session_factory()() as session:
         user, job = await ctx(case, session)
+        await enable_bypass_setting(session, user)
         row = await engine.bypass_payment(
             session, user, job, reason="Director tempo approval", idempotency_key="bypass-f2-1"
         )
@@ -192,6 +218,7 @@ async def test_authorized_bypass_reason_and_audit(case):
 async def test_unauthorized_bypass_and_missing_reason(case):
     async with get_session_factory()() as session:
         user, job = await ctx(case, session)
+        await enable_bypass_setting(session, user)
         user.permissions = []
         user.role = "operator"
         with pytest.raises(HTTPException) as exc:
@@ -200,6 +227,7 @@ async def test_unauthorized_bypass_and_missing_reason(case):
         await session.rollback()
     async with get_session_factory()() as session:
         user, job = await ctx(case, session)
+        await enable_bypass_setting(session, user)
         with pytest.raises(HTTPException) as exc:
             await engine.bypass_payment(session, user, job, reason="  ")
         assert exc.value.status_code == 422
@@ -210,6 +238,7 @@ async def test_direktur_legacy_default_allows_without_jsonb_permission(case):
         user, job = await ctx(case, session)
         user.permissions = []  # no production.payment.bypass JSONB
         user.role = "Direktur"
+        await enable_bypass_setting(session, user)
         row = await engine.bypass_payment(
             session, user, job, reason="Direktur tempo approval", idempotency_key="bypass-dir-legacy-1"
         )
@@ -222,6 +251,7 @@ async def test_direktur_with_explicit_permission_still_allowed(case):
         user, job = await ctx(case, session)
         user.role = "Direktur"
         user.permissions = [P.PAYMENT_BYPASS]
+        await enable_bypass_setting(session, user)
         row = await engine.bypass_payment(
             session, user, job, reason="explicit grant path", idempotency_key="bypass-dir-explicit-1"
         )
@@ -254,6 +284,7 @@ async def test_role_spoof_via_request_fields_is_ignored(case):
 async def test_duplicate_bypass_idempotent(case):
     async with get_session_factory()() as session:
         user, job = await ctx(case, session)
+        await enable_bypass_setting(session, user)
         first = await engine.bypass_payment(
             session, user, job, reason="same reason", idempotency_key="bypass-dup-1"
         )
@@ -274,6 +305,7 @@ async def test_duplicate_bypass_idempotent(case):
 async def test_bypass_does_not_invent_outstanding(case):
     async with get_session_factory()() as session:
         user, job = await ctx(case, session)
+        await enable_bypass_setting(session, user)
         await engine.bypass_payment(
             session, user, job, reason="tempo", idempotency_key="bypass-out-1"
         )

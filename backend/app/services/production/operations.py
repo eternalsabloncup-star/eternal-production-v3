@@ -113,8 +113,15 @@ async def list_deliveries(
     date_to: date | None = None,
     page: int = 1,
     page_size: int = 25,
+    include_accurate_links: bool = False,
+    gateway=None,
 ) -> dict:
-    """One row per active Surat Jalan that has confirmed Loading (read-only, branch scoped)."""
+    """One row per Surat Jalan (canonical accurate_sj_id), read-only, branch scoped.
+
+    Base inventory = V3 Loading events. Optional ``include_accurate_links`` adds SJ IDs
+    discovered on Accurate SO detail ``links.delivery_note_ids`` (still not a global
+    Accurate SJ list — Gateway has no list-all endpoint).
+    """
     engine._require(user, P.JOB_READ)
     from app.authorization.workflow import branch_allowed
 
@@ -142,41 +149,79 @@ async def list_deliveries(
             )
         )
     pairs = [(j, s) for j, s in (await session.execute(sj_ids)).all()]
-    if not pairs:
-        return {"items": [], "total": 0, "page": page, "page_size": page_size, "has_more": False, "coverage": _coverage()}
     job_ids = sorted({j for j, _ in pairs})
-    jobs = {j.id: j for j in (await session.scalars(select(ProductionJob).where(ProductionJob.id.in_(job_ids)))).all()}
-    events = (
-        await session.scalars(
-            select(ProductionEvent).where(
-                ProductionEvent.job_id.in_(job_ids),
-                ProductionEvent.event_type.in_(
-                    [engine.LOADING_EVENT, engine.LOADING_CANCEL_EVENT, "pod", "sj_cancelled"]
-                ),
-                ProductionEvent.accurate_sj_id.is_not(None),
+    # Jobs in scope (for Accurate SO-link discovery even when no Loading yet).
+    scoped_jobs = list(
+        (
+            await session.scalars(
+                select(ProductionJob)
+                .where(ProductionJob.branch_id.in_(allowed or [""]))
+                .order_by(ProductionJob.id.desc())
+                .limit(80)
             )
+        ).all()
+    )
+    jobs = {j.id: j for j in scoped_jobs}
+    if job_ids:
+        for j in (
+            await session.scalars(select(ProductionJob).where(ProductionJob.id.in_(job_ids)))
+        ).all():
+            jobs[j.id] = j
+    if not pairs and not (include_accurate_links and scoped_jobs):
+        return {
+            "items": [],
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+            "has_more": False,
+            "coverage": _coverage(include_accurate_links=include_accurate_links),
+        }
+    events = []
+    if job_ids:
+        events = list(
+            (
+                await session.scalars(
+                    select(ProductionEvent).where(
+                        ProductionEvent.job_id.in_(job_ids),
+                        ProductionEvent.event_type.in_(
+                            [engine.LOADING_EVENT, engine.LOADING_CANCEL_EVENT, "pod", "sj_cancelled"]
+                        ),
+                        ProductionEvent.accurate_sj_id.is_not(None),
+                    )
+                )
+            ).all()
         )
-    ).all()
     by_sj: dict[tuple, list] = defaultdict(list)
     for ev in events:
         by_sj[(ev.job_id, ev.accurate_sj_id)].append(ev)
-    plans = {
-        (p.job_id, p.accurate_sj_id): p
-        for p in (await session.scalars(select(DeliveryPlan).where(DeliveryPlan.job_id.in_(job_ids)))).all()
-    }
+    plans = {}
+    if job_ids:
+        plans = {
+            (p.job_id, p.accurate_sj_id): p
+            for p in (
+                await session.scalars(select(DeliveryPlan).where(DeliveryPlan.job_id.in_(job_ids)))
+            ).all()
+        }
     courier_ids = {p.courier_user_id for p in plans.values() if p.courier_user_id}
     couriers = {}
     if courier_ids:
-        couriers = {u.id: u.display_name for u in (await session.scalars(select(User).where(User.id.in_(courier_ids)))).all()}
+        couriers = {
+            u.id: u.display_name
+            for u in (await session.scalars(select(User).where(User.id.in_(courier_ids)))).all()
+        }
     from app.models.production.prep import JobLineQty
 
-    po_totals = dict(
-        (await session.execute(
-            select(JobLineQty.job_id, func.coalesce(func.sum(JobLineQty.po_qty), 0))
-            .where(JobLineQty.job_id.in_(job_ids))
-            .group_by(JobLineQty.job_id)
-        )).all()
-    )
+    po_totals = {}
+    if job_ids:
+        po_totals = dict(
+            (
+                await session.execute(
+                    select(JobLineQty.job_id, func.coalesce(func.sum(JobLineQty.po_qty), 0))
+                    .where(JobLineQty.job_id.in_(job_ids))
+                    .group_by(JobLineQty.job_id)
+                )
+            ).all()
+        )
     cancelled_sj = {k for k, v in by_sj.items() if any(e.event_type == "sj_cancelled" for e in v)}
     job_delivered: dict[int, Decimal] = defaultdict(Decimal)
     for (jid, sid), evs_ in by_sj.items():
@@ -186,7 +231,12 @@ async def list_deliveries(
     sla_cache: dict[int, dict] = {}
     today = today_wib()
     rows = []
+    seen_sj: set[str] = set()
     for (job_id, sj_id) in sorted(set(pairs), key=lambda p: (-p[0], p[1])):
+        # Canonical identity = Accurate SJ id — never duplicate one SJ across jobs.
+        if sj_id in seen_sj:
+            continue
+        seen_sj.add(sj_id)
         job = jobs[job_id]
         evs = by_sj[(job_id, sj_id)]
         cancelled = any(e.event_type == "sj_cancelled" for e in evs)
@@ -197,11 +247,29 @@ async def list_deliveries(
         pods = [e for e in evs if e.event_type == "pod"]
         delivered = sum((Decimal(e.qty_physical or 0) for e in pods), Decimal(0))
         sj_lines: dict[str, Decimal] = {}
+        items_by_line: dict[str, dict] = {}
         for e in sorted((e for e in evs if e.event_type == engine.LOADING_EVENT), key=lambda e: e.id):
-            base = _payload(e).get("authorized_base")
-            if base is not None and e.accurate_sj_line_id:
-                sj_lines[e.accurate_sj_line_id] = Decimal(str(base))
+            payload = _payload(e)
+            base = payload.get("authorized_base")
+            line_id = (e.accurate_sj_line_id or "").strip()
+            if base is not None and line_id:
+                sj_lines[line_id] = Decimal(str(base))
+            if line_id and line_id not in items_by_line:
+                items_by_line[line_id] = {
+                    "accurate_sj_line_id": line_id,
+                    "so_line_id": e.so_line_id,
+                    "item_code": payload.get("item_code") or payload.get("sku"),
+                    "item_name": payload.get("item_name") or payload.get("item"),
+                    "qty": str(base) if base is not None else (str(e.qty_physical) if e.qty_physical is not None else None),
+                    "unit": payload.get("uom") or payload.get("unit") or "PCS",
+                    "outlet": None,
+                }
+                if items_by_line[line_id]["item_code"] is None and items_by_line[line_id]["item_name"] is None:
+                    items_by_line[line_id]["item_code"] = None
+                    items_by_line[line_id]["item_name"] = None
+                    items_by_line[line_id]["name_status"] = "BELUM TERSEDIA"
         sj_qty = sum(sj_lines.values(), Decimal(0))
+        items = list(items_by_line.values())
         plan = plans.get((job_id, sj_id))
         planned = plan.planned_date if plan else None
         if cancelled:
@@ -231,37 +299,98 @@ async def list_deliveries(
         receiver = None
         if last_pod and (last_pod.reason or "").startswith("receiver:"):
             receiver = last_pod.reason[len("receiver:"):].strip() or None
+        proof_status = "ada_pod" if pods else "belum_ada_pod"
+        # Accurate gateway exposes GET /delivery-notes/{id} only — no list-all.
+        # Address/zone/expedition/remarks/printed_at are not in the verified V3 SJ contract.
+        unavailable = "BELUM TERSEDIA"
         rows.append(
             {
                 "job_id": job_id,
+                "sj_id": sj_id,
                 "accurate_so_number": job.accurate_so_number,
+                "po_number": job.accurate_so_number,
                 "accurate_sj_id": sj_id,
                 "accurate_sj_number": number,
+                "sj_number": number,
                 "customer_name": job.customer_name,
                 "branch_id": job.branch_id,
                 "planned_date": planned.isoformat() if planned else None,
+                "delivery_date": planned.isoformat() if planned else None,
+                "sj_printed_at": None,
                 "courier_user_id": plan.courier_user_id if plan else None,
                 "courier_name": couriers.get(plan.courier_user_id) if plan and plan.courier_user_id else None,
+                "expedition": None,
+                "zone": None,
+                "outlet": None,
+                "remarks": None,
+                "item_count": len(items),
+                "total_qty": str(sj_qty),
+                "items": items,
+                "item_codes": ", ".join(
+                    str(i.get("item_code") or unavailable) for i in items
+                ) if items else unavailable,
+                "item_names": ", ".join(
+                    str(i.get("item_name") or unavailable) for i in items
+                ) if items else unavailable,
                 "qty_sj": str(sj_qty),
                 "qty_loaded": str(loaded),
                 "qty_delivered": str(delivered),
                 "qty_remaining_to_deliver": str(max(loaded - delivered, Decimal(0))),
                 "qty_remaining_to_load": str(max(sj_qty - loaded, Decimal(0))),
                 "delivery_status": delivery_status,
+                "loading_status": (
+                    "selesai" if sj_qty > 0 and loaded >= sj_qty
+                    else ("sebagian" if loaded > 0 else "belum")
+                ),
                 "schedule_status": schedule_status,
+                "proof_status": proof_status,
                 "sla": sla,
                 "urgent": (job.urgent_state or "") in URGENT_STATES,
                 "buffer_stock": bool(job.buffer_stock),
                 "recipient_name": receiver,
                 "address": None,
+                "customer_address": None,
+                "customer_phone": None,
+                "sales_name": None,
+                "created_by": None,
                 "po_qty_total": str(Decimal(po_totals.get(job_id) or 0)),
                 "po_qty_delivered": str(job_delivered[job_id]),
                 "po_complete": bool(
                     Decimal(po_totals.get(job_id) or 0) > 0
                     and job_delivered[job_id] >= Decimal(po_totals.get(job_id) or 0)
                 ),
+                "inventory_source": "v3_loading",
+                "field_availability": {
+                    "address": unavailable,
+                    "zone": unavailable,
+                    "expedition": unavailable,
+                    "remarks": unavailable,
+                    "sj_printed_at": unavailable,
+                    "customer_phone": unavailable,
+                    "sales_name": unavailable,
+                    "created_by": unavailable,
+                    "note": (
+                        "Gateway Accurate hanya GET /delivery-notes/{id} (tidak ada list-all). "
+                        "Baris Loading = inventaris V3 terverifikasi. "
+                        "Opsional: tautan SO Accurate (include_accurate_links). "
+                        "Melihat jadwal tidak menulis Accurate."
+                    ),
+                },
             }
         )
+    link_meta = {"attempted": False, "added": 0, "errors": 0, "capped": False}
+    if include_accurate_links and gateway is not None:
+        link_meta["attempted"] = True
+        added, errors, capped = await _append_sj_from_accurate_so_links(
+            session,
+            gateway=gateway,
+            jobs=list(jobs.values()),
+            seen_sj=seen_sj,
+            rows=rows,
+            q=q,
+            today=today,
+        )
+        link_meta.update({"added": added, "errors": errors, "capped": capped})
     if status:
         rows = [r for r in rows if r["schedule_status"] == status or r["delivery_status"] == status]
     if date_from:
@@ -276,15 +405,229 @@ async def list_deliveries(
         "page": page,
         "page_size": page_size,
         "has_more": start + page_size < total,
-        "coverage": _coverage(),
+        "coverage": _coverage(
+            include_accurate_links=include_accurate_links, link_meta=link_meta
+        ),
     }
 
 
-def _coverage() -> dict:
+def _coverage(*, include_accurate_links: bool = False, link_meta: dict | None = None) -> dict:
     return {
-        "scope": "Surat Jalan dengan Loading terkonfirmasi pada job V3",
-        "address": "Belum tersedia; bukan syarat jadwal, Loading, atau POD",
+        "scope": "Satu baris per Surat Jalan Accurate (canonical accurate_sj_id)",
+        "source": (
+            "v3_loading (+ optional accurate_so_links). "
+            "BLOCKER: Accurate Gateway tidak mengekspos GET /delivery-notes list-all — "
+            "hanya GET /delivery-notes/{id} dan hint links.delivery_note_ids pada SO detail."
+        ),
+        "include_accurate_links": bool(include_accurate_links),
+        "accurate_link_meta": link_meta or {},
+        "address": "Pass-through bila Accurate mengirim; selain itu BELUM TERSEDIA",
+        "accurate_write_on_view": False,
+        "accurate_sj_list_endpoint": None,
     }
+
+
+async def _append_sj_from_accurate_so_links(
+    session: AsyncSession,
+    *,
+    gateway,
+    jobs: list[ProductionJob],
+    seen_sj: set[str],
+    rows: list[dict],
+    q: str | None,
+    today: date,
+    fetch_cap: int = 25,
+) -> tuple[int, int, bool]:
+    """Discover SJ IDs from SO detail links — read-only; never invents SJ."""
+    from urllib.parse import quote
+
+    from fastapi import HTTPException as FastAPIHTTPException
+
+    added = 0
+    errors = 0
+    fetches = 0
+    term = (q or "").strip().lower()
+    for job in jobs:
+        if fetches >= fetch_cap:
+            return added, errors, True
+        so = (job.accurate_so_number or "").strip()
+        if not so:
+            continue
+        try:
+            detail = await gateway.get(f"/sales-orders/{quote(so, safe='')}")
+            fetches += 1
+        except Exception:
+            errors += 1
+            continue
+        links = (detail.get("links") or {}) if isinstance(detail, dict) else {}
+        dn_ids = links.get("delivery_note_ids") or []
+        if not isinstance(dn_ids, list):
+            continue
+        for raw_id in dn_ids:
+            sj_id = str(raw_id or "").strip()
+            if not sj_id or sj_id in seen_sj:
+                continue
+            if fetches >= fetch_cap:
+                return added, errors, True
+            note = None
+            try:
+                note = await gateway.get(f"/delivery-notes/{quote(sj_id, safe='')}")
+                fetches += 1
+            except FastAPIHTTPException:
+                errors += 1
+                # Still list the hint id without inventing detail fields.
+                note = None
+            except Exception:
+                errors += 1
+                note = None
+            number = None
+            customer = job.customer_name
+            items: list[dict] = []
+            sj_qty = Decimal(0)
+            address = zone = expedition = remarks = printed = None
+            cancelled = False
+            if isinstance(note, dict):
+                number = note.get("number") or sj_id
+                cust = note.get("customer") if isinstance(note.get("customer"), dict) else {}
+                customer = cust.get("name") or customer
+                address = note.get("address")
+                zone = note.get("zone")
+                expedition = note.get("expedition")
+                remarks = note.get("remarks")
+                printed = note.get("sj_printed_at")
+                cancelled = bool(note.get("cancelled"))
+                for ln in note.get("line_items") or []:
+                    if not isinstance(ln, dict):
+                        continue
+                    qty = ln.get("quantity")
+                    try:
+                        qv = Decimal(str(qty)) if qty is not None else Decimal(0)
+                    except Exception:
+                        qv = Decimal(0)
+                    sj_qty += qv
+                    items.append(
+                        {
+                            "accurate_sj_line_id": str(ln.get("accurate_sj_line_id") or "") or None,
+                            "so_line_id": str(ln.get("so_line_id") or "") or None,
+                            "item_code": ln.get("sku") or ln.get("item_code"),
+                            "item_name": ln.get("item_name") or ln.get("name"),
+                            "qty": str(qv) if qty is not None else None,
+                            "unit": ln.get("uom") or "PCS",
+                            "outlet": None,
+                        }
+                    )
+            else:
+                number = sj_id
+            if term and term not in " ".join(
+                [
+                    str(number or ""),
+                    str(so),
+                    str(customer or ""),
+                    str(sj_id),
+                ]
+            ).lower():
+                continue
+            unavailable = "BELUM TERSEDIA"
+            seen_sj.add(sj_id)
+            rows.append(
+                {
+                    "job_id": job.id,
+                    "sj_id": sj_id,
+                    "accurate_so_number": so,
+                    "po_number": so,
+                    "accurate_sj_id": sj_id,
+                    "accurate_sj_number": number,
+                    "sj_number": number,
+                    "customer_name": customer,
+                    "branch_id": job.branch_id,
+                    "planned_date": None,
+                    "delivery_date": None,
+                    "sj_printed_at": printed,
+                    "courier_user_id": None,
+                    "courier_name": None,
+                    "expedition": expedition,
+                    "zone": zone,
+                    "outlet": None,
+                    "remarks": remarks,
+                    "item_count": len(items),
+                    "total_qty": str(sj_qty),
+                    "items": items,
+                    "item_codes": ", ".join(str(i.get("item_code") or unavailable) for i in items)
+                    if items
+                    else unavailable,
+                    "item_names": ", ".join(str(i.get("item_name") or unavailable) for i in items)
+                    if items
+                    else unavailable,
+                    "qty_sj": str(sj_qty),
+                    "qty_loaded": "0",
+                    "qty_delivered": "0",
+                    "qty_remaining_to_deliver": "0",
+                    "qty_remaining_to_load": str(sj_qty),
+                    "delivery_status": "dibatalkan" if cancelled else "belum_dikirim",
+                    "loading_status": "belum",
+                    "schedule_status": "dibatalkan" if cancelled else "belum_dijadwalkan",
+                    "proof_status": "belum_ada_pod",
+                    "sla": {"date": None, "source": "non_final", "urgent": False},
+                    "urgent": (job.urgent_state or "") in URGENT_STATES,
+                    "buffer_stock": bool(job.buffer_stock),
+                    "recipient_name": None,
+                    "address": address,
+                    "customer_address": address,
+                    "customer_phone": None,
+                    "sales_name": None,
+                    "created_by": None,
+                    "po_qty_total": None,
+                    "po_qty_delivered": None,
+                    "po_complete": False,
+                    "inventory_source": "accurate_so_link",
+                    "field_availability": {
+                        "address": address or unavailable,
+                        "zone": zone or unavailable,
+                        "expedition": expedition or unavailable,
+                        "remarks": remarks or unavailable,
+                        "sj_printed_at": printed or unavailable,
+                        "note": "Ditemukan via SO links.delivery_note_ids — bukan list-all Accurate.",
+                    },
+                }
+            )
+            added += 1
+            _ = today  # reserved for future date filters on shipped_at
+    return added, errors, False
+
+
+async def get_delivery_by_sj(
+    session: AsyncSession,
+    user: User,
+    accurate_sj_id: str,
+    *,
+    gateway=None,
+) -> dict:
+    """Detail satu SJ (multi-item) — read-only, no Accurate mutation."""
+    sj = (accurate_sj_id or "").strip()
+    if not sj:
+        raise HTTPException(422, "accurate_sj_id wajib")
+    # Pull a large page then match exact SJ id (list is already branch-scoped + deduped).
+    # include_accurate_links when gateway given so SJ dari SO links tetap bisa dibuka.
+    listed = await list_deliveries(
+        session,
+        user,
+        page=1,
+        page_size=100,
+        include_accurate_links=gateway is not None,
+        gateway=gateway,
+    )
+    match = next((r for r in listed["items"] if r.get("accurate_sj_id") == sj), None)
+    if match is None and listed.get("has_more"):
+        page = 2
+        while match is None and page <= 20:
+            more = await list_deliveries(session, user, page=page, page_size=100)
+            match = next((r for r in more["items"] if r.get("accurate_sj_id") == sj), None)
+            if not more.get("has_more"):
+                break
+            page += 1
+    if match is None:
+        raise HTTPException(404, "Surat Jalan tidak ditemukan pada jadwal V3")
+    return {"item": match, "coverage": listed.get("coverage")}
 
 
 async def plan_delivery(

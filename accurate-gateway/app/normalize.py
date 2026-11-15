@@ -955,6 +955,36 @@ def normalize_delivery_note(raw: dict[str, Any]) -> dict[str, Any]:
     status = _status(raw)
     verifiable = not cancelled and status not in {"UNKNOWN", "DRAFT", "UNPOSTED", "CANCELLED"}
     line_items = normalize_delivery_note_lines(raw)
+    # Optional logistics fields — pass through only when Accurate sends them.
+    # Never invent address/zone/expedition from SO or fixtures.
+    address = _first_str(
+        raw.get("toAddress"),
+        raw.get("shipToAddress"),
+        raw.get("deliveryAddress"),
+        raw.get("address"),
+        raw.get("customerAddress"),
+    )
+    zone = _first_str(
+        raw.get("deliveryZone"),
+        raw.get("deliveryZoneName"),
+        raw.get("zone"),
+        raw.get("zona"),
+    )
+    expedition = _first_str(
+        raw.get("expedition"),
+        raw.get("shipping"),
+        raw.get("courier"),
+        raw.get("deliveryMethod"),
+        raw.get("carrier"),
+    )
+    remarks = _first_str(
+        raw.get("description"),
+        raw.get("notes"),
+        raw.get("memo"),
+        raw.get("remark"),
+        raw.get("remarks"),
+    )
+    printed_at = raw.get("printDate") or raw.get("printedAt") or raw.get("lastPrintDate")
     return {
         "id": str(raw.get("id") or raw.get("number") or raw.get("no") or ""),
         "number": str(raw.get("number") or raw.get("no") or raw.get("id") or ""),
@@ -963,6 +993,11 @@ def normalize_delivery_note(raw: dict[str, Any]) -> dict[str, Any]:
         "customer": _party(customer),
         "branch": branch,
         "shipped_at": raw.get("shipDate") or raw.get("transDate") or raw.get("shippedAt"),
+        "address": address or None,
+        "zone": zone or None,
+        "expedition": expedition or None,
+        "remarks": remarks or None,
+        "sj_printed_at": printed_at if printed_at else None,
         "cancelled": cancelled,
         "verifiable": verifiable,
         "line_items": line_items,

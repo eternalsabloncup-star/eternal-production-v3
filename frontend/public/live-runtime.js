@@ -4412,27 +4412,60 @@
   function opsDash(v) { return v == null || v === "" ? '<span class="muted">Belum tersedia</span>' : escapeHtml(String(v)); }
   const DEL_STATUS = { belum_dikirim: "Belum dikirim", sebagian: "Sebagian", terkirim: "Terkirim", dibatalkan: "Dibatalkan" };
   const DEL_SCHEDULE = { belum_dijadwalkan: "Belum dijadwalkan", terjadwal: "Terjadwal", hari_ini: "Hari ini", terlambat: "Terlambat" };
+  if (ops.delQ == null) ops.delQ = "";
+  if (ops.delDetail == null) ops.delDetail = null;
   guardDemoView("shippingScheduleView", function () {
-    if (opsStale("del") && !ops.err.del) opsLoad("del", "/production/ops/deliveries" + (ops.status ? "?status=" + encodeURIComponent(ops.status) : ""), function (d) { ops.del = d; });
+    const q = (ops.delQ || "").trim();
+    const path = "/production/ops/deliveries?" + [
+      ops.status ? "status=" + encodeURIComponent(ops.status) : "",
+      q ? "q=" + encodeURIComponent(q) : "",
+      "include_accurate_links=true",
+      "page=1",
+      "page_size=50",
+    ].filter(Boolean).join("&");
+    if (opsStale("del") && !ops.err.del) opsLoad("del", path, function (d) { ops.del = d; });
     const d = ops.del;
     let body;
     if (ops.err.del) body = '<div class="flat-notice" role="alert">' + escapeHtml(ops.err.del) + ' <button type="button" class="btn sm" data-ops="del-reload">Coba lagi</button></div>';
-    else if (!d) body = '<div class="flat-notice" role="status">Memuat jadwal pengiriman...</div>';
-    else if (!d.items.length) body = '<div class="flat-notice">Belum ada SJ yang sudah di-loading pada cabang Anda.</div>';
-    else body = '<div class="v36-table-container"><table class="v36-table"><thead><tr><th>PO</th><th>SJ</th><th>Pelanggan</th><th>Cabang</th><th>Alamat / penerima</th><th>Tgl rencana</th><th>Kurir</th><th>Qty SJ</th><th>Loading</th><th>Terkirim</th><th>Sisa kirim</th><th>Status</th><th>SLA</th><th>Aksi</th></tr></thead><tbody>' +
+    else if (!d) body = '<div class="flat-notice" role="status">Memuat jadwal pengiriman (satu baris per SJ)…</div>';
+    else if (!d.items.length) body = '<div class="flat-notice">Belum ada Surat Jalan dengan Loading V3 pada cabang Anda. Melihat halaman ini tidak menulis Accurate.</div>';
+    else body = '<div class="v36-table-container" style="overflow:auto;max-height:70vh"><table class="v36-table"><thead><tr><th>No. SJ</th><th>PO/SO</th><th>Pelanggan</th><th>Tgl rencana</th><th>Alamat</th><th>Zona</th><th>Ekspedisi/Kurir</th><th>Item</th><th>Qty SJ</th><th>Catatan</th><th>Status</th><th>Bukti</th><th>Aksi</th></tr></thead><tbody>' +
       d.items.map(function (r) {
-        const sla = r.sla && r.sla.date ? r.sla.date : null;
         const act = r.delivery_status === "terkirim" || r.delivery_status === "dibatalkan" ? "" :
           '<button type="button" class="btn sm" data-ops="plan" data-jid="' + escapeHtml(r.job_id) + '" data-sj="' + escapeHtml(r.accurate_sj_id) + '" data-courier="' + escapeHtml(r.courier_user_id == null ? "" : r.courier_user_id) + '" data-so="' + escapeHtml(r.accurate_so_number) + '" data-branch="' + escapeHtml(r.branch_id) + '" data-date="' + escapeHtml(r.planned_date || "") + '">' + (r.planned_date ? "Jadwal ulang" : "Jadwalkan") + "</button>";
-        return "<tr><td><b>" + escapeHtml(r.accurate_so_number) + "</b></td><td>" + opsDash(r.accurate_sj_number) + "</td><td>" + opsDash(r.customer_name) + "</td><td>" + opsDash(r.branch_id) + "</td><td>" + (r.address || r.recipient_name ? escapeHtml([r.address, r.recipient_name].filter(Boolean).join(" · ")) : '<span class="muted">Belum tersedia</span>') + "</td><td>" + opsDash(r.planned_date) + "</td><td>" + opsDash(r.courier_name) + "</td><td>" + opsNum(r.qty_sj) + "</td><td>" + opsNum(r.qty_loaded) + "</td><td>" + opsNum(r.qty_delivered) + "</td><td>" + opsNum(r.qty_remaining_to_deliver) + "</td><td>" + escapeHtml(DEL_STATUS[r.delivery_status] || r.delivery_status) + " · " + escapeHtml(DEL_SCHEDULE[r.schedule_status] || r.schedule_status) + (r.po_complete ? " · PO selesai" : "") + "</td><td>" + opsDash(sla) + "</td><td>" + act + "</td></tr>";
-      }).join("") + "</tbody></table></div><small>Alamat belum tersedia dan tidak menjadi syarat jadwal, Loading, atau POD; penerima hanya tampil dari POD (" + escapeHtml((d.coverage || "")) + ").</small>";
+        const zone = r.zone != null && r.zone !== "" ? escapeHtml(r.zone) : '<span class="muted">BELUM TERSEDIA</span>';
+        const exped = r.expedition != null && r.expedition !== "" ? escapeHtml(r.expedition) : (r.courier_name ? escapeHtml(r.courier_name) : '<span class="muted">BELUM TERSEDIA</span>');
+        const addr = r.address || r.customer_address || r.recipient_name;
+        const items = (r.item_count != null ? r.item_count + " baris" : "—") + (r.items && r.items.length ? "<br><small>" + escapeHtml((r.item_names || "").slice(0, 80)) + "</small>" : "");
+        return "<tr><td><b>" + opsDash(r.sj_number || r.accurate_sj_number) + "</b><br><small>ID " + escapeHtml(r.sj_id || r.accurate_sj_id) + "</small></td>" +
+          "<td>" + escapeHtml(r.po_number || r.accurate_so_number) + "</td><td>" + opsDash(r.customer_name) + "</td><td>" + opsDash(r.delivery_date || r.planned_date) + "</td>" +
+          "<td>" + (addr ? escapeHtml(addr) : '<span class="muted">BELUM TERSEDIA</span>') + "</td><td>" + zone + "</td><td>" + exped + "</td><td>" + items + "</td>" +
+          "<td>" + opsNum(r.total_qty || r.qty_sj) + "</td><td>" + (r.remarks != null && r.remarks !== "" ? escapeHtml(r.remarks) : '<span class="muted">BELUM TERSEDIA</span>') + "</td>" +
+          "<td>" + escapeHtml(DEL_STATUS[r.delivery_status] || r.delivery_status) + "<br><small>" + escapeHtml(DEL_SCHEDULE[r.schedule_status] || r.schedule_status) + "</small></td>" +
+          "<td>" + escapeHtml(r.proof_status || "—") + "</td><td>" + act +
+          ' <button type="button" class="btn sm" data-ops="sj-detail" data-sj="' + escapeHtml(r.accurate_sj_id) + '">Detail</button></td></tr>';
+      }).join("") + "</tbody></table></div><small>Entitas utama = Surat Jalan (bukan PO). Alamat/zona/ekspedisi Accurate list: BELUM TERSEDIA hingga kontrak gateway. accurate_write_on_view=false.</small>";
     let planForm = "";
     if (ops.plan) {
       const cs = ops.couriers[ops.plan.branch];
       planForm = '<section class="flat-notice" id="v3-plan-form"><b>' + (ops.plan.date ? "Jadwal ulang" : "Jadwalkan") + " SJ " + escapeHtml(ops.plan.sj) + " · PO " + escapeHtml(ops.plan.so) + '</b><br><label>Tanggal <input id="v3-plan-date" type="date" value="' + escapeHtml(ops.plan.date) + '"></label> <label>Kurir <select id="v3-plan-courier"><option value="">' + (cs ? (cs.length ? "— belum ditentukan —" : "Tidak ada akun kurir berizin") : "Memuat...") + "</option>" + (cs || []).map(function (c) { return '<option value="' + escapeHtml(c.id) + '"' + (String(c.id) === String(ops.plan.courier) ? " selected" : "") + ">" + escapeHtml(c.display_name) + "</option>"; }).join("") + "</select></label> " + (ops.plan.date ? '<label>Alasan <input id="v3-plan-reason" placeholder="wajib"></label> ' : '<input id="v3-plan-reason" type="hidden" value="">') + '<button type="button" class="btn sm" data-ops="plan-save">Simpan</button> <button type="button" class="btn sm" data-ops="plan-cancel">Batal</button></section>';
     }
-    return opsHead("Jadwal Pengiriman", "Daftar SJ dari event Loading/POD resmi V3") + planForm +
-      '<div class="v36-toolbar"><label>Status <select id="v3-ops-status">' + [["", "Semua"], ["belum_dikirim", "Belum dikirim"], ["sebagian", "Sebagian"], ["terkirim", "Terkirim"], ["terlambat", "Terlambat"]].map(function (o) { return '<option value="' + o[0] + '"' + (ops.status === o[0] ? " selected" : "") + ">" + o[1] + "</option>"; }).join("") + '</select></label> <button type="button" class="btn sm" data-ops="del-reload">Muat ulang</button></div>' + body;
+    let detail = "";
+    if (ops.delDetail) {
+      if (ops.delDetail.error) detail = '<section class="flat-notice" role="alert"><b>Detail SJ:</b> ' + escapeHtml(ops.delDetail.error) + "</section>";
+      else if (ops.delDetail.item) {
+        const it = ops.delDetail.item;
+        const lines = (it.items || []).map(function (ln, i) {
+          return "<tr><td>" + (i + 1) + "</td><td>" + opsDash(ln.accurate_sj_line_id) + "</td><td>" + opsDash(ln.item_code) + "</td><td>" + opsDash(ln.item_name) + "</td><td>" + opsNum(ln.qty) + "</td><td>" + opsDash(ln.unit) + "</td></tr>";
+        }).join("") || "<tr><td colspan=\"6\"><span class=\"muted\">BELUM TERSEDIA — item nama/kode dari payload Loading terbatas</span></td></tr>";
+        detail = '<section class="flat-notice" id="v3-sj-detail"><b>Detail SJ ' + escapeHtml(it.sj_number || it.accurate_sj_number) + "</b> · PO " + escapeHtml(it.po_number || it.accurate_so_number) +
+          '<div class="v36-table-container"><table class="v36-table"><thead><tr><th>#</th><th>Line SJ</th><th>Kode</th><th>Nama</th><th>Qty</th><th>Unit</th></tr></thead><tbody>' + lines + "</tbody></table></div>" +
+          '<button type="button" class="btn sm" data-ops="sj-detail-close">Tutup</button></section>';
+      }
+    }
+    return opsHead("Jadwal Pengiriman", "Satu baris per Surat Jalan Accurate · Loading/POD V3 · tanpa tulis Accurate saat lihat") + planForm +
+      '<form class="v36-toolbar" id="v3-del-form"><label class="v36-search"><span>⌕</span><input id="v3-del-q" aria-label="Cari SJ atau PO" placeholder="No. SJ / PO / pelanggan" value="' + escapeHtml(ops.delQ || "") + '"></label>' +
+      '<label>Status <select id="v3-ops-status">' + [["", "Semua"], ["belum_dikirim", "Belum dikirim"], ["sebagian", "Sebagian"], ["terkirim", "Terkirim"], ["terlambat", "Terlambat"]].map(function (o) { return '<option value="' + o[0] + '"' + (ops.status === o[0] ? " selected" : "") + ">" + o[1] + "</option>"; }).join("") + '</select></label> <button class="btn sm" type="submit">Terapkan</button> <button type="button" class="btn sm" data-ops="del-reload">Muat ulang</button></form>' + body + detail;
   });
   guardDemoView("salarySlipView", function () {
     if (opsStale("payroll") && !ops.err.payroll) opsLoad("payroll", "/production/ops/payroll/runs", function (d) { ops.payroll = d; });
@@ -4473,6 +4506,14 @@
     } else if (id === "v3-rep-form") {
       ev.preventDefault();
       ops.from = document.getElementById("v3-rep-from").value; ops.to = document.getElementById("v3-rep-to").value; ops.rep = null; ops.err.rep = ""; ops.ts = {};
+      if (typeof window.render === "function") window.render();
+    } else if (id === "v3-del-form") {
+      ev.preventDefault();
+      const qEl = document.getElementById("v3-del-q");
+      const stEl = document.getElementById("v3-ops-status");
+      ops.delQ = qEl ? String(qEl.value || "").trim() : "";
+      ops.status = stEl ? stEl.value : (ops.status || "");
+      ops.del = null; ops.err.del = ""; ops.delDetail = null; ops.ts = {};
       if (typeof window.render === "function") window.render();
     }
   });
@@ -4552,7 +4593,18 @@
       if (typeof window.render === "function") window.render();
       return;
     }
-    if (act === "del-reload") { ops.del = null; ops.err.del = ""; ops.ts = {}; }
+    if (act === "del-reload") { ops.del = null; ops.err.del = ""; ops.delDetail = null; ops.ts = {}; }
+    else if (act === "sj-detail") {
+      const sj = t.getAttribute("data-sj");
+      ops.delDetail = { loading: true };
+      if (typeof window.render === "function") window.render();
+      request(API + "/production/ops/deliveries/" + encodeURIComponent(sj))
+        .then(function (d) { ops.delDetail = d; })
+        .catch(function (e) { ops.delDetail = { error: String((e && e.message) || "Gagal memuat detail SJ") }; })
+        .then(function () { if (typeof window.render === "function") window.render(); });
+      return;
+    }
+    else if (act === "sj-detail-close") { ops.delDetail = null; }
     else if (act === "plan") {
       ops.plan = { jid: t.getAttribute("data-jid"), sj: t.getAttribute("data-sj"), branch: t.getAttribute("data-branch"), date: t.getAttribute("data-date") || "", so: t.getAttribute("data-so") || "", courier: t.getAttribute("data-courier") || "" };
       const br = ops.plan.branch;
@@ -4739,15 +4791,19 @@
     const settle = r.financial_settlement_known
       ? rmAmount(r.outstanding_amount)
       : "<span class=\"muted\">Outstanding Accurate tidak dipetakan</span>";
+    const finLabel = r.financial_payment_status || "UNKNOWN";
+    const src = r.approval_source || "Belum Approved";
     const review = r.payment_review_required
       ? "<br><small class=\"v44-production-alert\" role=\"status\">⚠ Exception keuangan — review berwenang</small>"
       : "";
     return "<tr><td><b>" + escapeHtml(r.so_number) + "</b><br><small>" + escapeHtml(r.branch_id) + "</small></td>" +
       "<td>" + escapeHtml(r.customer_name || "Belum terverifikasi") + "</td><td>" + ref + "</td>" +
-      "<td>" + escapeHtml(amount) + "<br><small>" + escapeHtml(rmDate(r.payment_date)) + "</small></td><td>" + evidence + "<br><small>" + settle + "</small></td>" +
-      "<td><span class=\"tag v165-status--" + (pay[0] === "APPROVED" ? "done" : pay[0] === "PENDING" ? "pending" : "process") + "\">" + pay[1] + "</span>" + (r.bypass_active ? "<br><small>Bypass aktif</small>" : "") + review + "</td>" +
+      "<td>" + escapeHtml(amount) + "<br><small>" + escapeHtml(rmDate(r.payment_date)) + "</small></td><td>" + evidence + "<br><small>" + settle + "</small><br><small>Status finansial: " + escapeHtml(finLabel) + "</small></td>" +
+      "<td><span class=\"tag v165-status--" + (pay[0] === "APPROVED" ? "done" : pay[0] === "PENDING" ? "pending" : "process") + "\">" + pay[1] + "</span><br><small>Sumber: " + escapeHtml(src) + "</small>" + (r.bypass_active ? "<br><small>Bypass aktif</small>" : "") + review + "</td>" +
       "<td>" + (none ? "" : "<button type=\"button\" class=\"btn sm\" data-rm=\"detail\" data-jid=\"" + escapeHtml(r.job_id) + "\">Detail</button> ") +
-      "<button type=\"button\" class=\"btn sm\" data-rm=\"open\" data-jid=\"" + escapeHtml(r.job_id) + "\">Buka PO &amp; Payment</button></td></tr>";
+      "<button type=\"button\" class=\"btn sm\" data-rm=\"open\" data-jid=\"" + escapeHtml(r.job_id) + "\">Buka PO &amp; Payment</button>" +
+      (r.can_bypass ? " <button type=\"button\" class=\"btn sm\" data-rm=\"open\" data-jid=\"" + escapeHtml(r.job_id) + "\">Bypass…</button>" : "") +
+      "</td></tr>";
   }
   async function rmOpen(jobId) {
     const row = rm.data && rm.data.items.find(function (x) { return x.job_id === jobId; });
@@ -4842,6 +4898,137 @@
     if (typeof window.render === "function") window.render();
   });
   window.v3PaymentMonitorRefresh = function () { rm.stale = true; };
+
+  // Pengaturan Approval Payment — PostgreSQL SoT (bukan localStorage).
+  const PAY_SETTING_FIELDS = [
+    ["partial_payment_approves", "Penerimaan sebagian sah langsung meng-approve gate", true],
+    ["receipt_must_be_settled", "Hanya penerimaan efektif/settled yang dihitung", true],
+    ["bypass_enabled", "Aktifkan bypass payment", false],
+    ["bypass_reason_required", "Wajib alasan bypass", true],
+    ["bypass_audit_required", "Wajib audit pelaksana, waktu dan PO", true],
+    ["bypass_permission_required", "Wajib permission khusus bypass", true],
+    ["notify_director_on_bypass", "Notifikasi Direktur saat bypass", false],
+    ["recompute_on_receipt_cancel", "Hitung ulang gate saat penerimaan dibatalkan", true],
+  ];
+  const payCfg = { data: null, audit: null, loading: false, error: "", saving: false, stale: true };
+  async function payCfgLoad() {
+    if (payCfg.loading) return;
+    payCfg.loading = true; payCfg.error = "";
+    try {
+      payCfg.data = await request(API + "/production/settings/payment-approval");
+      try {
+        payCfg.audit = await request(API + "/production/settings/payment-approval/audit?limit=10");
+      } catch (_e) {
+        payCfg.audit = { items: [] };
+      }
+      payCfg.stale = false;
+    } catch (err) {
+      payCfg.data = null;
+      payCfg.error = String((err && err.message) || "Gagal memuat pengaturan");
+      payCfg.stale = false;
+    }
+    payCfg.loading = false;
+    if (typeof window.render === "function") window.render();
+  }
+  async function payCfgSave() {
+    if (!payCfg.data || !payCfg.data.can_manage || payCfg.saving) return;
+    const reasonEl = document.getElementById("v3-pay-cfg-reason");
+    const reason = reasonEl ? String(reasonEl.value || "").trim() : "";
+    if (reason.length < 5) { toast("Alasan perubahan wajib (min. 5 karakter)"); return; }
+    const payload = {};
+    PAY_SETTING_FIELDS.forEach(function (row) {
+      const el = document.getElementById("v3-pay-cfg-" + row[0]);
+      payload[row[0]] = el ? el.checked === true : false;
+    });
+    payCfg.saving = true;
+    try {
+      payCfg.data = await request(API + "/production/settings/payment-approval", {
+        method: "PUT",
+        body: {
+          version: payCfg.data.version,
+          payment_approval: payload,
+          reason: reason,
+        },
+      });
+      try {
+        payCfg.audit = await request(API + "/production/settings/payment-approval/audit?limit=10");
+      } catch (_e) { /* audit optional on save */ }
+      toast("Pengaturan Approval Payment tersimpan (PostgreSQL)");
+      if (reasonEl) reasonEl.value = "";
+    } catch (err) {
+      toast(String((err && err.message) || "Gagal menyimpan pengaturan"));
+      payCfg.stale = true;
+    }
+    payCfg.saving = false;
+    if (typeof window.render === "function") window.render();
+  }
+  window.v3PaymentApprovalSettingsView = function () {
+    if (isPreviewFixture()) {
+      return "<div class=\"flat-notice\" role=\"status\"><b>Preview/fixture:</b> pengaturan Approval Payment Live tidak dipakai. Buka mode operasional untuk SIMPAN→BACA→PERMISSION→AUDIT di PostgreSQL.</div>";
+    }
+    if (payCfg.stale && !payCfg.loading) setTimeout(payCfgLoad, 0);
+    if (payCfg.loading && !payCfg.data) return "<div class=\"flat-notice\" role=\"status\">Memuat pengaturan Approval Payment…</div>";
+    if (payCfg.error) return "<div class=\"flat-notice\" role=\"alert\"><b>Gagal:</b> " + escapeHtml(payCfg.error) + " <button type=\"button\" class=\"btn sm\" id=\"v3-pay-cfg-reload\">Coba lagi</button></div>";
+    const d = (payCfg.data && payCfg.data.payment_approval) || {};
+    const can = !!(payCfg.data && payCfg.data.can_manage);
+    const locked = new Set((payCfg.data && payCfg.data.critical_locked) || []);
+    const bits = PAY_SETTING_FIELDS.map(function (row) {
+      const key = row[0], label = row[1], critical = row[2] || locked.has(key);
+      const checked = d[key] === true;
+      const disabled = !can || critical;
+      return "<label class=\"v22-setting-field\" style=\"display:flex;gap:8px;align-items:flex-start\"><input type=\"checkbox\" id=\"v3-pay-cfg-" + key + "\" " + (checked ? "checked " : "") + (disabled ? "disabled " : "") + "><span>" + escapeHtml(label) + (critical ? " <small class=\"muted\">(kunci kritis)</small>" : "") + "</span></label>";
+    }).join("");
+    const auditRows = ((payCfg.audit && payCfg.audit.items) || []).map(function (a) {
+      return "<li>v" + escapeHtml(a.settings_version) + " · user #" + escapeHtml(a.actor_user_id) + " · " + escapeHtml(a.reason) + " · " + escapeHtml(a.created_at || "") + "</li>";
+    }).join("");
+    return "<div class=\"flat-notice\"><b>Sumber kebenaran:</b> PostgreSQL V3 (<code>GET/PUT /production/settings/payment-approval</code>). Bukan localStorage. Mode otorisasi tetap legacy; enforced tidak diaktifkan.</div>" +
+      "<div class=\"setting-box\"><h3>Aturan Approval dan Bypass</h3><p class=\"muted\">Versi " + escapeHtml(payCfg.data && payCfg.data.version) + (payCfg.data && payCfg.data.updated_at ? " · diperbarui " + escapeHtml(payCfg.data.updated_at) : "") + "</p>" + bits +
+      "<label class=\"v22-setting-field\">Alasan perubahan<input id=\"v3-pay-cfg-reason\" type=\"text\" maxlength=\"500\" " + (can ? "" : "disabled ") + "placeholder=\"Wajib diisi saat menyimpan\"></label>" +
+      "<div class=\"row\">" + (can
+        ? "<button type=\"button\" class=\"btn primary\" id=\"v3-pay-cfg-save\"" + (payCfg.saving ? " disabled" : "") + ">Simpan Pengaturan</button>"
+        : "<span class=\"sheetpill\">Akses pengaturan diperlukan (Direktur / grant)</span>") +
+      " <button type=\"button\" class=\"btn sm\" id=\"v3-pay-cfg-reload\">Muat ulang</button></div></div>" +
+      "<div class=\"flat-notice\"><b>Audit perubahan</b><ul>" + (auditRows || "<li>Belum ada perubahan</li>") + "</ul></div>";
+  };
+  document.addEventListener("click", function (ev) {
+    const t = ev.target;
+    if (!t || !t.id) return;
+    if (t.id === "v3-pay-cfg-reload") { payCfg.stale = true; if (typeof window.render === "function") window.render(); }
+    else if (t.id === "v3-pay-cfg-save") { payCfgSave(); }
+    else if (t.id === "v3-br-reload") { brCfg.stale = true; if (typeof window.render === "function") window.render(); }
+  });
+
+  // Cabang efektif — read-only (bukan master sandbox editable).
+  const brCfg = { data: null, loading: false, error: "", stale: true };
+  async function brCfgLoad() {
+    if (brCfg.loading) return;
+    brCfg.loading = true; brCfg.error = "";
+    try {
+      brCfg.data = await request(API + "/production/settings/branches");
+      brCfg.stale = false;
+    } catch (err) {
+      brCfg.data = null;
+      brCfg.error = String((err && err.message) || "Gagal memuat cabang");
+      brCfg.stale = false;
+    }
+    brCfg.loading = false;
+    if (typeof window.render === "function") window.render();
+  }
+  window.v3BranchesSettingsView = function () {
+    if (isPreviewFixture()) {
+      return "<div class=\"flat-notice\">Preview: cabang efektif Live tidak dimuat.</div>";
+    }
+    if (brCfg.stale && !brCfg.loading) setTimeout(brCfgLoad, 0);
+    if (brCfg.loading && !brCfg.data) return "<div class=\"flat-notice\">Memuat cabang efektif…</div>";
+    if (brCfg.error) return "<div class=\"flat-notice\" role=\"alert\">" + escapeHtml(brCfg.error) + " <button type=\"button\" class=\"btn sm\" id=\"v3-br-reload\">Coba lagi</button></div>";
+    const items = (brCfg.data && brCfg.data.items) || [];
+    const rows = items.map(function (b) {
+      return "<tr><td>" + escapeHtml(b.code) + "</td><td>" + escapeHtml(b.name) + "</td><td>" + (b.active ? "Ya" : "Tidak") + "</td><td>" + (b.in_user_grants ? "Ya" : "Tidak") + "</td><td>" + (b.seen_on_jobs ? "Ya" : "Tidak") + "</td><td><span class=\"muted\">Read-only</span></td></tr>";
+    }).join("") || "<tr><td colspan=\"6\"><span class=\"muted\">Belum ada cabang pada grants/job</span></td></tr>";
+    return "<div class=\"flat-notice\"><b>Cabang efektif (bukan master editable).</b> " + escapeHtml((brCfg.data && brCfg.data.note) || "") + "</div>" +
+      "<div class=\"v36-table-container\"><table class=\"v36-table\"><thead><tr><th>Kode</th><th>Nama</th><th>Akses</th><th>Di grant user</th><th>Ada di job</th><th>Writable</th></tr></thead><tbody>" + rows + "</tbody></table></div>" +
+      "<button type=\"button\" class=\"btn sm\" id=\"v3-br-reload\">Muat ulang</button>";
+  };
 
   (async function bootLive() {
     clearGhosts();

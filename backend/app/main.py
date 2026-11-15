@@ -67,6 +67,8 @@ def create_app() -> FastAPI:
     application.include_router(
         production_operations_router, prefix=settings.api_prefix
     )
+    from app.api.production.payment_settings_api import router as payment_settings_router
+    application.include_router(payment_settings_router, prefix=settings.api_prefix)
     # Local customer portal (/t/...) — isolated; not a public deploy in this task.
     application.include_router(customer_portal_router)
     return application

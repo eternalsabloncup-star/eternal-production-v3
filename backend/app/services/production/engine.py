@@ -728,6 +728,13 @@ async def bypass_payment(
             403,
             "Izin production.payment.bypass tidak mencukupi (Direktur atau grant eksplisit)",
         )
+    from app.services.production.payment_settings import bypass_enabled as settings_bypass_enabled
+
+    if not await settings_bypass_enabled(session):
+        raise HTTPException(
+            403,
+            "Bypass payment dinonaktifkan di Pengaturan Approval Payment",
+        )
     job = await _lock_payment_job(session, user, job)
     if not reason.strip():
         raise HTTPException(422, "Bypass payment memerlukan alasan")
@@ -4567,6 +4574,10 @@ async def list_payment_receipts(
             bypass_by_job.setdefault(b.job_id, []).append(b)
             if b.active:
                 bypassed.add(b.job_id)
+    from app.services.production.payment_settings import bypass_enabled as settings_bypass_enabled
+
+    bypass_on = await settings_bypass_enabled(session)
+    actor_can_bypass = P.user_may_bypass_payment(user) and bypass_on
     items = []
     for job, status, count, verified, latest_paid_at, latest_receipt_at in rows:
         verified_s = str(verified) if verified is not None else None
@@ -4582,6 +4593,7 @@ async def list_payment_receipts(
                 "branch_id": job.branch_id,
                 "payment_status": status,
                 "bypass_active": job.id in bypassed,
+                "can_bypass": bool(actor_can_bypass and status == "pending" and job.id not in bypassed),
                 "payment_review_required": bool(getattr(job, "payment_review_required", False)),
                 "receipt_count": int(count),
                 "verified_amount": verified_s,

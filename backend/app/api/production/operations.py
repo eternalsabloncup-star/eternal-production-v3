@@ -60,12 +60,43 @@ async def deliveries_list(
     date_to: date | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
+    include_accurate_links: bool = Query(
+        False,
+        description=(
+            "Tambah SJ dari SO Accurate links.delivery_note_ids (bukan list-all). "
+            "Gateway tidak punya inventaris SJ global."
+        ),
+    ),
     session: AsyncSession = Depends(get_db_session),
     user: User = Depends(require_permissions(P.JOB_READ)),
+    gateway: ReadGateway = Depends(get_gateway),
 ):
+    """Jadwal Pengiriman: satu baris per Surat Jalan Accurate (canonical). Read-only."""
     return await ops.list_deliveries(
-        session, user, q=q, status=status, branch=branch, date_from=date_from,
-        date_to=date_to, page=page, page_size=page_size,
+        session,
+        user,
+        q=q,
+        status=status,
+        branch=branch,
+        date_from=date_from,
+        date_to=date_to,
+        page=page,
+        page_size=page_size,
+        include_accurate_links=include_accurate_links,
+        gateway=gateway if include_accurate_links else None,
+    )
+
+
+@router.get("/deliveries/{accurate_sj_id}")
+async def delivery_sj_detail(
+    accurate_sj_id: str,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_permissions(P.JOB_READ)),
+    gateway: ReadGateway = Depends(get_gateway),
+):
+    """Detail multi-item satu SJ. Tidak menulis Accurate."""
+    return await ops.get_delivery_by_sj(
+        session, user, accurate_sj_id, gateway=gateway
     )
 
 

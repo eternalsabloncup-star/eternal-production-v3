@@ -71,22 +71,42 @@ def financial_receipt_state(*, verified_amount, payment_status: str) -> str:
     return "verified_received"
 
 
+def approval_source_label(payment_status: str) -> str:
+    """Handoff approval_source — independent of financial Belum Bayar/Sebagian/Lunas."""
+    if payment_status == "approved":
+        return "Penerimaan"
+    if payment_status == "bypassed":
+        return "Bypass"
+    return "Belum Approved"
+
+
 def monitor_financial_fields(*, verified_amount, payment_status: str) -> dict:
-    """Explicit nulls for unsupported Accurate financial fields."""
+    """Explicit nulls for unsupported Accurate financial fields.
+
+    financial_payment_status stays UNKNOWN until Accurate receivable allocation is contracted.
+    Do not invent Belum Bayar / Sebagian / Lunas from receipt sums alone.
+    """
     return {
         "production_approval_status": payment_status,
+        "approval_source": approval_source_label(payment_status),
+        "approved": payment_status in ("approved", "bypassed"),
+        "financial_payment_status": "UNKNOWN",
         "financial_receipt_state": financial_receipt_state(
             verified_amount=verified_amount, payment_status=payment_status
         ),
         # Not established in Accurate gateway contract for V3 — never invent.
         "invoice_reference": None,
         "invoice_amount": None,
+        "invoice_total": None,
         "outstanding_amount": None,
+        "remaining_amount": None,
+        "paid_amount": verified_amount,
         "financial_settlement_known": False,
         "financial_settlement_note": (
             "Accurate sales-receipt evidence opens the production-payment gate. "
             "Invoice outstanding / fully-paid settlement is not mapped in V3; "
-            "verified_amount is the sum of valid verified receipts only."
+            "verified_amount is the sum of valid verified receipts only. "
+            "financial_payment_status=UNKNOWN (bukan Lunas palsu)."
         ),
     }
 

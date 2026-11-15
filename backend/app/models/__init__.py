@@ -16,6 +16,10 @@ from app.models.production import (
     ScheduleAssignment,
 )
 from app.models.production.payment import PaymentBypass, PaymentReceiptRef
+from app.models.production.payment_settings import (
+    PaymentApprovalSettings,
+    PaymentApprovalSettingsAudit,
+)
 from app.models.user import User
 from app.models.work_order import WorkOrder
 
@@ -27,6 +31,8 @@ __all__ = [
     "DesignVersion",
     "PaymentReceiptRef",
     "PaymentBypass",
+    "PaymentApprovalSettings",
+    "PaymentApprovalSettingsAudit",
     "ScheduleAssignment",
     "SampleVersion",
     "ProductionEvent",

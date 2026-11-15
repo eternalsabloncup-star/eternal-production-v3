@@ -17,8 +17,10 @@ it('missing amounts render as Belum terverifikasi, never zero',()=>{
 });
 it('payment mutations mark the monitor stale and the list stays read-only',()=>{
   expect(src).toMatch(/taskRequestSequence\+\+;\s*if \(typeof window\.v3PaymentMonitorRefresh === "function"\)/);
-  const block=src.slice(src.indexOf('const rm ='),src.indexOf('(async function bootLive'));
+  // Monitor list itself stays read-only; settings PUT lives in a separate payCfg block.
+  const block=src.slice(src.indexOf('const rm ='),src.indexOf('window.v3PaymentMonitorRefresh'));
   expect(block).not.toMatch(/method:\s*"(POST|PATCH|PUT|DELETE)"/);
+  expect(src).toContain('/production/settings/payment-approval');
 });
 it('detail opens by official job id from the API, not the Inbox cache, and never invents zero',()=>{
   const open=src.slice(src.indexOf('async function rmOpen'),src.indexOf('function rmView()'));
