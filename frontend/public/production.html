@@ -1078,10 +1078,16 @@ function settingsView(){
  const headNote=operational
   ?(productionSettingsTab==='payment'
     ?'Approval Payment Live: PostgreSQL V3 (bukan localStorage). Tab lain di bawah masih preferensi browser kecuali dinyatakan resmi.'
-    :'Tab Approval Payment = backend PostgreSQL. Tab lain di halaman ini masih preferensi browser / demo kecuali dinyatakan resmi.')
+    :'Preferensi tampilan di browser ini dan akses ke Pengguna & Permission')
   :'Preferensi tampilan vs konfigurasi operasional resmi dipisahkan · Gap ERP V1 dari capability registry';
+ // Transparansi wajib: preferensi browser ≠ konfigurasi perusahaan / payroll resmi.
+ const headMuted=operational
+  ?(productionSettingsTab==='payment'
+    ?'Approval Payment Live disimpan di PostgreSQL V3 (SIMPAN→BACA→PERMISSION→AUDIT), bukan localStorage.'
+    :'Pengaturan di tab ini disimpan di browser ini saja; bukan konfigurasi perusahaan dan bukan payroll resmi.')
+  :'Tarif/target di browser = demo preference, bukan payroll resmi';
  return heading('Pengaturan Produksi',headNote)+
- `<div class="v22-settings-head"><span class="sheetpill">${operational?(productionSettingsTab==='payment'?'LIVE · POSTGRESQL V3':'PREFERENSI BROWSER INI'):'DEMO / NON-LIVE · SOURCE V1 READ-ONLY'}</span><span class="mutedcell">${escape(headNote)}</span></div>${nav}<div class="v22-settings-content">${content}</div>`;
+ `<div class="v22-settings-head"><span class="sheetpill">${operational?(productionSettingsTab==='payment'?'LIVE · POSTGRESQL V3':'PREFERENSI BROWSER INI'):'DEMO / NON-LIVE · SOURCE V1 READ-ONLY'}</span><span class="mutedcell">${escape(headMuted)}</span></div>${nav}<div class="v22-settings-content">${content}</div>`;
 }
 
 // V21: Accurate item identities and process rules are local demo references, not API data.

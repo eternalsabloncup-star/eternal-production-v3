@@ -157,7 +157,18 @@ async def test_isolated_token_and_router(case):
         decode_access_token(header['Authorization'].split(' ', 1)[1])
     assert error.value.status_code == 401
     from app.main import create_app
-    assert not any('/settings' in route.path for route in create_app().routes)
+    # Isolasi: router akun `/api/v1/settings/*` tetap OFF kecuali V3_SETTINGS_ENABLED.
+    # Jangan samakan dengan Settings operasional produksi `/api/v1/production/settings/*`.
+    account_settings_paths = [
+        getattr(route, 'path', '') or ''
+        for route in create_app().routes
+        if (getattr(route, 'path', '') or '').startswith('/api/v1/settings')
+    ]
+    assert account_settings_paths == [], account_settings_paths
+    assert any(
+        (getattr(route, 'path', '') or '').startswith('/api/v1/production/settings/')
+        for route in create_app().routes
+    ), 'production operational settings routes must remain registered'
 
 async def test_username_change_revokes_session(case):
     _, client, login = case

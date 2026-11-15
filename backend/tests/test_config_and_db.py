@@ -48,6 +48,9 @@ def test_metadata_contains_auth_and_work_order_tables() -> None:
         "access_audit",
         "access_account_credentials",
         "task_ownerships",
+        # Fase 3 payment approval settings (0016).
+        "payment_approval_settings",
+        "payment_approval_settings_audit",
     }
 
 

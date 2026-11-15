@@ -1618,14 +1618,23 @@ async def correct_output(
     src = await session.get(ProductionEvent, source_event_id)
     if src is None or src.job_id != job.id or src.event_type != "output_confirmed":
         raise HTTPException(404, "Output event sumber tidak ditemukan")
+    # Snapshot primitives before commit/rollback — expired ORM attrs after
+    # IntegrityError+rollback must not trigger sync lazy-load (MissingGreenlet).
+    job_id = job.id
+    reason_norm = reason.strip()
     payload_json = f'{{"source_output_id":{src.id}}}'
+    source_assignment_id = src.assignment_id
+    source_so_line_id = src.so_line_id
+    source_color_pass = src.color_pass
+    source_lot_code = src.lot_code
+    actor_id = user.id
 
     def _same(row: ProductionEvent) -> bool:
         return (
-            row.job_id == job.id
+            row.job_id == job_id
             and row.event_type == "output_correction"
             and row.qty_physical == qty_physical_delta
-            and (row.reason or "") == reason.strip()
+            and (row.reason or "") == reason_norm
             and row.payload_json == payload_json
         )
 
@@ -1637,23 +1646,23 @@ async def correct_output(
             raise HTTPException(409, "Idempotency key payload tidak cocok")
         return prior
     event = ProductionEvent(
-        job_id=job.id,
-        assignment_id=src.assignment_id,
+        job_id=job_id,
+        assignment_id=source_assignment_id,
         event_type="output_correction",
-        so_line_id=src.so_line_id,
-        color_pass=src.color_pass,
-        lot_code=src.lot_code,
+        so_line_id=source_so_line_id,
+        color_pass=source_color_pass,
+        lot_code=source_lot_code,
         qty_physical=qty_physical_delta,
         qty_pass_ops=qty_physical_delta,
         idempotency_key=idempotency_key,
-        actor_user_id=user.id,
-        reason=reason.strip(),
+        actor_user_id=actor_id,
+        reason=reason_norm,
         payload_json=payload_json,
     )
     session.add(event)
     try:
-        if src.assignment_id:
-            assignment = await session.get(ScheduleAssignment, src.assignment_id)
+        if source_assignment_id:
+            assignment = await session.get(ScheduleAssignment, source_assignment_id)
             if assignment:
                 assignment.qty_confirmed = assignment.qty_confirmed + qty_physical_delta
                 if assignment.qty_confirmed < 0:
@@ -1661,12 +1670,14 @@ async def correct_output(
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        orig = exc.orig
-        if (
-            getattr(orig, "sqlstate", None) != "23505"
-            or "uq_production_events_idempotency" not in str(orig)
-        ):
+        orig = getattr(exc, "orig", None)
+        sqlstate = getattr(orig, "sqlstate", None)
+        # asyncpg may wrap; also inspect str for unique violation text
+        detail = str(orig or exc)
+        if sqlstate != "23505" and "uq_production_events_idempotency" not in detail:
             raise
+        # Clear expired identity-map state from the failed unit of work.
+        session.expunge_all()
         raced = await session.scalar(
             select(ProductionEvent).where(ProductionEvent.idempotency_key == idempotency_key)
         )
