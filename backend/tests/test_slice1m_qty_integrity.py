@@ -133,10 +133,13 @@ async def test_sync_rejects_unverified_qty():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
+    from app.models.production.job import LIFECYCLE_ACTIVE
     from app.services.production.prep import sync_job_lines_from_so_detail
 
     session = AsyncMock()
-    job = SimpleNamespace(id=1)
+    # Explicit active contract — production require_job_active must not see stubs
+    # that omit lifecycle_status.
+    job = SimpleNamespace(id=1, lifecycle_status=LIFECYCLE_ACTIVE)
     with pytest.raises(HTTPException) as exc:
         await sync_job_lines_from_so_detail(
             session,
@@ -152,6 +155,33 @@ async def test_sync_rejects_unverified_qty():
         )
     assert exc.value.status_code == 422
     assert "terverifikasi" in str(exc.value.detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_sync_rejects_cancelled_job_before_qty_checks():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from app.models.production.job import LIFECYCLE_CANCELLED
+    from app.services.production.prep import sync_job_lines_from_so_detail
+
+    session = AsyncMock()
+    job = SimpleNamespace(id=1, lifecycle_status=LIFECYCLE_CANCELLED)
+    with pytest.raises(HTTPException) as exc:
+        await sync_job_lines_from_so_detail(
+            session,
+            job,
+            [
+                {
+                    "accurate_line_id": "L1",
+                    "quantity": 10,
+                    "qty_verified": True,
+                    "production_process": "print",
+                }
+            ],
+        )
+    assert exc.value.status_code == 409
+    assert "cancelled" in str(exc.value.detail).lower()
 
 
 def test_finite_helper():
