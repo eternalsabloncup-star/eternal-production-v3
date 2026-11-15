@@ -960,6 +960,352 @@ def _buffer_totals(items: list[dict]) -> dict:
     }
 
 
+async def list_production_schedule(
+    session: AsyncSession,
+    user: User,
+    *,
+    q: str | None = None,
+    branch: str | None = None,
+    bucket: str | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    page: int = 1,
+    page_size: int = 50,
+    sort: str = "so_asc",
+) -> dict:
+    """Jadwal Produksi read model from PostgreSQL print lines (not Inbox pages).
+
+    One response row per print line without assignment, or per remaining assignment.
+    Totals never invent print from unknown/non_print. GET never syncs Accurate.
+    """
+    from app.authorization.workflow import branch_allowed
+    from app.models.production.prep import JobLineQty
+    from app.models.production.schedule import ScheduleAssignment
+    from app.services.production.payment_gate import effective_statuses
+
+    engine._require(user, P.JOB_READ)
+    page = max(1, int(page))
+    page_size = min(100, max(1, int(page_size)))
+    bucket_norm = (bucket or "semua").strip().lower()
+    if bucket_norm not in {"semua", "belum_dijadwalkan", "dijadwalkan", "hold"}:
+        raise HTTPException(422, "bucket tidak valid")
+    sort_norm = (sort or "so_asc").strip().lower()
+    if sort_norm not in {"so_asc", "so_desc", "work_date_asc", "work_date_desc"}:
+        raise HTTPException(422, "sort tidak valid")
+
+    branches = (await session.scalars(select(ProductionJob.branch_id).distinct())).all()
+    allowed = [b for b in branches if branch_allowed(user, b) and (not branch or b == branch)]
+    if not allowed:
+        note = "no_jobs" if not branches else "no_branch_access"
+        return {
+            "items": [],
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+            "has_more": False,
+            "incomplete": False,
+            "unverified": {"unknown_print_candidate_lines": 0, "note": note},
+            "cancelled_jobs_supported": False,
+            "source": "postgresql_job_line_qtys",
+        }
+
+    lines_stmt = (
+        select(JobLineQty, ProductionJob)
+        .join(ProductionJob, ProductionJob.id == JobLineQty.job_id)
+        .where(
+            JobLineQty.production_process == "print",
+            ProductionJob.branch_id.in_(allowed),
+        )
+    )
+    if q and q.strip():
+        like = _like(q.strip())
+        op_exists = (
+            select(ScheduleAssignment.id)
+            .where(
+                ScheduleAssignment.job_id == JobLineQty.job_id,
+                ScheduleAssignment.so_line_id == JobLineQty.so_line_id,
+                ScheduleAssignment.operator_name.ilike(like, escape="\\"),
+            )
+            .exists()
+        )
+        lines_stmt = lines_stmt.where(
+            or_(
+                ProductionJob.accurate_so_number.ilike(like, escape="\\"),
+                ProductionJob.customer_name.ilike(like, escape="\\"),
+                op_exists,
+            )
+        )
+    line_rows = (await session.execute(lines_stmt.order_by(ProductionJob.id.desc(), JobLineQty.id))).all()
+
+    unknown_count = int(
+        await session.scalar(
+            select(func.count())
+            .select_from(JobLineQty)
+            .join(ProductionJob, ProductionJob.id == JobLineQty.job_id)
+            .where(
+                or_(
+                    JobLineQty.production_process.is_(None),
+                    JobLineQty.production_process == "unknown",
+                ),
+                ProductionJob.branch_id.in_(allowed),
+            )
+        )
+        or 0
+    )
+
+    if not line_rows:
+        return {
+            "items": [],
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+            "has_more": False,
+            "incomplete": False,
+            "unverified": {
+                "unknown_print_candidate_lines": unknown_count,
+                "note": "unknown_excluded_from_print_totals",
+            },
+            "cancelled_jobs_supported": False,
+            "source": "postgresql_job_line_qtys",
+        }
+
+    job_ids = sorted({job.id for _, job in line_rows})
+    line_keys = {(ln.job_id, ln.so_line_id) for ln, _ in line_rows}
+    assignments = (
+        await session.scalars(
+            select(ScheduleAssignment)
+            .where(ScheduleAssignment.job_id.in_(job_ids))
+            .order_by(ScheduleAssignment.id)
+        )
+    ).all()
+    asg_by_line: dict[tuple[int, str], list] = defaultdict(list)
+    for a in assignments:
+        if (a.job_id, a.so_line_id) not in line_keys:
+            continue
+        remaining = Decimal(a.qty_planned or 0) - Decimal(a.qty_cancelled_remaining or 0)
+        if remaining <= 0 and a.status in {"cancelled_remaining", "transferred"}:
+            continue
+        asg_by_line[(a.job_id, a.so_line_id)].append(a)
+
+    output_rows = (
+        await session.execute(
+            select(
+                ProductionEvent.job_id,
+                ProductionEvent.so_line_id,
+                ProductionEvent.event_type,
+                func.coalesce(func.sum(ProductionEvent.qty_physical), 0),
+            )
+            .where(
+                ProductionEvent.job_id.in_(job_ids),
+                ProductionEvent.event_type.in_(
+                    ["output_confirmed", "output_correction", "reject_verified"]
+                ),
+                func.coalesce(ProductionEvent.color_pass, 1) == 1,
+            )
+            .group_by(
+                ProductionEvent.job_id,
+                ProductionEvent.so_line_id,
+                ProductionEvent.event_type,
+            )
+        )
+    ).all()
+    done_by_line: dict[tuple[int, str], Decimal] = defaultdict(Decimal)
+    for jid, sid, etype, qty in output_rows:
+        if not sid:
+            continue
+        key = (jid, sid)
+        amount = Decimal(qty or 0)
+        if etype == "reject_verified":
+            done_by_line[key] -= amount
+        else:
+            done_by_line[key] += amount
+
+    payment = await effective_statuses(session, job_ids)
+    items: list[dict] = []
+    for ln, job in line_rows:
+        po_qty = Decimal(ln.po_qty or 0)
+        line_asgs = asg_by_line.get((job.id, ln.so_line_id), [])
+        # Physical allocation uses color_pass 1 only (cups), never sum multi-pass.
+        allocated = sum(
+            (
+                Decimal(a.qty_planned or 0) - Decimal(a.qty_cancelled_remaining or 0)
+                for a in line_asgs
+                if int(a.color_pass or 1) == 1
+            ),
+            Decimal(0),
+        )
+        done = max(done_by_line.get((job.id, ln.so_line_id), Decimal(0)), Decimal(0))
+        hold = ln.source_qty is not None
+        design = job.design_status or "pending"
+        pay = payment.get(job.id, job.payment_status or "pending")
+        if hold:
+            monitor = "HOLD"
+        elif not line_asgs:
+            if design not in {"approved", "bypassed"}:
+                monitor = "Belum ACC Design"
+            elif pay not in {"approved", "bypassed"}:
+                monitor = "Belum ACC Payment"
+            else:
+                monitor = "Siap Dijadwalkan"
+        elif po_qty > 0 and done >= po_qty:
+            monitor = "Selesai"
+        elif done > 0:
+            monitor = "Sedang Produksi"
+        else:
+            monitor = "Sudah Dijadwalkan"
+        bucket_line = (
+            "hold"
+            if hold
+            else ("dijadwalkan" if line_asgs else "belum_dijadwalkan")
+        )
+        base = {
+            "job_id": job.id,
+            "accurate_so_number": job.accurate_so_number,
+            "customer_name": job.customer_name,
+            "branch_id": job.branch_id,
+            "so_line_id": ln.so_line_id,
+            "accurate_item_id": ln.accurate_item_id,
+            "production_process": "print",
+            "qty_print_po": str(po_qty),
+            "qty_allocated": str(allocated),
+            "qty_printed_done": str(done),
+            "qty_unallocated": str(max(po_qty - allocated, Decimal(0))),
+            "qty_unprinted": str(max(po_qty - done, Decimal(0))),
+            "hold": hold,
+            "hold_reason": "qty_drift" if hold else None,
+            "design_status": design,
+            "payment_status": pay,
+            "schedule_bucket": bucket_line,
+            "schedule_monitor_status": monitor,
+            "scheduling_allowed": (
+                not hold
+                and design in {"approved", "bypassed"}
+                and pay in {"approved", "bypassed"}
+            ),
+            "urgent": (job.urgent_state or "") in URGENT_STATES,
+            "buffer_stock": job.buffer_stock,
+            "processing_status": job.processing_status,
+        }
+        display_asgs = line_asgs or [None]
+        for a in display_asgs:
+            if a is None:
+                work_date = None
+                row = {
+                    **base,
+                    "row_kind": "unassigned",
+                    "assignment_id": None,
+                    "color_pass": None,
+                    "operator_name": None,
+                    "machine_name": None,
+                    "work_date": None,
+                    "assignment_qty_planned": "0",
+                    "assignment_qty_confirmed": "0",
+                    "assignment_status": None,
+                    "row_key": f"{job.id}:{ln.so_line_id}:empty",
+                }
+            else:
+                work_date = a.work_date
+                if date_from and work_date and work_date < date_from:
+                    continue
+                if date_to and work_date and work_date > date_to:
+                    continue
+                row = {
+                    **base,
+                    "row_kind": "assignment",
+                    "assignment_id": a.id,
+                    "color_pass": int(a.color_pass or 1),
+                    "operator_name": a.operator_name,
+                    "machine_name": a.machine_name,
+                    "work_date": work_date.isoformat() if work_date else None,
+                    "assignment_qty_planned": str(
+                        Decimal(a.qty_planned or 0) - Decimal(a.qty_cancelled_remaining or 0)
+                    ),
+                    "assignment_qty_confirmed": str(Decimal(a.qty_confirmed or 0)),
+                    "assignment_status": a.status,
+                    "row_key": f"{job.id}:{ln.so_line_id}:a{a.id}",
+                }
+            if a is None and (date_from or date_to):
+                # Unassigned active print work stays visible outside date windows.
+                pass
+            if bucket_norm == "hold" and not hold:
+                continue
+            if bucket_norm == "belum_dijadwalkan" and line_asgs:
+                continue
+            if bucket_norm == "dijadwalkan" and not line_asgs:
+                continue
+            if bucket_norm == "dijadwalkan" and a is None:
+                continue
+            if bucket_norm == "belum_dijadwalkan" and a is not None:
+                continue
+            items.append(row)
+
+    if sort_norm == "so_desc":
+        items.sort(key=lambda r: (r["accurate_so_number"], r["so_line_id"], r["row_key"]), reverse=True)
+    elif sort_norm == "work_date_asc":
+        items.sort(key=lambda r: (r["work_date"] is None, r["work_date"] or "", r["accurate_so_number"], r["row_key"]))
+    elif sort_norm == "work_date_desc":
+        items.sort(key=lambda r: (r["work_date"] is None, r["work_date"] or "", r["accurate_so_number"], r["row_key"]), reverse=True)
+    else:
+        items.sort(key=lambda r: (r["accurate_so_number"], r["so_line_id"], r["row_key"]))
+
+    # Line-level totals: one contribution per print line (not per assignment row).
+    line_seen: set[tuple[int, str]] = set()
+    summary = {
+        "qty_print_po": Decimal(0),
+        "qty_allocated": Decimal(0),
+        "qty_printed_done": Decimal(0),
+        "qty_unallocated": Decimal(0),
+        "qty_unprinted": Decimal(0),
+        "print_line_count": 0,
+        "hold_line_count": 0,
+        "unassigned_line_count": 0,
+        "assigned_line_count": 0,
+    }
+    for row in items:
+        key = (row["job_id"], row["so_line_id"])
+        if key in line_seen:
+            continue
+        line_seen.add(key)
+        summary["print_line_count"] += 1
+        summary["qty_print_po"] += Decimal(row["qty_print_po"])
+        summary["qty_allocated"] += Decimal(row["qty_allocated"])
+        summary["qty_printed_done"] += Decimal(row["qty_printed_done"])
+        summary["qty_unallocated"] += Decimal(row["qty_unallocated"])
+        summary["qty_unprinted"] += Decimal(row["qty_unprinted"])
+        if row["hold"]:
+            summary["hold_line_count"] += 1
+        if row["row_kind"] == "unassigned":
+            summary["unassigned_line_count"] += 1
+        else:
+            summary["assigned_line_count"] += 1
+
+    total = len(items)
+    start = (page - 1) * page_size
+    page_items = items[start : start + page_size]
+    return {
+        "items": page_items,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "has_more": start + page_size < total,
+        "incomplete": False,
+        "unverified": {
+            "unknown_print_candidate_lines": unknown_count,
+            "note": "unknown_excluded_from_print_totals",
+        },
+        "cancelled_jobs_supported": False,
+        "source": "postgresql_job_line_qtys",
+        "summary": {k: (str(v) if isinstance(v, Decimal) else v) for k, v in summary.items()},
+        "qty_semantics": {
+            "qty_print_po": "print line po_qty",
+            "qty_allocated": "sum active assignment remaining on color_pass=1 only",
+            "qty_printed_done": "net pass-1 output events",
+            "qty_unallocated": "po - allocated",
+            "qty_unprinted": "po - printed_done",
+        },
+    }
+
+
 async def list_buffer_monitor(
     session: AsyncSession,
     user: User,

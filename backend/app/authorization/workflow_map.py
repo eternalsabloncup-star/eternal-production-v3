@@ -12,6 +12,7 @@ WORKFLOW = {
  'payment_unsynced_list': ('payment.evidence.read', ('job.read',)),
  'deliveries_list': ('delivery.schedule.read', ('job.read',)),
  'buffer_monitor': ('delivery.schedule.read', ('job.read',)),
+ 'production_schedule_list': ('job.read', ('job.read',)),
  'delivery_plan_save': ('delivery.plan.manage', ('delivery.manage',)),
  'delivery_plan_history': ('delivery.schedule.read', ('job.read',)),
  'drift_acknowledge': ('job.qty_drift.acknowledge', ('schedule.manage',)),
@@ -74,5 +75,5 @@ SENSITIVE_FIELDS = {
  'events': 'audit.production.read', 'prep_events': 'audit.production.read',
 }
 # Aggregate job views require branch-wide grants, not an assignment-only grant.
-COLLECTIONS = {'payment_receipts_list', 'payment_unsynced_list', 'deliveries_list', 'buffer_monitor', 'machines_list', 'payroll_runs_list', 'report_summary', 'assignees_list', 'list_team_tasks', 'list_team_tasks_with_sync', 'inbox', 'order_detail',
+COLLECTIONS = {'payment_receipts_list', 'payment_unsynced_list', 'deliveries_list', 'buffer_monitor', 'production_schedule_list', 'machines_list', 'payroll_runs_list', 'report_summary', 'assignees_list', 'list_team_tasks', 'list_team_tasks_with_sync', 'inbox', 'order_detail',
                'permissions_catalog', 'evidence_capability'}

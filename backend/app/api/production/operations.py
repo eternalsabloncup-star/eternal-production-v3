@@ -81,6 +81,37 @@ async def buffer_monitor(
     return await ops.list_buffer_monitor(session, user, q=q, branch=branch, page=page, page_size=page_size)
 
 
+@router.get("/schedule")
+async def production_schedule_list(
+    q: str | None = None,
+    branch: str | None = None,
+    bucket: str | None = Query(
+        None,
+        pattern="^(semua|belum_dijadwalkan|dijadwalkan|hold)$",
+    ),
+    date_from: date | None = None,
+    date_to: date | None = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=100),
+    sort: str = Query("so_asc", pattern="^(so_asc|so_desc|work_date_asc|work_date_desc)$"),
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(require_permissions(P.JOB_READ)),
+):
+    """Jadwal Produksi read model from PostgreSQL print lines (not Accurate Inbox pages)."""
+    return await ops.list_production_schedule(
+        session,
+        user,
+        q=q,
+        branch=branch,
+        bucket=bucket,
+        date_from=date_from,
+        date_to=date_to,
+        page=page,
+        page_size=page_size,
+        sort=sort,
+    )
+
+
 @router.post("/jobs/{job_id}/delivery-plan")
 async def delivery_plan_save(
     job_id: int,

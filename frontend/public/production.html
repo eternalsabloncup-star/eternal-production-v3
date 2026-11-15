@@ -1698,7 +1698,7 @@ let SHEET_COLUMNS=[
  }},
  {key:'receipt',label:'Pembayaran',kind:'text',value:o=>o.receipt,cell:o=>tag(o.receipt)},
  {key:'sj',label:'SJ Accurate',kind:'text',value:o=>o.sj||'Belum ada SJ',cell:o=>escape(o.sj||'—')},
- {key:'action',label:'Aksi V3',kind:'action',value:o=>'',cell:o=>o.colorWorkItem?`<div class="row-actions"><button class="actionlink" onclick="openScheduleEditor('${o.id}',${o.colorIndex})">Atur Operator</button><button class="btn sm v3-open-wf" onclick="v3OpenWorkflow('${o.id}')">Panel V3</button></div>`:`<div class="row-actions"><button class="btn sm v3-open-wf" onclick="v3OpenWorkflow('${o.id}')">Panel V3</button><button class="actionlink" aria-label="Detail Jadwal ${escape(o.id)}" onclick="showScheduleDetail('${o.id}')"><span class="infoicon">i</span> Jadwal</button></div>`}
+ {key:'action',label:'Aksi V3',kind:'action',value:o=>'',cell:o=>o.colorWorkItem?`<div class="row-actions"><button class="actionlink" onclick="openScheduleEditor('${escape(o.id)}',${Number(o.colorIndex)||1},'${escape(o.scheduleLineId||'')}','${escape(o.assignmentId||'')}')">Atur Operator</button><button class="btn sm v3-open-wf" onclick="v3OpenWorkflow('${escape(o.id)}')">Panel V3</button></div>`:`<div class="row-actions"><button class="btn sm v3-open-wf" onclick="v3OpenWorkflow('${escape(o.id)}')">Panel V3</button><button class="actionlink" aria-label="Detail Jadwal ${escape(o.id)}" onclick="showScheduleDetail('${escape(o.id)}')"><span class="infoicon">i</span> Jadwal</button></div>`}
 ];
 const PRODUCTION_SHEET_COLUMNS=SHEET_COLUMNS;
 const DELIVERY_SHEET_COLUMNS=[

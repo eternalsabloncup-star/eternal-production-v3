@@ -3059,20 +3059,93 @@
     });
   }
 
-  window.v3OpenWorkflow = async function (so) {
+  function scheduleApiItemFor(so, opts) {
+    opts = opts || {};
+    const sched = window.__V3_PRODUCTION_SCHEDULE__;
+    const items = sched && Array.isArray(sched.items) ? sched.items : [];
+    const forSo = items.filter(function (r) {
+      return r && r.accurate_so_number === so;
+    });
+    if (!forSo.length) return null;
+    if (opts.lineId != null && String(opts.lineId) !== "") {
+      const lineHits = forSo.filter(function (r) {
+        return String(r.so_line_id || "") === String(opts.lineId);
+      });
+      if (opts.assignmentId != null && String(opts.assignmentId) !== "") {
+        const asg = lineHits.find(function (r) {
+          return String(r.assignment_id || "") === String(opts.assignmentId);
+        });
+        if (asg) return asg;
+      }
+      if (opts.colorPass != null) {
+        const byPass = lineHits.find(function (r) {
+          return Number(r.color_pass || 1) === Number(opts.colorPass || 1);
+        });
+        if (byPass) return byPass;
+      }
+      if (lineHits.length) return lineHits[0];
+    }
+    if (opts.colorPass != null) {
+      const byPass = forSo.find(function (r) {
+        return Number(r.color_pass || 1) === Number(opts.colorPass || 1);
+      });
+      if (byPass) return byPass;
+    }
+    return forSo[0];
+  }
+
+  function resolveScheduleOrder(so, opts) {
+    let order = orderBySo(so);
+    if (order) return order;
+    const hit = scheduleApiItemFor(so, opts);
+    if (hit) return seedScheduleMonitorOrder(hit);
+    return null;
+  }
+
+  function applyScheduleFocus(focus) {
+    if (!focus) return;
+    const line = focus.lineId != null ? String(focus.lineId) : "";
+    const pass = focus.colorPass != null ? String(focus.colorPass) : "";
+    const asg =
+      focus.assignmentId != null && String(focus.assignmentId) !== ""
+        ? String(focus.assignmentId)
+        : "";
+    const setVal = function (id, value) {
+      const el = document.getElementById(id);
+      if (el && value !== "") el.value = value;
+    };
+    setVal("v3-asg-line", line);
+    setVal("v3-design-line", line);
+    setVal("v3-prep-line", line);
+    setVal("v3-asg-pass", pass);
+    setVal("v3-out-pass", pass);
+    setVal("v3-asg-id", asg);
+    setVal("v3-out-asg", asg);
+    window.__v3ScheduleFocus = focus;
+  }
+
+  window.v3OpenWorkflow = async function (so, opts) {
+    opts = opts || {};
     selectedSo = so;
-    const order = orderBySo(so);
+    const focus = opts.focus || null;
+    let order = resolveScheduleOrder(so, focus || {});
     if (!order) {
-      toast("SO tidak ada di inbox halaman ini");
+      toast(
+        "SO belum tersedia di Jadwal Produksi / Inbox — tidak dapat membuka panel",
+        "error",
+      );
       return;
     }
     try {
+      // Read-only lookup — never auto-create ProductionJob / assignment here.
       await lookupJob(so);
       if (jobCache[so]) await loadBoard(so, true);
     } catch (err) {
-      toast(err.message || "Gagal memuat job");
+      toast(err.message || "Gagal memuat job V3", "error");
+      return;
     }
     renderWorkflowDrawer(so);
+    if (focus) applyScheduleFocus(focus);
   };
 
   function renderPoSummaryDrawer(number) {
@@ -3834,7 +3907,7 @@
       return isPreviewFixture() ? original.apply(this, arguments) : build.apply(this, arguments);
     };
   }
-  const ops = { ts: {}, plan: null, payroll: null, couriers: {}, del: null, rep: null, slip: null, unsynced: null, err: {}, busy: {}, slipId: "", status: "", from: "", to: "" };
+  const ops = { ts: {}, plan: null, payroll: null, couriers: {}, del: null, rep: null, slip: null, unsynced: null, err: {}, busy: {}, slipId: "", status: "", from: "", to: "", schedBucket: "semua", schedPage: 1, schedQ: "", schedFrom: "", schedTo: "", schedMonth: "all" };
   const OPS_TTL_MS = 4000;
   function opsLoad(key, url, assign) {
     if (ops.busy[key]) return;
@@ -3847,6 +3920,404 @@
     });
   }
   function opsStale(key) { return !ops.busy[key] && (!ops.ts[key] || Date.now() - ops.ts[key] > OPS_TTL_MS); }
+
+  // Jadwal Produksi — PostgreSQL read model (not Accurate Inbox page projection).
+  window.__V3_PRODUCTION_SCHEDULE__ = window.__V3_PRODUCTION_SCHEDULE__ || {
+    status: "idle",
+    items: null,
+    total: 0,
+    summary: null,
+    unverified: null,
+    error: null,
+    errorKind: null,
+  };
+  function scheduleNum(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+  function seedScheduleMonitorOrder(row) {
+    const so = row && row.accurate_so_number;
+    if (!so) return null;
+    let o = monitorOrders[so];
+    if (!o) {
+      o = {
+        id: so,
+        name: row.customer_name || "",
+        branch: row.branch_id || "",
+        branchId: row.branch_id || "",
+        qty: scheduleNum(row.qty_print_po),
+        done: scheduleNum(row.qty_printed_done),
+        scheduledQty: scheduleNum(row.qty_allocated),
+        packed: 0,
+        sourceLines: [],
+        productionAssignments: [],
+        qtyVerified: true,
+        hold: !!row.hold,
+        design_status: row.design_status || "pending",
+        payment_status: row.payment_status || "pending",
+        v3ScheduleApi: true,
+        jobId: row.job_id,
+      };
+      monitorOrders[so] = o;
+    }
+    const lineId = String(row.so_line_id || "");
+    if (lineId && !(o.sourceLines || []).some(function (l) { return String(l.id) === lineId; })) {
+      o.sourceLines = (o.sourceLines || []).concat([{
+        id: lineId,
+        itemId: row.accurate_item_id,
+        name: "Item cetak " + lineId,
+        qty: scheduleNum(row.qty_print_po),
+        production_process: "print",
+        processSnapshot: "PRINT",
+      }]);
+    }
+    if (row.assignment_id != null) {
+      const aid = String(row.assignment_id);
+      if (!(o.productionAssignments || []).some(function (a) { return String(a.id) === aid; })) {
+        o.productionAssignments = (o.productionAssignments || []).concat([{
+          id: row.assignment_id,
+          soLineId: lineId,
+          colorIndex: row.color_pass || 1,
+          operator: row.operator_name || "",
+          machine: row.machine_name || "",
+          targetQty: scheduleNum(row.assignment_qty_planned),
+          completedQty: scheduleNum(row.assignment_qty_confirmed),
+          workDate: row.work_date || "",
+        }]);
+      }
+    }
+    o.qty = (o.sourceLines || []).reduce(function (n, l) { return n + scheduleNum(l.qty); }, 0);
+    o.done = Math.max(o.done || 0, scheduleNum(row.qty_printed_done));
+    o.scheduledQty = Math.max(o.scheduledQty || 0, scheduleNum(row.qty_allocated));
+    o.hold = o.hold || !!row.hold;
+    o.design_status = row.design_status || o.design_status;
+    o.payment_status = row.payment_status || o.payment_status;
+    return o;
+  }
+  function mapScheduleApiItem(row) {
+    const o = seedScheduleMonitorOrder(row) || {
+      id: row.accurate_so_number,
+      name: row.customer_name || "",
+      branch: row.branch_id || "",
+      sourceLines: [],
+      qtyVerified: true,
+      v3ScheduleApi: true,
+    };
+    const lineQty = scheduleNum(row.qty_print_po);
+    const allocated = scheduleNum(row.qty_allocated);
+    const done = scheduleNum(row.qty_printed_done);
+    return Object.assign({}, o, {
+      colorWorkItem: true,
+      scheduleLineId: String(row.so_line_id || ""),
+      scheduleProcess: "PRINT",
+      item: "Item cetak " + String(row.so_line_id || ""),
+      lineQty: lineQty,
+      qty: lineQty,
+      scheduledQty: allocated,
+      done: done,
+      hold: !!row.hold,
+      operator: row.operator_name || "",
+      machine: row.machine_name || "",
+      assignmentId: row.assignment_id || "",
+      assignmentQty: scheduleNum(row.assignment_qty_planned),
+      assignmentCompleted: row.assignment_id != null ? scheduleNum(row.assignment_qty_confirmed) : null,
+      assignmentDate: row.work_date || "",
+      colorIndex: row.color_pass || 1,
+      colorName: row.color_pass ? ("Warna " + row.color_pass) : "Belum tercatat",
+      scheduleMonitorStatus: row.schedule_monitor_status || "",
+      scheduleBucket: row.schedule_bucket || "",
+      schedulingAllowed: !!row.scheduling_allowed,
+      colorRowKey: row.row_key || (row.job_id + ":" + row.so_line_id),
+      v3ScheduleApi: true,
+      _scheduleQty: {
+        qty: lineQty,
+        scheduled: allocated,
+        done: done,
+        packed: 0,
+        unassigned: scheduleNum(row.qty_unallocated),
+        remainingScheduled: Math.max(0, allocated - done),
+        remainingTotal: scheduleNum(row.qty_unprinted),
+        invalid: false,
+        unknownQty: 0,
+        qtyUnverified: false,
+      },
+    });
+  }
+  function scheduleApiUrl() {
+    const q = new URLSearchParams();
+    q.set("page", String(ops.schedPage || 1));
+    q.set("page_size", "50");
+    q.set("bucket", ops.schedBucket || "semua");
+    q.set("sort", "so_asc");
+    if (ops.schedQ) q.set("q", ops.schedQ);
+    if (ops.schedFrom) q.set("date_from", ops.schedFrom);
+    if (ops.schedTo) q.set("date_to", ops.schedTo);
+    return "/production/ops/schedule?" + q.toString();
+  }
+  function refreshProductionSchedule(force) {
+    if (isPreviewFixture()) return;
+    if (!force && !opsStale("sched") && ops.err.sched) return;
+    if (!force && !opsStale("sched") && window.__V3_PRODUCTION_SCHEDULE__.items) return;
+    window.__V3_PRODUCTION_SCHEDULE__.status = "loading";
+    window.__V3_PRODUCTION_SCHEDULE__.error = null;
+    window.__V3_PRODUCTION_SCHEDULE__.errorKind = null;
+    opsLoad("sched", scheduleApiUrl(), function (d) {
+      if (!d) {
+        const msg = ops.err.sched || "Gagal memuat Jadwal Produksi";
+        const kind = /403|izin|cabang|ditolak/i.test(msg)
+          ? "permission"
+          : /tidak dapat dihubungi|network|Backend API/i.test(msg)
+            ? "network"
+            : "api";
+        window.__V3_PRODUCTION_SCHEDULE__ = {
+          status: "error",
+          items: null,
+          total: 0,
+          summary: null,
+          unverified: null,
+          error: msg,
+          errorKind: kind,
+        };
+        return;
+      }
+      (d.items || []).forEach(seedScheduleMonitorOrder);
+      window.__V3_PRODUCTION_SCHEDULE__ = {
+        status: "ready",
+        items: d.items || [],
+        total: d.total || 0,
+        page: d.page,
+        page_size: d.page_size,
+        has_more: !!d.has_more,
+        summary: d.summary || null,
+        unverified: d.unverified || null,
+        incomplete: !!d.incomplete,
+        cancelled_jobs_supported: !!d.cancelled_jobs_supported,
+        source: d.source || "postgresql_job_line_qtys",
+        error: null,
+        errorKind: null,
+      };
+    });
+  }
+  function liveScheduleRowsFromApi() {
+    const sched = window.__V3_PRODUCTION_SCHEDULE__;
+    if (!sched || sched.status === "loading" || sched.status === "idle") return [];
+    if (sched.status === "error" || !Array.isArray(sched.items)) return [];
+    return sched.items.map(mapScheduleApiItem);
+  }
+  function isLiveRuntime() {
+    // Official Preview uses epv3_preview=fixture / __V3_PREVIEW_FIXTURE__.
+    // Live V3 must not depend on Accurate Inbox success (isLiveInbox).
+    return !isPreviewFixture();
+  }
+
+  (function patchLiveScheduleSource() {
+    const prevScheduleColorRows = window.scheduleColorRows;
+    if (typeof prevScheduleColorRows === "function") {
+      window.scheduleColorRows = function (rows) {
+        if (isLiveRuntime()) {
+          refreshProductionSchedule(false);
+          const sched = window.__V3_PRODUCTION_SCHEDULE__;
+          if (sched && sched.status === "error") {
+            // Never present API failure as a successful empty schedule table.
+            return [];
+          }
+          return liveScheduleRowsFromApi();
+        }
+        return prevScheduleColorRows.apply(this, arguments);
+      };
+    }
+    const prevOverview = window.scheduleOverview;
+    if (typeof prevOverview === "function") {
+      window.scheduleOverview = function (rows) {
+        if (isLiveRuntime()) {
+          const sched = window.__V3_PRODUCTION_SCHEDULE__;
+          if (sched && sched.status === "error") {
+            return '<section id="scheduleOverview" class="flat-notice" role="alert">' +
+              escapeHtml(sched.error || "Gagal memuat Jadwal Produksi") +
+              ' <button type="button" class="btn sm" data-ops="sched-reload">Coba lagi</button></section>';
+          }
+          if (!sched || sched.status === "loading" || sched.status === "idle" || !sched.items) {
+            return '<section id="scheduleOverview" class="flat-notice" role="status">Memuat Jadwal Produksi dari PostgreSQL…</section>';
+          }
+          const s = sched.summary || {};
+          const cells = [
+            ["Total Qty Cetak", scheduleNum(s.qty_print_po)],
+            ["Qty Terjadwal", scheduleNum(s.qty_allocated)],
+            ["Sudah Dicetak", scheduleNum(s.qty_printed_done)],
+            ["Belum Dicetak", scheduleNum(s.qty_unprinted)],
+            ["Belum Dijadwalkan", scheduleNum(s.qty_unallocated)],
+            ["Baris Cetak", scheduleNum(s.print_line_count)],
+          ];
+          const unk = sched.unverified && scheduleNum(sched.unverified.unknown_print_candidate_lines);
+          const empty = !sched.items.length;
+          let banner = "";
+          if (empty) {
+            banner = '<div class="flat-notice" role="status">Tidak ada item Cetak pada filter Jadwal Produksi saat ini.</div>';
+          }
+          if (unk) {
+            banner += '<div class="v44-production-alert" role="status">' + unk +
+              " line proses UNKNOWN/NULL — tidak dihitung sebagai Cetak. Tinjau klasifikasi di Detail PO.</div>";
+          }
+          if (!sched.cancelled_jobs_supported) {
+            banner += '<div class="flat-notice">Cancel ProductionJob belum didukung di V3 — filter Cancelled aktif tidak tersedia.</div>';
+          }
+          const buckets = [
+            ["semua", "Semua"],
+            ["belum_dijadwalkan", "Belum Dijadwalkan"],
+            ["dijadwalkan", "Dijadwalkan"],
+            ["hold", "HOLD"],
+          ];
+          const monthOpts = [
+            ["all", "Semua (histori)"],
+            ["month", "Bulan berjalan"],
+          ];
+          return '<section id="scheduleOverview" class="v44-production-strip v160-kpi-row" role="region" aria-label="Kontrol kuantitas produksi">' +
+            '<div class="v36-toolbar">' +
+            buckets.map(function (b) {
+              return '<button type="button" class="btn sm' + (ops.schedBucket === b[0] ? " primary" : "") +
+                '" data-ops="sched-bucket" data-bucket="' + b[0] + '">' + b[1] + "</button>";
+            }).join(" ") +
+            ' <label>Cakupan <select id="v3-sched-month">' +
+            monthOpts.map(function (m) {
+              return '<option value="' + m[0] + '"' + (ops.schedMonth === m[0] ? " selected" : "") + ">" + m[1] + "</option>";
+            }).join("") +
+            "</select></label>" +
+            ' <input id="v3-sched-q" class="fieldcontrol" type="search" value="' + escapeHtml(ops.schedQ || "") +
+            '" placeholder="Cari PO, pelanggan, operator…">' +
+            ' <button type="button" class="btn sm" data-ops="sched-reload">Muat ulang</button>' +
+            (sched.has_more || (ops.schedPage || 1) > 1
+              ? ' <button type="button" class="btn sm" data-ops="sched-prev"' + ((ops.schedPage || 1) <= 1 ? " disabled" : "") +
+                ">‹</button><span class=\"muted\">hlm " + (sched.page || ops.schedPage || 1) +
+                "</span><button type=\"button\" class=\"btn sm\" data-ops=\"sched-next\"" +
+                (sched.has_more ? "" : " disabled") + ">›</button>"
+              : "") +
+            "</div>" +
+            '<div class="v44-production-strip-items">' +
+            cells.map(function (c) {
+              return '<div class="v44-production-metric"><span>' + escapeHtml(c[0]) +
+                "</span><strong>" + (typeof window.fmt === "function" ? window.fmt(c[1]) : c[1]) +
+                " <small>pcs</small></strong></div>";
+            }).join("") +
+            "</div>" + banner +
+            '<small>Sumber: PostgreSQL JobLineQty print · total ' + (sched.total || 0) +
+            " baris · tidak bergantung halaman Inbox</small></section>";
+        }
+        return prevOverview.apply(this, arguments);
+      };
+    }
+    const prevProdQty = window.productionQty;
+    if (typeof prevProdQty === "function") {
+      window.productionQty = function (o) {
+        if (o && o._scheduleQty) return o._scheduleQty;
+        return prevProdQty.apply(this, arguments);
+      };
+    }
+
+    // BLOCKER 1: openScheduleEditor / showScheduleDetail must not require Inbox page orders[].
+    const prevOpenScheduleEditor = window.openScheduleEditor;
+    window.openScheduleEditor = function (id, focusColor, lineId, assignmentId) {
+      if (!isLiveRuntime()) {
+        return prevOpenScheduleEditor.apply(this, arguments);
+      }
+      const focus = {
+        lineId: lineId != null && String(lineId) !== "" ? String(lineId) : null,
+        assignmentId:
+          assignmentId != null && String(assignmentId) !== ""
+            ? String(assignmentId)
+            : null,
+        colorPass: focusColor != null ? Number(focusColor) || 1 : 1,
+      };
+      if (!focus.lineId) {
+        const hit = scheduleApiItemFor(id, focus);
+        if (hit) {
+          focus.lineId = String(hit.so_line_id || "");
+          if (hit.assignment_id != null) focus.assignmentId = String(hit.assignment_id);
+          focus.colorPass = Number(hit.color_pass || focus.colorPass || 1);
+          focus.jobId = hit.job_id;
+          focus.rowKey = hit.row_key;
+        }
+      }
+      const o = resolveScheduleOrder(id, focus);
+      if (!o) {
+        toast(
+          "SO tidak ditemukan di Jadwal Produksi / Inbox — Atur Operator dibatalkan",
+          "error",
+        );
+        return;
+      }
+      const printLine = (o.sourceLines || []).find(function (line) {
+        if (focus.lineId && String(line.id) === String(focus.lineId)) return true;
+        if (typeof window.effectiveLineMode === "function") {
+          return window.effectiveLineMode(o, line) === "PRINT";
+        }
+        return line.production_process === "print" || line.processSnapshot === "PRINT";
+      });
+      if (!printLine) {
+        toast(
+          typeof window.hasUnknownLine === "function" && window.hasUnknownLine(o)
+            ? "Ada line proses belum terverifikasi — selesaikan klasifikasi sebelum jadwal operator"
+            : "PO non-cetak tidak memerlukan jadwal operator",
+          "error",
+        );
+        return;
+      }
+      if (o.qtyVerified !== true && !o.v3ScheduleApi) {
+        toast("Qty PO belum terverifikasi — penjadwalan diblokir", "error");
+        return;
+      }
+      if (
+        typeof window.bothOfficialGatesOk === "function" &&
+        !window.bothOfficialGatesOk(o)
+      ) {
+        toast(
+          "Monitoring boleh tanpa ACC; simpan jadwal tetap membutuhkan Design Gate + Payment Gate",
+        );
+      }
+      if (typeof window.v3OpenWorkflow !== "function") {
+        toast("Panel V3 belum siap — tidak menyimpan jadwal simulasi pada mode Live", "error");
+        return;
+      }
+      return window.v3OpenWorkflow(id, { focus: focus, intent: "schedule" });
+    };
+
+    const prevShowScheduleDetail = window.showScheduleDetail;
+    window.showScheduleDetail = function (id) {
+      if (!isLiveRuntime()) {
+        return prevShowScheduleDetail.apply(this, arguments);
+      }
+      const hit = scheduleApiItemFor(id, {});
+      const focus = hit
+        ? {
+            lineId: String(hit.so_line_id || ""),
+            assignmentId:
+              hit.assignment_id != null ? String(hit.assignment_id) : null,
+            colorPass: Number(hit.color_pass || 1),
+            jobId: hit.job_id,
+            rowKey: hit.row_key,
+          }
+        : null;
+      const o = resolveScheduleOrder(id, focus || {});
+      if (!o) {
+        toast(
+          "SO tidak ditemukan di Jadwal Produksi / Inbox — Detail dibatalkan",
+          "error",
+        );
+        return;
+      }
+      if (typeof window.v3OpenWorkflow !== "function") {
+        toast("Panel V3 belum siap", "error");
+        return;
+      }
+      return window.v3OpenWorkflow(id, { focus: focus, intent: "detail" });
+    };
+
+    window.__V3_SCHEDULE_NAV__ = {
+      isLiveRuntime: isLiveRuntime,
+      resolveScheduleOrder: resolveScheduleOrder,
+      scheduleApiItemFor: scheduleApiItemFor,
+      applyScheduleFocus: applyScheduleFocus,
+    };
+  })();
   function opsHead(title, desc) {
     const h = typeof window.heading === "function" ? window.heading : function (t, d) { return "<h1>" + t + "</h1><p>" + d + "</p>"; };
     return h(title, desc);
@@ -3919,9 +4390,48 @@
       if (typeof window.render === "function") window.render();
     }
   });
+  function applySchedMonthWindow() {
+    if (ops.schedMonth === "month") {
+      const now = new Date();
+      // WIB = UTC+7
+      const wib = new Date(now.getTime() + 7 * 60 * 60 * 1000);
+      const y = wib.getUTCFullYear();
+      const m = wib.getUTCMonth() + 1;
+      const dd = String(wib.getUTCDate()).padStart(2, "0");
+      const mm = String(m).padStart(2, "0");
+      ops.schedFrom = y + "-" + mm + "-01";
+      ops.schedTo = y + "-" + mm + "-" + dd;
+    } else {
+      ops.schedFrom = "";
+      ops.schedTo = "";
+    }
+  }
   document.addEventListener("change", function (ev) {
     if (ev.target && ev.target.id === "v3-ops-status") {
       ops.status = ev.target.value; ops.del = null; ops.err.del = ""; ops.ts = {};
+      if (typeof window.render === "function") window.render();
+    }
+    if (ev.target && ev.target.id === "v3-sched-month") {
+      ops.schedMonth = ev.target.value || "all";
+      applySchedMonthWindow();
+      ops.schedPage = 1;
+      ops.err.sched = "";
+      ops.ts.sched = 0;
+      window.__V3_PRODUCTION_SCHEDULE__.items = null;
+      window.__V3_PRODUCTION_SCHEDULE__.status = "loading";
+      refreshProductionSchedule(true);
+      if (typeof window.render === "function") window.render();
+    }
+  });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.target && ev.target.id === "v3-sched-q" && ev.key === "Enter") {
+      ops.schedQ = String(ev.target.value || "").trim();
+      ops.schedPage = 1;
+      ops.err.sched = "";
+      ops.ts.sched = 0;
+      window.__V3_PRODUCTION_SCHEDULE__.items = null;
+      window.__V3_PRODUCTION_SCHEDULE__.status = "loading";
+      refreshProductionSchedule(true);
       if (typeof window.render === "function") window.render();
     }
   });
@@ -3929,6 +4439,23 @@
     const t = ev.target && ev.target.closest ? ev.target.closest("[data-ops]") : null;
     if (!t) return;
     const act = t.getAttribute("data-ops");
+    if (act === "sched-reload" || act === "sched-bucket" || act === "sched-prev" || act === "sched-next") {
+      if (act === "sched-bucket") ops.schedBucket = t.getAttribute("data-bucket") || "semua";
+      if (act === "sched-next") ops.schedPage = (ops.schedPage || 1) + 1;
+      if (act === "sched-prev") ops.schedPage = Math.max(1, (ops.schedPage || 1) - 1);
+      if (act === "sched-reload") {
+        const qEl = document.getElementById("v3-sched-q");
+        if (qEl) ops.schedQ = String(qEl.value || "").trim();
+      }
+      if (act === "sched-bucket" || act === "sched-reload") ops.schedPage = act === "sched-bucket" ? 1 : (ops.schedPage || 1);
+      ops.err.sched = "";
+      ops.ts.sched = 0;
+      window.__V3_PRODUCTION_SCHEDULE__.items = null;
+      window.__V3_PRODUCTION_SCHEDULE__.status = "loading";
+      refreshProductionSchedule(true);
+      if (typeof window.render === "function") window.render();
+      return;
+    }
     if (act === "buf-open") {
       rmOpenRow({ job_id: Number(t.getAttribute("data-jid")), so_number: t.getAttribute("data-so"), branch_id: t.getAttribute("data-branch"), customer_name: t.getAttribute("data-cust") });
       return;
