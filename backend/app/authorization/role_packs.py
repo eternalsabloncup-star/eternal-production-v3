@@ -74,7 +74,8 @@ ROLE_PACKS = MappingProxyType({
         ),
         "notes": (
             "Penjadwalan, approval sampel, plan SJ, cancel lokal. Bukan payment bypass. "
-            "settings.branch.read / payment_approval.* tetap Director-only (modul settings)."
+            "settings.branch.read / settings.branch.manage / payment_approval.* "
+            "tetap Director-only (modul settings; grant manual branch.manage belum diizinkan)."
         ),
     },
     "designer": {

@@ -283,6 +283,37 @@ async def test_six_role_packs_http_matrix_and_access_audit(enforced):
         await c.get("/api/v1/production/settings/payment-approval", headers=director)
     ).status_code == 200
 
+    # Master Cabang: packs cannot manage; Director can create; employee grant rejected
+    listed_kp = await c.get("/api/v1/production/settings/branches", headers=kp)
+    assert listed_kp.status_code in {200, 403}
+    if listed_kp.status_code == 200:
+        assert listed_kp.json().get("can_manage") is False
+    denied_create = await c.post(
+        "/api/v1/production/settings/branches",
+        headers=kp,
+        json={"code": "BR-ENF", "name": "Enforced", "reason": "bukan direktur"},
+    )
+    assert denied_create.status_code == 403
+    created = await c.post(
+        "/api/v1/production/settings/branches",
+        headers=director,
+        json={"code": "BR-ENF", "name": "Enforced", "reason": "Direktur buat cabang sandbox"},
+    )
+    assert created.status_code == 200, created.text
+    grant_reject = await c.post(
+        "/api/v1/settings/groups/2/grants",
+        headers=director,
+        json={
+            "revision": await _revision(c, director),
+            "reason": "Coba grant branch.manage — harus ditolak",
+            "capability": "settings.branch.manage",
+            "ownership": "all",
+            "branches": [],
+            "assignments": [],
+        },
+    )
+    assert grant_reject.status_code in {400, 403, 422}
+
 
 @pytest.mark.asyncio
 async def test_tracking_read_does_not_imply_link_create(enforced):

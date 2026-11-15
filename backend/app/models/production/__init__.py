@@ -1,6 +1,7 @@
 """Phase 2 production workflow models."""
 
 from app.models.production.attachment import ProductionAttachment
+from app.models.production.branch import ProductionBranch, ProductionBranchAudit
 from app.models.production.customer_token import CustomerAccessToken
 from app.models.production.design import DesignVersion
 from app.models.production.event import ProductionEvent
@@ -28,6 +29,8 @@ __all__ = [
     "PaymentBypass",
     "PaymentApprovalSettings",
     "PaymentApprovalSettingsAudit",
+    "ProductionBranch",
+    "ProductionBranchAudit",
     "ScheduleAssignment",
     "SampleVersion",
     "ProductionEvent",

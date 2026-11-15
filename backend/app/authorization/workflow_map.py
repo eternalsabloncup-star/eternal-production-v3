@@ -79,6 +79,10 @@ SETTINGS_PROD = {
  'payment_approval_settings_put': ('settings.payment_approval.manage', ('job.read',)),
  'payment_approval_settings_audit': ('settings.payment_approval.read', ('job.read',)),
  'settings_branches_effective': ('settings.branch.read', ('job.read',)),
+ 'settings_branch_create': ('settings.branch.manage', ()),
+ 'settings_branch_update': ('settings.branch.manage', ()),
+ 'settings_branch_get': ('settings.branch.read', ('job.read',)),
+ 'settings_branch_audit': ('settings.branch.manage', ()),
  'settings_machines_summary': ('machine.read', ('job.read',)),
 }
 SENSITIVE_FIELDS = {
@@ -89,4 +93,5 @@ SENSITIVE_FIELDS = {
 COLLECTIONS = {'payment_receipts_list', 'payment_unsynced_list', 'deliveries_list', 'delivery_sj_detail', 'buffer_monitor', 'production_schedule_list', 'machines_list', 'payroll_runs_list', 'report_summary', 'assignees_list', 'list_team_tasks', 'list_team_tasks_with_sync', 'inbox', 'order_detail',
                'permissions_catalog', 'evidence_capability',
                'payment_approval_settings_get', 'payment_approval_settings_audit',
-               'settings_branches_effective', 'settings_machines_summary'}
+               'settings_branches_effective', 'settings_branch_get',
+               'settings_branch_audit', 'settings_machines_summary'}

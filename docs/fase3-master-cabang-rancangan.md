@@ -1,59 +1,102 @@
-# Rancangan Teknis — Master Cabang (belum writable)
+# Rancangan Teknis — Master Cabang (writable lokal)
 
-**Status:** DRAFT diperbarui — keputusan Direktur masih diperlukan untuk skema/migrasi
-**Tanggal:** 2026-11-16 03:15 WIB (Asia/Jakarta)
-**Kebijakan sesi:** **tidak** menambah tabel/API writable sekarang. Live memakai cabang efektif read-only.
-**Implementasi aman lokal tanpa skema baru:** capability `settings.branch.read` terpetakan enforced; UI RO jujur `can_manage=false`.
+**Status:** IMPLEMENTASI LOKAL — migrasi `20261120_0017` + API/UI (NO LIVE APPLY)
+**Tanggal:** 2026-11-16 (Asia/Jakarta)
+**HEAD acuan:** `8636b1f` + WIP lokal Master Cabang
+**Kebijakan:** NO LIVE MIGRATION · Production authorization **legacy** · tidak ada auto-grant/auto-seed
 
-## Relasi cabang existing (audit)
+## 1. Audit sumber existing (ID tidak diubah)
 
-| Sumber | Bentuk | Modul terdampak |
-|--------|--------|-----------------|
-| `users.branch_ids` (JSONB) | daftar kode string | akses legacy Inbox/ops |
-| `ProductionJob.branch_id` | string(64) | Inbox ensure, jadwal, kontrol qty, tasks, payment monitor |
-| ScopedGrant.branches | list string per capability | enforced grant scope |
-| `GET /production/settings/branches` | union grants ∪ job | Pengaturan RO |
+| Sumber | Bentuk | Integrasi |
+|--------|--------|-----------|
+| `users.branch_ids` JSONB | list string | akses legacy ops / Inbox |
+| `ScopedGrant.branches` | list string per capability | enforced scope |
+| `ProductionJob.branch_id` | string(64) | jadwal, tasks, payment, delivery |
 | `production_machines.branch_id` | string | Master Mesin |
 | Delivery / Loading / POD | via job.branch_id | Jadwal Pengiriman |
-| Laporan / payroll runs | branch_id | laporan & slip |
+| `production_branches` | master PG (baru) | SoT nama/aktif/sort — **bukan** rewrite ID |
 | Accurate gateway | branch id/name upstream | referensi, bukan master V3 |
 
-Tidak ada tabel `branches` PostgreSQL master editable di V3 saat ini.
+## 2. Kontrak identitas (disetujui prinsip Direktur)
 
-## Identitas cabang (usulan setelah keputusan)
+| Field | Aturan |
+|-------|--------|
+| `code` | PK, **immutable** setelah insert; 1:1 dengan job/grant/`users.branch_ids` |
+| `name` | editable |
+| `active` | soft-deactivate saja; **tidak ada hard-delete** endpoint |
+| `sort_order` | int |
+| opsional | `accurate_branch_id`, alamat, zona |
+| audit | `production_branches_audit` (actor, reason, before/after) |
 
-- `code` PK/unique — **immutable** setelah publish; 1:1 dengan `ProductionJob.branch_id` / grant / `users.branch_ids`
-- `name`, `active`, `sort_order`
-- opsional: `accurate_branch_id`, alamat, zona
-- audit: reason + before/after + actor
+**Anti-duplikat:** unique(`code`).
+**Cabang baru:** MANUAL Direktur saja; tidak seed otomatis dari job/user.
 
-## Dampak bila code diubah (dilarang tanpa migrasi data)
+## 3. DDL (Alembic `20261120_0017`)
 
-Job, grant, mesin, laporan histori putus. Mitigasi: hanya rename `name`; soft-deactivate `active=false`.
+```sql
+CREATE TABLE production_branches (
+  code VARCHAR(64) PRIMARY KEY,
+  name VARCHAR(120) NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  accurate_branch_id VARCHAR(64) NULL,
+  address TEXT NULL,
+  zone VARCHAR(64) NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_by_user_id INTEGER NULL
+);
+CREATE TABLE production_branches_audit (...);
+```
 
-## Authz
+Upgrade **tidak** menyisipkan baris. Downgrade menghapus hanya tabel master/audit.
 
-- Enforced: daftar cabang UI grant dari master aktif ∪ histori job (bukan free-text liar).
-- Capability usulan manage: `settings.branch.manage` (belum di katalog sampai keputusan).
-- Legacy JSONB `branch_ids`: mapping eksplisit, **bukan** auto-import.
+## 4. API
 
-## Yang boleh tanpa keputusan baru (sudah/aman)
+| Method | Path | Cap / gate |
+|--------|------|------------|
+| GET | `/production/settings/branches` | `settings.branch.read` / legacy `job.read` |
+| GET | `/production/settings/branches/{code}` | sama |
+| POST | `/production/settings/branches` | Direktur + `settings.branch.manage` (enforced) |
+| PATCH | `/production/settings/branches/{code}` | sama |
+| GET | `/production/settings/branches/audit` | Direktur |
 
-- Endpoint RO + `settings.branch.read` di SETTINGS_PROD map
-- Transparansi di authorization-status (`branch_management`)
-- Dokumentasi relasi + risiko
+Orphan (kode job/grant belum di master) ditampilkan `source=effective_orphan`, `writable=false`.
+Daftarkan dengan POST kode yang sama — **tidak** mengubah job/grant existing.
 
-## Yang BLOCKED sampai keputusan Direktur
+## 5. Permission
 
-1. Tabel + migrasi Alembic writable
-2. CRUD API + UI Simpan
-3. Capability `settings.branch.manage`
-4. Seed dari job/user ke master
-5. Apply staging/Live
+- Capability: `settings.branch.manage` (katalog admin / modul settings).
+- Evaluator: modul `settings.*` = Director-only; grant ke karyawan **ditolak**.
+- Tahap awal: grant manual capability ini **belum diizinkan** (`manual_grant_branch_manage_allowed=false`).
+- Backend `user_may_manage_branches` mengabaikan grant non-Direktur.
 
-## Keputusan yang diminta
+## 6. UI Pengaturan
 
-1. Setujui skema master cabang?
-2. `code` immutable?
-3. Siapa manage sebelum/ sesudah enforced?
-4. Jadwal relatif cutover enforced?
+Tab Cabang: loading / sukses / error / validasi; SIMPAN→BACA→AUDIT via API.
+Bukan localStorage SoT. Non-Direktur: banner baca-saja tanpa tombol Simpan.
+
+## 7. Rencana rekonsiliasi kode cabang (keputusan Direktur)
+
+Tidak ada rewrite ID otomatis. Inventaris sebelum apply Live:
+
+| Kelas | Contoh | Tindakan usulan |
+|-------|--------|-----------------|
+| Cabang resmi | kode yang disepakati Direktur (mis. `BR-JKT`) | POST master dengan `code` sama + nama resmi |
+| Referensi legacy | `branch-a` / string fixture lama | Tetap di job/grant sampai migrasi data eksplisit; tampil orphan |
+| Orphan | kode di job/user/grant tanpa baris master | Daftarkan master (kode identik) **atau** biarkan orphan RO |
+| ProductionJob | `jobs.branch_id` | Jangan diubah oleh Master Cabang |
+| ScopedGrant | `access_grants.branches` | Jangan diubah oleh Master Cabang |
+| Mesin / pengiriman | `production_machines` / delivery via job | Ikut `branch_id` job; tidak dipindah |
+
+Urutan usulan Live (setelah approve):
+1. Apply migrasi `20261120_0017` (DDL kosong).
+2. Direktur POST daftar kode resmi (manual, beralasan, ter-audit).
+3. Laporan orphan tersisa → keputusan alias/rename data terpisah (bukan endpoint rename `code`).
+4. Soft-deactivate kode yang tidak dipakai (referensi tetap utuh).
+
+## 8. Masih BLOCKED untuk Live
+
+1. Apply migrasi staging/production
+2. Seed manual daftar cabang Live (keputusan eksplisit)
+3. Enforced Production activation

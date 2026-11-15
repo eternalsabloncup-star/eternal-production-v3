@@ -333,12 +333,104 @@ interactive.schedule = await page.evaluate(async () => {
     search: !!document.getElementById("v3-sched-q"),
     sheet: !!document.querySelector("table.excel-sheet, table.sheet"),
     labels: /Total Qty SO|Qty Terjadwal|Qty Sudah Dicetak|Qty Belum Selesai/i.test(text),
+    buckets: false,
+    stickySoCustomer: false,
   };
   const q = document.getElementById("v3-sched-q");
   if (q) {
     q.value = "SMOKE";
     q.dispatchEvent(new Event("input", { bubbles: true }));
     out.searchTyped = true;
+  }
+  const bucketBtns = [...document.querySelectorAll("button, [data-bucket], .sheetpill")].filter((el) =>
+    /Semua|Belum dijadwalkan|Dijadwalkan|HOLD/i.test(el.textContent || ""),
+  );
+  out.buckets = bucketBtns.length >= 2;
+  if (bucketBtns[1]) {
+    bucketBtns[1].click();
+    await new Promise((r) => setTimeout(r, 120));
+    out.bucketClicked = (bucketBtns[1].textContent || "").trim();
+  }
+  const sheet = document.querySelector("table.excel-sheet, table.sheet");
+  out.stickySoCustomer = !!(sheet && /so|customer|po/i.test(sheet.dataset?.v3Sticky || sheet.innerHTML.slice(0, 400)));
+  return out;
+});
+
+// SJ detail — buka baris pertama bila ada
+await goSection("shippingSchedule");
+await sleep(500);
+interactive.sjDetail = await page.evaluate(async () => {
+  const out = { opened: false, hasDetailApiHook: typeof window !== "undefined", coverageLimited: false };
+  const cov = document.getElementById("v3-del-coverage");
+  out.coverageLimited = !!(cov && /COVERAGE TERBATAS/i.test(cov.textContent || ""));
+  const rowBtn = document.querySelector(
+    '[data-ops="del-open"], .v3-delivery-sheet tbody tr button, .v3-delivery-sheet tbody tr [data-sj]',
+  );
+  const row = document.querySelector(".v3-delivery-sheet tbody tr");
+  if (rowBtn) {
+    rowBtn.click();
+    await new Promise((r) => setTimeout(r, 200));
+    out.opened = true;
+  } else if (row) {
+    row.click();
+    await new Promise((r) => setTimeout(r, 200));
+    out.opened = /detail|SJ|Surat Jalan|item/i.test(document.body.innerText || "");
+  } else {
+    out.opened = false;
+    out.emptyList = true;
+  }
+  return out;
+});
+
+// Settings · Cabang — smoke.lead = kepala (bukan Direktur): baca-saja, tanpa tombol Simpan
+await goSection("settings");
+await sleep(400);
+interactive.settingsCabang = await page.evaluate(async () => {
+  const out = {
+    tabOpened: false,
+    blockedBanner: false,
+    writableBanner: false,
+    noFakeSave: true,
+    table: false,
+  };
+  const tab = [...document.querySelectorAll("button")].find((b) => /^Cabang$/i.test((b.textContent || "").trim()));
+  if (tab) {
+    tab.click();
+    await new Promise((r) => setTimeout(r, 700));
+    out.tabOpened = true;
+  }
+  out.blockedBanner = !!document.querySelector('[data-testid="master-cabang-blocked"]') ||
+    /hanya baca untuk akun ini|Master Cabang writable:\s*BLOCKED/i.test(document.body.innerText || "");
+  out.writableBanner = !!document.querySelector('[data-testid="master-cabang-writable"]');
+  out.table = !!document.querySelector('[data-testid="branches-effective-table"]');
+  const saveish = [...document.querySelectorAll("button")].filter((b) =>
+    /Simpan cabang|Tambah cabang|Create branch/i.test(b.textContent || ""),
+  );
+  // Kepala: tidak boleh ada tombol mutasi. Direktur smoke terpisah.
+  out.noFakeSave = saveish.length === 0;
+  return out;
+});
+
+// Tugas Tim — bukti tombol Kerjakan / Approval Sampel (tidak mengklaim mutasi API sukses)
+await goSection("tasks");
+await sleep(400);
+interactive.taskActions = await page.evaluate(async () => {
+  const out = {
+    actionButtons: document.querySelectorAll("[data-task-action]").length,
+    kerjakanLabel: 0,
+    sampleApproveLabel: 0,
+    clicked: false,
+    mutateClaimed: false,
+  };
+  const buttons = [...document.querySelectorAll("button, [data-task-action]")];
+  out.kerjakanLabel = buttons.filter((b) => /Kerjakan/i.test(b.textContent || "")).length;
+  out.sampleApproveLabel = buttons.filter((b) => /Approval Sampel|Setujui Sampel|sample_approve/i.test(b.textContent || "")).length;
+  const first = document.querySelector("[data-task-action]");
+  if (first) {
+    first.click();
+    await new Promise((r) => setTimeout(r, 150));
+    out.clicked = true;
+    out.panelOrToast = /sampel|upload|loading|POD|jadwal|panel|file|Gagal|izin/i.test(document.body.innerText || "");
   }
   return out;
 });
@@ -364,7 +456,11 @@ const interactiveOk =
   interactive.payment.sticky === "so,customer" &&
   interactive.schedule.overview &&
   interactive.schedule.kontrol &&
-  interactive.schedule.statusKerja;
+  interactive.schedule.statusKerja &&
+  interactive.sjDetail.coverageLimited &&
+  interactive.settingsCabang.blockedBanner &&
+  interactive.settingsCabang.noFakeSave &&
+  interactive.settingsCabang.table;
 
 const result = {
   ok: false,

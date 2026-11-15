@@ -187,33 +187,40 @@ def test_monitor_financial_never_invents_lunas():
 
 
 @pytest.mark.asyncio
-async def test_settings_branches_readonly_honest(case):
-    """Cabang efektif read-only — tidak mengaku writable master sandbox."""
+async def test_settings_branches_master_writable_for_director(case):
+    """Direktur melihat Master Cabang PostgreSQL writable; mesin tetap PG."""
     from httpx import ASGITransport, AsyncClient
 
     from app.core.security import create_access_token
     from app.main import create_app
 
-    did, _oid, _jid = case
+    did, oid, _jid = case
     async with get_session_factory()() as session:
         director = await session.get(User, did)
-        token = create_access_token(director)
+        operator = await session.get(User, oid)
+        dtoken = create_access_token(director)
+        otoken = create_access_token(operator)
     app = create_app()
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         res = await ac.get(
             "/api/v1/production/settings/branches",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {dtoken}"},
         )
         assert res.status_code == 200
         body = res.json()
-        assert body["can_manage"] is False
-        assert body["persistence"] is None
+        assert body["can_manage"] is True
+        assert body["persistence"] == "production_branches"
         assert any(i["code"] == "BR-JKT" for i in body["items"])
-        assert all(i.get("writable") is False for i in body["items"])
+        op = await ac.get(
+            "/api/v1/production/settings/branches",
+            headers={"Authorization": f"Bearer {otoken}"},
+        )
+        assert op.status_code == 200
+        assert op.json()["can_manage"] is False
         machines = await ac.get(
             "/api/v1/production/settings/machines-summary",
-            headers={"Authorization": f"Bearer {token}"},
+            headers={"Authorization": f"Bearer {dtoken}"},
         )
         assert machines.status_code == 200
         mbody = machines.json()

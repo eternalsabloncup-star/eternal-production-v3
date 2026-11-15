@@ -5339,13 +5339,24 @@
     else if (t.id === "v3-br-reload") { brCfg.stale = true; if (typeof window.render === "function") window.render(); }
   });
 
-  // Cabang efektif — read-only (bukan master sandbox editable).
-  const brCfg = { data: null, loading: false, error: "", stale: true };
+  // Master Cabang — PostgreSQL SoT (Direktur manage; tanpa localStorage Live).
+  const brCfg = {
+    data: null, audit: null, loading: false, saving: false, error: "", msg: "", stale: true, editCode: null,
+  };
   async function brCfgLoad() {
     if (brCfg.loading) return;
-    brCfg.loading = true; brCfg.error = "";
+    brCfg.loading = true; brCfg.error = ""; brCfg.msg = "";
     try {
       brCfg.data = await request(API + "/production/settings/branches");
+      if (brCfg.data && brCfg.data.can_manage) {
+        try {
+          brCfg.audit = await request(API + "/production/settings/branches/audit?limit=15");
+        } catch (_e) {
+          brCfg.audit = { items: [] };
+        }
+      } else {
+        brCfg.audit = null;
+      }
       brCfg.stale = false;
     } catch (err) {
       brCfg.data = null;
@@ -5355,21 +5366,197 @@
     brCfg.loading = false;
     if (typeof window.render === "function") window.render();
   }
+  async function brCfgCreate() {
+    if (brCfg.saving) return;
+    const codeEl = document.getElementById("v3-br-new-code");
+    const nameEl = document.getElementById("v3-br-new-name");
+    const reasonEl = document.getElementById("v3-br-new-reason");
+    const code = codeEl ? String(codeEl.value || "").trim() : "";
+    const name = nameEl ? String(nameEl.value || "").trim() : "";
+    const reason = reasonEl ? String(reasonEl.value || "").trim() : "";
+    if (!code || !name) {
+      brCfg.error = "Kode dan nama cabang wajib diisi";
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    if (reason.length < 5) {
+      brCfg.error = "Alasan perubahan wajib minimal 5 karakter";
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    brCfg.saving = true; brCfg.error = ""; brCfg.msg = "";
+    if (typeof window.render === "function") window.render();
+    try {
+      await request(API + "/production/settings/branches", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: code, name: name, reason: reason, active: true, sort_order: 0 }),
+      });
+      brCfg.msg = "Cabang tersimpan di PostgreSQL";
+      brCfg.stale = true;
+      await brCfgLoad();
+    } catch (err) {
+      brCfg.error = String((err && err.message) || "Gagal menambah cabang");
+      brCfg.saving = false;
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    brCfg.saving = false;
+  }
+  async function brCfgSaveEdit(code) {
+    if (brCfg.saving) return;
+    const nameEl = document.getElementById("v3-br-edit-name");
+    const activeEl = document.getElementById("v3-br-edit-active");
+    const reasonEl = document.getElementById("v3-br-edit-reason");
+    const sortEl = document.getElementById("v3-br-edit-sort");
+    const name = nameEl ? String(nameEl.value || "").trim() : "";
+    const reason = reasonEl ? String(reasonEl.value || "").trim() : "";
+    const active = activeEl ? !!activeEl.checked : true;
+    const sort_order = sortEl ? Number(sortEl.value || 0) : 0;
+    if (!name) {
+      brCfg.error = "Nama cabang wajib diisi";
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    if (reason.length < 5) {
+      brCfg.error = "Alasan perubahan wajib minimal 5 karakter";
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    brCfg.saving = true; brCfg.error = ""; brCfg.msg = "";
+    if (typeof window.render === "function") window.render();
+    try {
+      await request(API + "/production/settings/branches/" + encodeURIComponent(code), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name, active: active, sort_order: sort_order, reason: reason }),
+      });
+      brCfg.msg = "Perubahan cabang diterapkan";
+      brCfg.editCode = null;
+      brCfg.stale = true;
+      await brCfgLoad();
+    } catch (err) {
+      brCfg.error = String((err && err.message) || "Gagal mengubah cabang");
+      brCfg.saving = false;
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    brCfg.saving = false;
+  }
   window.v3BranchesSettingsView = function () {
     if (isPreviewFixture()) {
-      return "<div class=\"flat-notice\">Preview: cabang efektif Live tidak dimuat.</div>";
+      return "<div class=\"flat-notice\">Preview: Master Cabang Live tidak dimuat.</div>";
     }
     if (brCfg.stale && !brCfg.loading) setTimeout(brCfgLoad, 0);
-    if (brCfg.loading && !brCfg.data) return "<div class=\"flat-notice\">Memuat cabang efektif…</div>";
-    if (brCfg.error) return "<div class=\"flat-notice\" role=\"alert\">" + escapeHtml(brCfg.error) + " <button type=\"button\" class=\"btn sm\" id=\"v3-br-reload\">Coba lagi</button></div>";
+    if (brCfg.loading && !brCfg.data) return "<div class=\"flat-notice\" data-testid=\"master-cabang-loading\">Memuat Master Cabang…</div>";
+    if (brCfg.error && !brCfg.data) {
+      return "<div class=\"flat-notice\" role=\"alert\" data-testid=\"master-cabang-error\">" +
+        escapeHtml(brCfg.error) +
+        " <button type=\"button\" class=\"btn sm\" id=\"v3-br-reload\">Coba lagi</button></div>";
+    }
     const items = (brCfg.data && brCfg.data.items) || [];
+    const canManage = !!(brCfg.data && brCfg.data.can_manage);
     const rows = items.map(function (b) {
-      return "<tr><td>" + escapeHtml(b.code) + "</td><td>" + escapeHtml(b.name) + "</td><td>" + (b.active ? "Ya" : "Tidak") + "</td><td>" + (b.in_user_grants ? "Ya" : "Tidak") + "</td><td>" + (b.seen_on_jobs ? "Ya" : "Tidak") + "</td><td><span class=\"muted\">Read-only</span></td></tr>";
-    }).join("") || "<tr><td colspan=\"6\"><span class=\"muted\">Belum ada cabang pada grants/job</span></td></tr>";
-    return "<div class=\"flat-notice\"><b>Cabang efektif (bukan master editable).</b> " + escapeHtml((brCfg.data && brCfg.data.note) || "") + "</div>" +
-      "<div class=\"v36-table-container\"><table class=\"v36-table\"><thead><tr><th>Kode</th><th>Nama</th><th>Akses</th><th>Di grant user</th><th>Ada di job</th><th>Writable</th></tr></thead><tbody>" + rows + "</tbody></table></div>" +
+      const src = b.source === "master" ? "Master" : "Orphan";
+      const refs = b.references
+        ? ("j" + (b.references.jobs || 0) + "/m" + (b.references.machines || 0) +
+          "/u" + (b.references.users || 0) + "/g" + (b.references.grants || 0))
+        : "—";
+      const writable = b.writable && canManage && b.source === "master";
+      let action = "<span class=\"muted\">Read-only</span>";
+      if (writable) {
+        if (brCfg.editCode === b.code) {
+          action = "<button type=\"button\" class=\"btn sm primary\" data-br-save=\"" +
+            escapeHtml(b.code) + "\"" + (brCfg.saving ? " disabled" : "") + ">Simpan cabang</button>" +
+            " <button type=\"button\" class=\"btn sm\" data-br-cancel-edit=\"1\">Batal</button>";
+        } else {
+          action = "<button type=\"button\" class=\"btn sm\" data-br-edit=\"" +
+            escapeHtml(b.code) + "\">Ubah</button>";
+        }
+      } else if (canManage && b.source === "effective_orphan") {
+        action = "<span class=\"muted\">Daftarkan dengan kode sama</span>";
+      }
+      const nameCell = (writable && brCfg.editCode === b.code)
+        ? ("<input id=\"v3-br-edit-name\" type=\"text\" maxlength=\"120\" value=\"" +
+          escapeHtml(b.name) + "\" style=\"width:100%\">")
+        : escapeHtml(b.name);
+      const activeCell = (writable && brCfg.editCode === b.code)
+        ? ("<label><input id=\"v3-br-edit-active\" type=\"checkbox\"" +
+          (b.active ? " checked" : "") + "> Aktif</label>" +
+          "<div><input id=\"v3-br-edit-sort\" type=\"number\" value=\"" +
+          escapeHtml(b.sort_order) + "\" style=\"width:72px\" aria-label=\"Urutan\">" +
+          "<input id=\"v3-br-edit-reason\" type=\"text\" maxlength=\"500\" placeholder=\"Alasan ≥5 karakter\" style=\"width:100%;margin-top:4px\"></div>")
+        : (b.active ? "Ya" : "Tidak");
+      return "<tr data-branch-code=\"" + escapeHtml(b.code) + "\" data-source=\"" + escapeHtml(b.source || "") + "\">" +
+        "<td><code>" + escapeHtml(b.code) + "</code></td><td>" + nameCell + "</td><td>" + activeCell +
+        "</td><td>" + (b.in_user_grants ? "Ya" : "Tidak") + "</td><td>" + (b.seen_on_jobs ? "Ya" : "Tidak") +
+        "</td><td>" + escapeHtml(src) + "</td><td>" + escapeHtml(refs) + "</td><td>" + action + "</td></tr>";
+    }).join("") ||
+      "<tr><td colspan=\"8\"><span class=\"muted\">Belum ada cabang master / efektif</span></td></tr>";
+    const manageBanner = canManage
+      ? "<div class=\"flat-notice\" data-testid=\"master-cabang-writable\" role=\"status\">" +
+        "<b>Master Cabang writable (Direktur).</b> Sumber: PostgreSQL <code>production_branches</code>. " +
+        "Kode immutable. Soft-deactivate saja. Tidak ada seed/auto-grant. Grant manual " +
+        "<code>settings.branch.manage</code> belum diizinkan.</div>"
+      : "<div class=\"flat-notice\" data-testid=\"master-cabang-blocked\" role=\"status\">" +
+        "<b>Master Cabang: hanya baca untuk akun ini.</b> Mutasi hanya Direktur " +
+        "(<code>settings.branch.manage</code>). Tidak ada tombol Simpan.</div>";
+    const createBox = canManage
+      ? "<div class=\"setting-box\" data-testid=\"master-cabang-create\">" +
+        "<h3>Tambah cabang</h3>" +
+        "<label class=\"v22-setting-field\">Kode (immutable)<input id=\"v3-br-new-code\" type=\"text\" maxlength=\"64\" placeholder=\"BR-JKT\" " +
+        (brCfg.saving ? "disabled " : "") + "></label>" +
+        "<label class=\"v22-setting-field\">Nama<input id=\"v3-br-new-name\" type=\"text\" maxlength=\"120\" " +
+        (brCfg.saving ? "disabled " : "") + "></label>" +
+        "<label class=\"v22-setting-field\">Alasan<input id=\"v3-br-new-reason\" type=\"text\" maxlength=\"500\" placeholder=\"Wajib ≥5 karakter\" " +
+        (brCfg.saving ? "disabled " : "") + "></label>" +
+        "<div class=\"row\"><button type=\"button\" class=\"btn primary\" id=\"v3-br-create\"" +
+        (brCfg.saving ? " disabled" : "") + ">Tambah cabang</button></div></div>"
+      : "";
+    const auditRows = ((brCfg.audit && brCfg.audit.items) || []).map(function (a) {
+      return "<li>" + escapeHtml(a.action) + " · <code>" + escapeHtml(a.branch_code) +
+        "</code> · user #" + escapeHtml(a.actor_user_id) + " · " + escapeHtml(a.reason) +
+        " · " + escapeHtml(a.created_at || "") + "</li>";
+    }).join("");
+    const auditBox = canManage
+      ? "<div class=\"flat-notice\" data-testid=\"master-cabang-audit\"><b>Audit Master Cabang</b><ul>" +
+        (auditRows || "<li>Belum ada perubahan</li>") + "</ul></div>"
+      : "";
+    const statusLine = brCfg.error
+      ? "<div class=\"flat-notice\" role=\"alert\" data-testid=\"master-cabang-error\">" + escapeHtml(brCfg.error) + "</div>"
+      : (brCfg.msg
+        ? "<div class=\"flat-notice\" data-testid=\"master-cabang-success\">" + escapeHtml(brCfg.msg) + "</div>"
+        : "");
+    return manageBanner + statusLine +
+      "<div class=\"flat-notice\"><b>Sumber kebenaran:</b> " +
+      escapeHtml((brCfg.data && brCfg.data.persistence) || "production_branches") +
+      ". " + escapeHtml((brCfg.data && brCfg.data.note) || "") + "</div>" +
+      createBox +
+      "<div class=\"v36-table-container\"><table class=\"v36-table\" data-testid=\"branches-effective-table\">" +
+      "<thead><tr><th>Kode</th><th>Nama</th><th>Aktif</th><th>Di grant user</th><th>Ada di job</th>" +
+      "<th>Sumber</th><th>Ref</th><th>Aksi</th></tr></thead><tbody>" + rows + "</tbody></table></div>" +
+      auditBox +
       "<button type=\"button\" class=\"btn sm\" id=\"v3-br-reload\">Muat ulang</button>";
   };
+  document.addEventListener("click", function (ev) {
+    const t = ev.target;
+    if (!t) return;
+    if (t.id === "v3-br-create") { brCfgCreate(); return; }
+    if (t.getAttribute && t.getAttribute("data-br-edit")) {
+      brCfg.editCode = t.getAttribute("data-br-edit");
+      brCfg.error = ""; brCfg.msg = "";
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    if (t.getAttribute && t.getAttribute("data-br-cancel-edit")) {
+      brCfg.editCode = null;
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    if (t.getAttribute && t.getAttribute("data-br-save")) {
+      brCfgSaveEdit(t.getAttribute("data-br-save"));
+    }
+  });
 
   (async function bootLive() {
     clearGhosts();
