@@ -15,8 +15,8 @@ const fields = (event: FormEvent<HTMLFormElement>) => {
 };
 const text = (data: FormData, name: string) => String(data.get(name) ?? "");
 
-export function SettingsPanel({ api, runtime = false, confirmAction = window.confirm.bind(window) }: {
-  api: SettingsApi; runtime?: boolean; confirmAction?: (message: string) => boolean;
+export function SettingsPanel({ api, runtime = false, workflowAuthorization = "legacy", confirmAction = window.confirm.bind(window) }: {
+  api: SettingsApi; runtime?: boolean; workflowAuthorization?: string; confirmAction?: (message: string) => boolean;
 }) {
   const [users, setUsers] = useState<User[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -38,6 +38,14 @@ export function SettingsPanel({ api, runtime = false, confirmAction = window.con
   const [scope, setScope] = useState("");
   const [ownership, setOwnership] = useState("all");
   const [assignmentIds, setAssignmentIds] = useState("");
+  const [authStatus, setAuthStatus] = useState<{
+    active_now?: boolean; blockers?: string[]; branch_management?: string; workflow_authorization?: string;
+    mapping_review_required?: Record<string, { impact?: string; recommendation?: string; owner_decision?: string; status?: string; permission_options?: Record<string, unknown> }>;
+    inventory_audit?: { conclusion?: string };
+    automatic_grant_import?: boolean;
+    role_grant_packs?: { automatic_apply_allowed?: boolean; usage?: string; packs?: Record<string, { label?: string; capabilities?: string[]; notes?: string; ownership_default?: string }> };
+    production_endpoints_mapped?: number;
+  } | null>(null);
 
   async function refresh() {
     const [u, g, c] = await Promise.all([
@@ -47,14 +55,23 @@ export function SettingsPanel({ api, runtime = false, confirmAction = window.con
     setUsers(u.items); setGroups(g.items); setCatalog(c.items);
     setRevision(Math.min(u.revision, g.revision, c.revision));
     setPreview(null);
+    if (runtime) {
+      try { setAuthStatus(await api.request("/authorization-status")); }
+      catch { /* status panel is advisory; keep account management usable */ }
+    }
   }
   useEffect(() => {
     let cancelled = false;
     Promise.all([api.request<Listing<User>>("/users"), api.request<Listing<Group>>("/groups"), api.request<Listing<Capability>>("/capabilities")])
       .then(([u, g, c]) => { if (!cancelled) { setUsers(u.items); setGroups(g.items); setCatalog(c.items); setRevision(Math.min(u.revision, g.revision, c.revision)); } })
       .catch(e => { if (!cancelled) setError(String(e.message)); });
+    if (runtime) {
+      api.request<{ active_now?: boolean; blockers?: string[]; branch_management?: string; workflow_authorization?: string }>("/authorization-status")
+        .then(s => { if (!cancelled) setAuthStatus(s); })
+        .catch(() => { /* advisory */ });
+    }
     return () => { cancelled = true; };
-  }, [api]);
+  }, [api, runtime]);
 
   async function run(action: () => Promise<void>) {
     if (busy) return;
@@ -75,8 +92,33 @@ export function SettingsPanel({ api, runtime = false, confirmAction = window.con
     if (id) setGrants((await api.request<Listing<GrantRow>>(`/groups/${id}/grants`)).items);
   }
   const chosenGroup = groups.find(g => String(g.id) === groupId);
+  const mode = authStatus?.workflow_authorization || workflowAuthorization;
+  const enforcedActive = mode === "enforced" || authStatus?.active_now === true;
   return <section className="shell settings-panel">
-    <header><h1 className="brand">Settings & Permission</h1><p className="meta">{runtime ? "Kelola akun dan grup. Permission produksi baru menunggu aktivasi; akses workflow existing belum dialihkan." : "Komponen terisolasi — belum aktif pada navigasi ERP V3."}</p></header>
+    <header><h1 className="brand">Settings & Permission</h1><p className="meta">{runtime
+      ? (enforcedActive
+        ? "Mode enforced AKTIF: grant Settings memutus akses produksi. Menu Pengguna, Grup, Cabang (via grant), Effective Access, dan Audit tetap tersedia."
+        : "Mode legacy AKTIF: workflow memakai izin legacy. Panel ini tetap mengelola akun/grup/grant; grant produksi belum memutus akses sampai cutover disetujui.")
+      : "Komponen terisolasi — belum aktif pada navigasi ERP V3."}</p></header>
+    {runtime && <section className="flat-notice" data-testid="authorization-status" data-mode={mode}>
+      <b>Status otorisasi workflow: {mode.toUpperCase()}</b>
+      <p>{authStatus?.branch_management || "Cabang dikelola sebagai ID eksplisit pada grant grup. DIREKTUR_ETERNAL: Full Access lintas cabang."}</p>
+      <p>Auto-import grant: {authStatus?.automatic_grant_import ? "AKTIF (tidak diizinkan)" : "NONAKTIF (sesuai keputusan Direktur)"}. Inventory: {authStatus?.inventory_audit?.conclusion || "not_run"}.</p>
+      {!!authStatus?.blockers?.length && <ul>{authStatus.blockers.map(b => <li key={b}>{b}</li>)}</ul>}
+      <p data-testid="endpoint-map-count">Endpoint produksi terpetakan: {authStatus?.production_endpoints_mapped ?? "—"}.</p>
+      {!!authStatus?.mapping_review_required && <div data-testid="mapping-review">
+        <b>Tiga privilege legacy — grant MANUAL granular (tanpa auto-import)</b>
+        <ul>{Object.entries(authStatus.mapping_review_required).map(([code, row]) =>
+          <li key={code}><code>{code}</code> — {row.status}. <i>Dampak:</i> {row.impact} <i>Rekomendasi:</i> {row.recommendation} <i>Keputusan:</i> {row.owner_decision}</li>)}</ul>
+      </div>}
+      {!!authStatus?.role_grant_packs?.packs && <div data-testid="role-grant-packs">
+        <b>Paket grant jabatan (panduan saja — tidak diterapkan otomatis)</b>
+        <p>{authStatus.role_grant_packs.usage}</p>
+        <ul>{Object.entries(authStatus.role_grant_packs.packs).map(([key, pack]) =>
+          <li key={key}><b>{pack.label || key}</b> · ownership {pack.ownership_default || "all"} · {pack.capabilities?.length || 0} capability. {pack.notes}</li>)}</ul>
+      </div>}
+      {!enforcedActive && <p>Aktivasi enforced memerlukan inventory clear, grant manual grup operasional, V3_WORKFLOW_ENFORCED_APPROVAL_REF, lalu deploy terpisah — bukan dari tombol di panel ini. Pengguna baru & permission hanya lewat Pengaturan (audit trail).</p>}
+    </section>}
     <nav aria-label="Settings">{["Pengguna", "Grup & Permission", "Effective Access", "Audit"].map(name => <button key={name} aria-pressed={tab === name} onClick={() => setTab(name)}>{name}</button>)}</nav>
     <p role="status">{message}</p>{error && <p role="alert" className="status__error">{error}</p>}
     <label>Alasan perubahan<input value={reason} onChange={e => setReason(e.target.value)} maxLength={500} /></label>

@@ -74,6 +74,9 @@ _admin = {
     'settings.user.password_reset', 'settings.group.read', 'settings.group.manage',
     'settings.membership.manage', 'settings.grant.manage', 'settings.effective_access.read',
     'settings.access_audit.read', 'settings.access_audit.export',
+    # Fase 3 production settings (PostgreSQL) — mapped for enforced; no auto-import from legacy.
+    'settings.payment_approval.read', 'settings.payment_approval.manage',
+    'settings.branch.read',
 }
 _global = _admin | {'payroll.rate.read', 'payroll.rate.manage', 'evidence.capability.read', 'capability.read'}
 CATALOG = MappingProxyType({

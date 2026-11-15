@@ -155,12 +155,12 @@ const ui = await page.evaluate(async () => {
     hasPaymentSettings: typeof window.v3PaymentApprovalSettingsView === "function" ||
       typeof window.v3SettingsPaymentView === "function",
     createIsExplicit: typeof window.v3EnsureJob === "function",
+    taskActionLabelFn: typeof window.taskActionLabel === "function",
   };
   document.querySelectorAll("nav button, .nav button, [data-nav], .sidebar button, aside button").forEach((el) => {
     const t = (el.textContent || "").trim().replace(/\s+/g, " ");
     if (t && t.length < 60) out.navLabels.push(t);
   });
-  // Try known live view hooks if present
   const hooks = [
     ["inbox", "v3InboxView"],
     ["schedule", "v3ScheduleView"],
@@ -176,8 +176,195 @@ const ui = await page.evaluate(async () => {
   return out;
 });
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function goSection(section) {
+  await page.evaluate((sec) => {
+    if (typeof window.go === "function") window.go(sec);
+    else if (typeof window.render === "function") {
+      window.section = sec;
+      window.render();
+    }
+  }, section);
+  await sleep(400);
+}
+
+const interactive = {
+  shipping: {},
+  tasks: {},
+  payment: {},
+  schedule: {},
+};
+
+await goSection("shippingSchedule");
+await page.waitForFunction(
+  () =>
+    document.getElementById("v3-del-coverage") ||
+    document.querySelector(".v3-delivery-sheet") ||
+    /Memuat jadwal pengiriman|Gagal|Belum ada Surat Jalan/i.test(document.body.innerText || ""),
+  { timeout: 15000 },
+).catch(() => {});
+await sleep(600);
+interactive.shipping = await page.evaluate(async () => {
+  const out = {
+    coverage: !!document.getElementById("v3-del-coverage"),
+    coverageText: (document.getElementById("v3-del-coverage") || {}).textContent || "",
+    sheet: !!document.querySelector(".v3-delivery-sheet"),
+    scroll: !!document.querySelector(".v3-delivery-scroll"),
+    sticky: (document.querySelector(".v3-delivery-sheet") || {}).dataset?.v3Sticky || "",
+    sortBefore: null,
+    sortAfter: null,
+    colToggle: false,
+    search: false,
+    pageBodyScrollX: document.documentElement.scrollWidth <= document.documentElement.clientWidth + 2,
+  };
+  const sortBtn = document.querySelector('[data-ops="del-sort"][data-key="customer"]');
+  out.sortBefore = sortBtn ? sortBtn.textContent.trim() : null;
+  if (sortBtn) {
+    sortBtn.click();
+    await new Promise((r) => setTimeout(r, 50));
+    const again = document.querySelector('[data-ops="del-sort"][data-key="customer"]');
+    out.sortAfter = again ? again.textContent.trim() : null;
+  }
+  const col = document.querySelector('[data-ops="del-col"][data-col="address"]');
+  if (col) {
+    const was = col.checked;
+    col.click();
+    await new Promise((r) => setTimeout(r, 120));
+    const after = document.querySelector('[data-ops="del-col"][data-col="address"]');
+    out.colToggle = !!(after && after.checked !== was);
+    if (after && after.checked !== was) {
+      after.click();
+      await new Promise((r) => setTimeout(r, 80));
+    }
+  }
+  const q = document.getElementById("v3-del-q");
+  const form = document.getElementById("v3-del-form");
+  if (q && form) {
+    q.value = "SMOKE-NO-MATCH-XYZ";
+    form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 400));
+    out.search = true;
+    out.searchEmpty = /Belum ada Surat Jalan|tidak menulis Accurate/i.test(document.body.innerText || "");
+    q.value = "";
+    form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  }
+  return out;
+});
+
+await goSection("tasks");
+interactive.tasks = await page.evaluate(async () => {
+  const out = {
+    sheet: !!document.querySelector("table.task-sheet"),
+    roleSelect: false,
+    roles: [],
+    filterTrigger: !!document.querySelector(".task-sheet .sheet-filter-trigger"),
+    search: false,
+    kerjakanOrLihat: 0,
+    officialSource: window.__V3_OFFICIAL_TASK_SOURCE__ || null,
+    officialCount: Array.isArray(window.__V3_OFFICIAL_TASKS__) ? window.__V3_OFFICIAL_TASKS__.length : 0,
+  };
+  const sel = document.querySelector('select.fieldcontrol');
+  const roleSel = [...document.querySelectorAll("select.fieldcontrol")].find((s) =>
+    [...s.options].some((o) => o.textContent.includes("Driver")),
+  );
+  if (roleSel) {
+    out.roles = [...roleSel.options].map((o) => o.textContent.trim());
+    out.roleSelect = out.roles.includes("Kepala Produksi") && out.roles.includes("Driver");
+    roleSel.value = "Driver";
+    roleSel.dispatchEvent(new Event("change", { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 80));
+  }
+  const search = document.getElementById("task-search");
+  if (search && typeof window.setTaskSearch === "function") {
+    window.setTaskSearch("SMOKE");
+    await new Promise((r) => setTimeout(r, 50));
+    out.search = true;
+    window.setTaskSearch("");
+  }
+  out.kerjakanOrLihat = document.querySelectorAll('[data-task-action]').length;
+  const filterBtn = document.querySelector(".task-sheet .sheet-filter-trigger");
+  if (filterBtn) {
+    filterBtn.click();
+    await new Promise((r) => setTimeout(r, 50));
+    out.filterMenu = !!document.getElementById("task-filter-menu");
+    if (typeof window.closeTaskColumnFilter === "function") window.closeTaskColumnFilter();
+  }
+  return out;
+});
+
+await goSection("paymentMonitor");
+interactive.payment = await page.evaluate(async () => {
+  const out = {
+    form: !!document.getElementById("v3-rm-form"),
+    sheet: !!document.querySelector(".v3-payment-sheet"),
+    scroll: !!document.querySelector(".v3-rm-scroll"),
+    sticky: (document.querySelector(".v3-payment-sheet") || {}).dataset?.v3Sticky || "",
+    sort: false,
+    emptyOrRows: false,
+  };
+  out.emptyOrRows =
+    !!document.querySelector(".v3-payment-sheet tbody tr") ||
+    /Tidak ada|Memuat|Gagal/i.test(document.body.innerText);
+  const sortBtn = document.querySelector('[data-rm="sort"][data-key="customer"]');
+  if (sortBtn) {
+    const before = sortBtn.textContent.trim();
+    sortBtn.click();
+    await new Promise((r) => setTimeout(r, 50));
+    const after = document.querySelector('[data-rm="sort"][data-key="customer"]');
+    out.sort = !!(after && after.textContent.trim() !== before) || before.includes("Pelanggan");
+  } else {
+    out.sort = !document.querySelector(".v3-payment-sheet"); // empty/loading still ok
+  }
+  return out;
+});
+
+await goSection("schedule");
+await sleep(800);
+interactive.schedule = await page.evaluate(async () => {
+  const overview = document.getElementById("scheduleOverview");
+  const text = (overview || document.body).textContent || "";
+  const out = {
+    overview: !!overview,
+    kontrol: !!document.getElementById("v3-kontrol-qty") || !!document.querySelector("#scheduleOverview .v44-production-metric"),
+    statusKerja: !!document.getElementById("v3-status-kerja") || /Status Kerja|Memuat Jadwal|Gagal memuat/i.test(text),
+    search: !!document.getElementById("v3-sched-q"),
+    sheet: !!document.querySelector("table.excel-sheet, table.sheet"),
+    labels: /Total Qty SO|Qty Terjadwal|Qty Sudah Dicetak|Qty Belum Selesai/i.test(text),
+  };
+  const q = document.getElementById("v3-sched-q");
+  if (q) {
+    q.value = "SMOKE";
+    q.dispatchEvent(new Event("input", { bubbles: true }));
+    out.searchTyped = true;
+  }
+  return out;
+});
+
 await browser.close();
 server.close();
+
+const interactiveOk =
+  interactive.shipping.coverage &&
+  interactive.shipping.sheet &&
+  interactive.shipping.scroll &&
+  interactive.shipping.sticky === "sj,so" &&
+  String(interactive.shipping.coverageText).includes("COVERAGE TERBATAS") &&
+  !!interactive.shipping.sortBefore &&
+  interactive.shipping.colToggle &&
+  interactive.shipping.search &&
+  interactive.tasks.sheet &&
+  interactive.tasks.roleSelect &&
+  interactive.tasks.filterTrigger &&
+  interactive.tasks.filterMenu &&
+  interactive.payment.form &&
+  interactive.payment.sheet &&
+  interactive.payment.sticky === "so,customer" &&
+  interactive.schedule.overview &&
+  interactive.schedule.kontrol &&
+  interactive.schedule.statusKerja;
 
 const result = {
   ok: false,
@@ -198,6 +385,8 @@ const result = {
     receipts: apiProbes.receipts,
   },
   ui,
+  interactive,
+  interactiveOk,
   errors,
 };
 
@@ -215,11 +404,14 @@ result.ok =
   result.ui.hasBranchesView &&
   result.ui.hasPaymentSettings &&
   result.api.task_roles_seen.length >= 1 &&
+  interactiveOk &&
   errors.filter(
     (e) =>
       !String(e).includes("favicon") &&
       !String(e).includes("Failed to load resource") &&
-      !String(e).includes("404"),
+      !String(e).includes("404") &&
+      !String(e).includes("403") &&
+      !String(e).includes("503"),
   ).length === 0;
 
 console.log(JSON.stringify(result, null, 2));

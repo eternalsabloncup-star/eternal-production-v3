@@ -1,50 +1,63 @@
-# Dependensi Pengaturan HTML Final ↔ PR #14 (HOLD)
+# Dependensi Pengaturan HTML Final ↔ PR #14 (integrasi selektif lokal)
 
-**PR #14:** `cursor/epv3-authz-enforced-activation-83bf` — OPEN / HOLD  
-**PR #15:** `cursor/epv3-production-schedule-83bf` — foundation produksi + Fase 3  
-**Kebijakan:** **jangan merge #14**; **jangan aktifkan `enforced`**.
+**PR #14:** `cursor/epv3-authz-enforced-activation-83bf` @ `788ce40` — OPEN / HOLD (tidak di-merge)
+**PR #15:** `cursor/epv3-production-schedule-83bf` @ `b58d000` + WIP lokal
+**Kebijakan Production:** **jangan merge #14**; **jangan aktifkan `enforced` di VPS/Production**.
 
-## Yang sudah jalan di PR #15 tanpa #14
+## Status integrasi (lokal, NO COMMIT)
+
+Fitur PR #14 diintegrasikan **selektif** ke worktree PR #15 tanpa merge Git:
+
+| Komponen | Sumber | Status lokal |
+|----------|--------|--------------|
+| `owner_policy.py` | #14 | TERINTEGRASI |
+| `mode.py` (startup gate + status) | #14 + map SETTINGS_PROD | TERINTEGRASI |
+| `V3_WORKFLOW_ENFORCED_APPROVAL_REF` | #14 | TERINTEGRASI |
+| `GET /settings/authorization-status` | #14 | TERINTEGRASI |
+| `inventory.build(declare_readonly=)` | #14 | TERINTEGRASI |
+| SettingsPanel status UI | #14 | TERINTEGRASI |
+| `settingsAccessPanel` data-workflow | #14 hunk | TERINTEGRASI (WIP FE dipertahankan) |
+| SETTINGS_PROD map (payment/cabang/mesin) | gap #15 | TERINTEGRASI (baru) |
+| Merge PR #14 / enforced Production | — | **TIDAK** |
+
+## Yang sudah jalan tanpa merge #14
 
 | Fitur Pengaturan | SoT | Catatan |
 |------------------|-----|---------|
-| Approval Payment | PG + audit | Independen legacy Direktur / `PAYMENT_BYPASS` |
-| Cabang efektif RO | grants JSONB + job | Jujur `can_manage=false` |
-| Master Mesin | PG ops API | Permission job/ops existing |
+| Approval Payment | PG + audit | Capability `settings.payment_approval.*` terpetakan enforced |
+| Cabang efektif RO | grants JSONB + job | `settings.branch.read`; `can_manage=false` |
+| Master Mesin | PG ops API | `machine.read` / `machine.manage` |
+| Users/Grup/ScopedGrant/AccessAudit | Settings API | Manual; SIMPAN→BACA→AUDIT |
+| Authorization status | Settings API | Direktur-only; tidak mengaktifkan enforced |
 | Katalog inventaris transparan | UI | Non-mutasi |
 
-## Bagian authorization yang dibutuhkan untuk kesesuaian HTML Final
+## Privilege masih BLOCKED (keputusan bisnis)
 
-| Bagian Final | Sumber ideal | Status tanpa #14 |
-|--------------|--------------|------------------|
-| Pengguna CRUD + password awal | Settings users (#14 UI/API) | PARSIAL / sandbox terpisah |
-| Grup & permission granular | AccessGroup + grants | HOLD |
-| ScopedGrant per cabang/assignment | model grant #14 | HOLD |
-| Effective access preview | API #14 | HOLD |
-| AccessAudit Direktur | audit #14 | HOLD (payment settings punya audit sendiri) |
-| Authorization status / blockers UI | `#14` runtime | HOLD |
-| Workflow capability catalog cutover | enforced map | **tidak** diaktifkan |
+| Privilege | Status Owner | Dampak enforced tanpa grant granular |
+|-----------|--------------|--------------------------------------|
+| `production.job.read` | manual_only_no_auto_import | Board/attachment/loading authority 403 |
+| `production.delivery.manage` | manual_only_no_auto_import | Loading/POD/cancel/attachment 403 |
+| `production.tracking.read` | manual_only_no_auto_import | Tracking/link 403 |
+| Master Cabang writable | belum diputuskan | tetap RO |
 
-## Konflik potensial dengan PR #15
+## Konflik yang dihindari
 
-| Area | Risiko | Mitigasi |
-|------|--------|----------|
-| `workflow_map` route counts | #15 menambah endpoint produksi (65+); #14 mengunci matrix authz | Rebase #14 setelah #15 atau sebaliknya; sesuaikan count |
-| `COLLECTIONS` / sensitive fields | Endpoint settings payment/branches di luar map #14 | Tetap legacy `require_permissions` sampai katalog di-update |
-| Default `bypass_enabled` | Gate payment vs grant `payment.bypass` | Keduanya wajib; settings tidak mengganti grant |
-| UI Pengaturan tabs | #15 tab payment/cabang/katalog vs #14 users/grup | Gabung UI setelah merge berurutan; jangan double SoT |
-| Migrasi Alembic | #15 `0016` payment settings; #14 mungkin punya revisi sendiri | Linearize down_revision sebelum merge |
+| Area | Mitigasi diterapkan |
+|------|---------------------|
+| #14 menghapus `payment_settings_router` | **Tidak** diterapkan; router Fase 3 tetap |
+| Overwrite `production.html` WIP | Hanya hunk `settingsAccessPanel` + katalog status |
+| Route count 61→70 | Manifest mencakup SETTINGS_PROD; tes dinamis |
+| Default Production | tetap `legacy`; gate fail-closed tanpa approval ref |
 
-## Rencana integrasi aman (tanpa merge sekarang)
+## Cutover Production (bukan bagian tugas ini)
 
-1. Checkpoint Fase 3 di **PR #15 saja** (PARSIAL).  
-2. Setelah #15 stabil di CI: rebase/audit #14 terhadap HEAD #15.  
-3. Update matrix route + COLLECTIONS untuk endpoint Fase 3.  
-4. Uji `legacy` masih default; gate enforced hanya di `APP_ENV=test` atau approval ref.  
-5. UI: tab Users/Grup dari #14 berdampingan tab Payment/Cabang RO #15.  
-6. Cutover enforced = keputusan Owner terpisah (bukan bagian checkpoint ini).
+1. Inventory clear (`python -m app.authorization.inventory`)
+2. Grant manual grup operasional + cabang
+3. Set `V3_WORKFLOW_ENFORCED_APPROVAL_REF` (Owner)
+4. Deploy terpisah dengan `V3_WORKFLOW_AUTHORIZATION=enforced`
+5. Rollback mode ≠ restore legacy permissions
 
 ## Kesimpulan
 
-Pengaturan HTML Final **belum lengkap** tanpa #14 untuk Users/Grup/Grant/Workflow.  
-Fondasi Payment + Cabang RO + Mesin di #15 **aman** tanpa merge #14.
+Target sistem Final = **enforced**. Integrasi kode & tes lokal **PARSIAL SIAP**.
+Aktivasi Production **tetap diblokir** sampai keputusan Direktur terpisah.

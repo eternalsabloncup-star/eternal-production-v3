@@ -285,6 +285,21 @@ th:hover>.col-resize-handle,th:focus-within>.col-resize-handle,.col-resize-handl
 #v3-app .sheet.excel-sheet .sheet-group-row th.sheet-group-sticky{z-index:9!important;background:#d7e6df!important;box-shadow:2px 0 0 #b7cfc3}
 .v162-reset-lebar{white-space:nowrap}
 
+/* Fase 3 — Jadwal Pengiriman SJ sticky + internal scroll only */
+.v3-delivery-scroll{overflow:auto;max-height:70vh;max-width:100%}
+.v3-delivery-sheet th[data-column="sj"],.v3-delivery-sheet td[data-column="sj"]{position:sticky;left:0;z-index:3;background:#fff;min-width:140px;box-shadow:1px 0 0 #d5e1e4}
+.v3-delivery-sheet thead th[data-column="sj"]{z-index:5;background:#eaf0f2}
+.v3-delivery-sheet th[data-column="so"],.v3-delivery-sheet td[data-column="so"]{position:sticky;left:140px;z-index:3;background:#fff;min-width:120px;box-shadow:1px 0 0 #d5e1e4}
+.v3-delivery-sheet thead th[data-column="so"]{z-index:5;background:#eaf0f2}
+#v3-del-coverage{border-left:3px solid #c59232}
+#v3-del-col-toggles{margin:8px 0;gap:6px;flex-wrap:wrap}
+.v3-rm-scroll{overflow:auto;max-height:65vh;max-width:100%}
+.v3-payment-sheet th[data-column="so"],.v3-payment-sheet td[data-column="so"]{position:sticky;left:0;z-index:3;background:#fff;min-width:120px;box-shadow:1px 0 0 #d5e1e4}
+.v3-payment-sheet thead th[data-column="so"]{z-index:5;background:#eaf0f2}
+.v3-payment-sheet th[data-column="customer"],.v3-payment-sheet td[data-column="customer"]{position:sticky;left:120px;z-index:3;background:#fff;min-width:140px;box-shadow:1px 0 0 #d5e1e4}
+.v3-payment-sheet thead th[data-column="customer"]{z-index:5;background:#eaf0f2}
+.v160-kpi-row{display:flex;flex-wrap:nowrap;gap:8px;overflow-x:auto;align-items:stretch}
+.v160-kpi-row .v44-production-metric{flex:1 1 140px;min-width:130px}
 /* Step 161 — sticky scroll + default readable widths + compact notice */
 .sheet-notice-compact{padding:6px 10px!important;font-size:11px!important;margin:0 0 8px!important}
 .sheet.excel-sheet thead tr:not(.sheet-group-row) th[data-column="item"],
@@ -1040,12 +1055,19 @@ function productionSettingsRows(rows){return `<div class="v22-readonly-list">${r
 function capabilityRegistryView(){return `<div class="flat-notice"><b>Capability registry (Slice 1I–1K).</b> Status bukan saklar operasional. SELESAI hanya jika fungsi ada + tes memadai. Code/test ≠ Live staging verified. Staging migration for POD/screen still needs Owner approval.</div><div class="v22-readonly-list">${CAPABILITY_REGISTRY.map(c=>`<div class="v22-readonly-row"><div><b>${escape(c.id)}</b><small>${escape(c.roleModule)} · ${escape(c.v1Behavior)}</small><small>Backend: ${escape(c.v3Source)} · FE: ${escape(c.frontend)} · Tests: ${escape(c.tests||'—')}</small><small>Gap: ${escape(c.remainingGap||'—')} · ${escape(capabilityValidationLabel(c.validation))}</small><small>Next: ${escape(c.nextAction||'—')}</small></div><span class="v22-status ${capabilityStatusClass(c.status)}">${escape(c.status)}</span></div>`).join('')}</div>`}
 function settingsAccessPanel(){
  const a=window.__V3_AUTH__||{};
- const scope='Akun pengguna, grup & keanggotaan, hak akses per grup/cabang, effective access, dan riwayat perubahan. Kepemilikan/delegasi tugas belum tersedia pada mode legacy.';
+ const mode=String(a.workflow_authorization||'legacy');
+ const enforced=mode==='enforced';
+ const scope=enforced
+  ?'Akun pengguna, grup & keanggotaan, hak akses per grup/cabang, effective access, audit, dan kepemilikan tugas. Mode enforced: grant Settings memutus akses produksi.'
+  :'Akun pengguna, grup & keanggotaan, hak akses per grup/cabang, effective access, dan riwayat perubahan. Mode legacy: grant Settings belum memutus akses workflow.';
  let state,body;
  if(!a.settings_enabled){state='NONAKTIF';body='Settings &amp; Permission belum diaktifkan di server ini. Aktivasi memerlukan persetujuan Owner; menu ini tidak mengubah akses siapa pun.'}
  else if(!a.system_director){state='TERBATAS';body='Hanya Direktur sistem yang dapat membuka Pengguna &amp; Permission. Akun Anda tidak punya akses ke panel ini.'}
  else{state='AKTIF';body='<a class="btn primary" id="v3-open-settings-access" href="/?view=settings">Buka Pengguna &amp; Permission</a>'}
- return `<section class="flat-notice" id="v3-settings-access" data-state="${state}"><b>Pengguna &amp; Permission: ${state}</b><p>${body}</p><small>${escape(scope)} Mode otorisasi workflow tetap legacy; perubahan di panel tidak mengubah izin workflow sebelum cutover disetujui.</small></section>`;
+ const modeLine=enforced
+  ?'Mode otorisasi workflow: enforced (AKTIF). Cutover sudah diterapkan di server ini.'
+  :'Mode otorisasi workflow: legacy. Perubahan grant di panel tidak mengubah izin workflow sebelum cutover disetujui Direktur.';
+ return `<section class="flat-notice" id="v3-settings-access" data-state="${state}" data-workflow="${escape(mode)}"><b>Pengguna &amp; Permission: ${state}</b><p>${body}</p><small>${escape(scope)} ${escape(modeLine)}</small></section>`;
 }
 function v3Operational(){return !(window.__V3_PREVIEW_FIXTURE__===true||/(?:^|[?&])epv3_preview=fixture(?:&|$)/.test(location.search||''))}
 function settingsView(){
@@ -1058,7 +1080,7 @@ function settingsView(){
  if(productionSettingsTab==='payment')content=(typeof window.v3PaymentApprovalSettingsView==='function'?window.v3PaymentApprovalSettingsView():`<div class="flat-notice"><b>Approval Payment.</b> Muat ulang halaman Live untuk membuka pengaturan PostgreSQL (SIMPAN → BACA → PERMISSION → AUDIT). Preview/fixture tidak menyimpan kebijakan perusahaan.</div>`);
  else if(productionSettingsTab==='katalog')content=`<div class="flat-notice"><b>Inventaris Pengaturan (transparan).</b> Fitur tanpa backend Live tidak disembunyikan dan tidak dipalsukan sebagai aktif.</div>${productionSettingsRows([
   ['Approval Payment','Gate & bypass','PostgreSQL payment_approval_settings','SELESAI'],
-  ['Pengguna / Grup / Permission','Accounts & ScopedGrant','SettingsPanel + AccessAudit (PR #14 HOLD, mode legacy)','PARSIAL'],
+  ['Pengguna / Grup / Permission','Accounts & ScopedGrant','SettingsPanel + AccessAudit + authorization-status (enforced target; Production tetap legacy)','SELESAI'],
   ['Master Mesin','CRUD mesin cabang','GET/POST/PATCH /production/ops/machines (+ settings/machines-summary)','SELESAI'],
   ['Cabang efektif','Read-only dari user grants + job','GET /production/settings/branches — master CRUD perlu keputusan Direktur','PARSIAL'],
   ['Urgent / Buffer preferensi','Tanda antrean UI','localStorage browser (bukan SoT perusahaan)','PARSIAL'],
@@ -1287,7 +1309,8 @@ function taskFilterSelectAll(v){const menu=document.getElementById('task-filter-
 function taskApplyColFilter(key){const menu=document.getElementById('task-filter-menu');if(!menu)return;const boxes=[...menu.querySelectorAll('input[data-task-value]')],chosen=boxes.filter(x=>x.checked).map(x=>x.value),text=menu.querySelector('[data-task-text]')?.value.trim()||'';if(chosen.length===boxes.length&&!text)delete taskColFilters[key];else taskColFilters[key]={values:chosen.length===boxes.length?null:chosen,text};taskPage=1;closeTaskColumnFilter();render()}
 function taskClearColFilter(key){delete taskColFilters[key];taskPage=1;closeTaskColumnFilter();render()}
 function taskOpenColFilter(key,button){closeTaskColumnFilter();const col=TASK_COLUMN_MAP[key];if(!col||key==='action')return;const f=taskColFilters[key]||{};const values=[...new Set(filterTaskSheet(taskFilterBaseRows(),key).map(x=>taskValue(x,key)))].sort((a,b)=>a.localeCompare(b,'id-ID',{numeric:true}));const menu=document.createElement('div');menu.id='task-filter-menu';menu.className='sheet-filter-menu';menu.setAttribute('role','dialog');menu.setAttribute('aria-label','Filter '+col.label);menu.innerHTML=`<div class="filter-title"><b>Filter · ${escape(col.label)}</b><button class="filter-close" onclick="closeTaskColumnFilter()" aria-label="Tutup filter">×</button></div><div class="filter-sort"><button onclick="taskSortColumn('${key}','asc')">↑ Urut A–Z / terkecil</button><button onclick="taskSortColumn('${key}','desc')">↓ Urut Z–A / terbesar</button></div><div class="filter-move"><button onclick="taskMoveColumn('${key}',-1)">← Geser kiri</button><button onclick="taskMoveColumn('${key}',1)">Geser kanan →</button></div><div class="filter-inputs"><label>Teks mengandung<input data-task-text type="search" placeholder="Cari teks kolom..." value="${escape(f.text||'')}"></label><label>Cari nilai pilihan<input type="search" placeholder="Cari pilihan..." oninput="taskFilterSearchOptions(this.value)"></label></div><div class="filter-select-all"><label><input type="checkbox" onchange="taskFilterSelectAll(this.checked)"> Pilih semua yang terlihat</label><small>${values.length} nilai</small></div><div class="filter-values">${values.map(v=>`<label data-task-option="${escape(v)}" class="filter-option"><input type="checkbox" data-task-value value="${escape(v)}" ${f.values==null||f.values.includes(v)?'checked':''}><span>${escape(v||'(kosong)')}</span></label>`).join('')||'<span class="task-muted">Tidak ada nilai</span>'}</div><div class="filter-actions"><button class="btn sm" onclick="taskClearColFilter('${key}')">Hapus filter</button><button class="btn sm primary" onclick="taskApplyColFilter('${key}')">Terapkan</button></div>`;document.body.appendChild(menu);const rect=button.getBoundingClientRect();menu.style.left=Math.max(8,Math.min(rect.left,innerWidth-315))+'px';menu.style.top=(rect.bottom+menu.offsetHeight+8>innerHeight?Math.max(8,rect.top-menu.offsetHeight-5):rect.bottom+5)+'px';menu.querySelector('[placeholder="Cari pilihan..."]')?.focus()}
-function taskCell(x,key){if(key==='so')return `<b class="so">${escape(x.o.id)}</b>`;if(key==='customer')return escape(x.o.name);if(key==='branch')return escape(x.o.branch);if(key==='role')return escape(x.t.role);if(key==='task')return `<b>${escape(x.t.label)}</b>`;if(key==='target')return escape(x.o.ship);if(key==='status')return `<span class="task-flag ${x.status==='Siap'?'ready':x.status==='Selesai'?'done':'block'}">${escape(x.status)}</span>`;if(key==='result')return `<span class="task-muted">${escape(taskValue(x,'result')||x.e?.note||'—')}</span>`;return `<button class="actionlink" onclick="openTask('${x.o.id}','${x.t.id}')"><span class="infoicon">i</span> ${escape(isLiveInbox()?'Panel V3':x.t.verb)}</button>`}
+function taskActionLabel(x){if(isOfficialTasksLive()&&x&&x.t&&x.t.verb)return x.t.verb;if(isLiveInbox()&&!isOfficialTasksLive())return'Panel V3';return(x&&x.t&&x.t.verb)||'Kerjakan'}
+function taskCell(x,key){if(key==='so')return `<b class="so">${escape(x.o.id)}</b>`;if(key==='customer')return escape(x.o.name);if(key==='branch')return escape(x.o.branch);if(key==='role')return escape(x.t.role);if(key==='task')return `<b>${escape(x.t.label)}</b>`;if(key==='target')return escape(x.o.ship);if(key==='status')return `<span class="task-flag ${x.status==='Siap'||x.status==='Loading Parsial'?'ready':x.status==='Selesai'?'done':'block'}">${escape(x.status)}</span>`;if(key==='result')return `<span class="task-muted">${escape(taskValue(x,'result')||x.e?.note||'—')}</span>`;const verb=taskActionLabel(x);const canAct=x.status==='Siap'||x.status==='Loading Parsial'||(!isOfficialTasksLive()&&x.status!=='Selesai');return canAct?`<button type="button" class="actionlink" data-task-action="kerjakan" data-so="${escape(x.o.id)}" data-kind="${escape(x.t.id)}" onclick="openTask('${escape(x.o.id)}','${escape(x.t.id)}')"><span class="infoicon">i</span> ${escape(verb)}</button>`:`<button type="button" class="actionlink" data-task-action="lihat" data-so="${escape(x.o.id)}" data-kind="${escape(x.t.id)}" onclick="openTask('${escape(x.o.id)}','${escape(x.t.id)}')"><span class="infoicon">i</span> Lihat</button>`}
 function taskExportCsv(){const rows=taskList(),cols=taskColumnOrder.filter(k=>k!=='action');const lines=[cols.map(k=>TASK_COLUMN_MAP[k].label),...rows.map(x=>cols.map(k=>taskValue(x,k)))];const csv='\ufeff'+lines.map(r=>r.map(v=>'"'+String(v??'').replaceAll('"','""')+'"').join(';')).join('\r\n');const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='renea-tugas-tim-uji.csv';a.click();setTimeout(()=>URL.revokeObjectURL(url),500)}
 function taskView(){const all=allTasks(),rows=taskList(),ready=all.filter(x=>x.status==='Siap').length,waiting=all.filter(x=>x.status==='Menunggu').length,done=all.filter(x=>x.status==='Selesai').length;
  const pages=Math.max(1,Math.ceil(rows.length/taskPageSize));taskPage=Math.min(pages,Math.max(1,taskPage));const page=rows.slice((taskPage-1)*taskPageSize,taskPage*taskPageSize);
@@ -1463,6 +1486,8 @@ function v161InferStorageKey(table){
 }
 function v161StickyKeys(table){
  if(table.dataset.v3Sticky)return table.dataset.v3Sticky.split(',').filter(Boolean);
+ if(table.classList.contains('v3-delivery-sheet'))return['sj','so'];
+ if(table.classList.contains('v3-payment-sheet'))return['so','customer'];
  if(table.classList.contains('v36-inbox-sheet'))return['id','name'];
  if(table.classList.contains('excel-sheet')&&(section==='schedule'||section==='shippingSchedule'||!!table.querySelector('tr.sheet-group-row')))return['id','name'];
  if(table.classList.contains('report-grid')){
@@ -2887,8 +2912,10 @@ taskGroupId=function(t){if(isOfficialTasksLive())return t.group||t.id;return t.g
 taskEntry=function(o,t){if(isOfficialTasksLive()){const row=(window.__V3_OFFICIAL_TASKS__||[]).find(x=>x.o.id===o.id&&x.t.id===t.id);return row?row.e:{status:'Menunggu',note:'',updated:'V3',qty:0,file:''}}return flow31Entry(o,t)};
 taskStatus=function(o,t){if(isOfficialTasksLive()){const row=(window.__V3_OFFICIAL_TASKS__||[]).find(x=>x.o.id===o.id&&x.t.id===t.id);return row?row.status:'Menunggu'}return flow31TaskState(o,t)};
 // one detail renderer per task kind; no secondary saveTask() mutation.
-openTask=function(id,type){const o=orders.find(x=>x.id===id&&!x.deleted);if(!o)return;
- if(isLiveInbox()){if(typeof window.v3OpenWorkflow==='function'){window.v3OpenWorkflow(id);return}toast('Panel V3 belum siap');return}
+openTask=function(id,type){const o=orders.find(x=>x.id===id&&!x.deleted);if(!o){
+ if(isLiveInbox()&&typeof window.v3OpenWorkflow==='function'){window.v3OpenWorkflow(id,{intent:type||'detail',taskKind:type||null});return}
+ return}
+ if(isLiveInbox()){if(typeof window.v3OpenWorkflow==='function'){window.v3OpenWorkflow(id,{intent:type||'detail',taskKind:type||null});return}toast('Panel V3 belum siap');return}
  const q=flow31Parse(type),kind=q.kind,lineId=q.lineId,l=flow31Line(o,lineId),src=flow31LineSource(o,lineId),title=flow31TaskNames[kind]||kind;const current=flow31TaskState(o,{kind,lineId});const blocked=current==='Menunggu';let fields='';const readonly=`<p class="flow31-notice">${blocked?'Tugas belum memenuhi gate. Selesaikan tahap sebelumnya.':'Tugas mengikuti bukti dari ledger produksi V1; tidak bisa melewati tahap dengan mengganti status manual.'}</p>`;
  if(kind==='design'||kind==='sample')fields=`<label>File ${kind==='design'?'desain':'sampel'} (nama file demo)<input type="file" id="flow31-file" accept=".pdf,.png,.jpg,.jpeg,.svg,.ai,.cdr"></label><small>File demo hanya menyimpan nama, bukan isi file.</small>`;
  if(kind==='schedule')fields=`<div class="flow31-scroll"><table class="flow31-grid"><thead><tr><th>Operator</th><th>Warna ke</th><th>Ukuran Screen</th><th>Tanggal</th><th>Lot</th><th>Qty Target</th><th>Selesai</th></tr></thead><tbody>${l.schedule.map(a=>`<tr><td>${escape(a.operator)}</td><td>${a.colorIndex}</td><td>${a.screenSize}</td><td>${a.date}</td><td>${escape(a.lotId||'LOT-01')}</td><td>${fmt(a.qty)}</td><td>${fmt(l.output.filter(x=>x.assignmentId===a.id).reduce((s,x)=>s+x.qty,0))}</td></tr>`).join('')||'<tr><td colspan="7">Belum ada operator dijadwalkan</td></tr>'}</tbody></table></div><div class="flow31-gridform"><label>Nama Operator<input id="flow31-operator" placeholder="Bima"></label><label>Warna<select id="flow31-color">${(o.inkColors||[{order:1,name:'Warna 1'}]).map(c=>`<option value="${c.order}">${c.order} — ${escape(c.name)}</option>`).join('')}</select></label><label>Ukuran Screen<select id="flow31-size"><option>Kecil</option><option>Besar</option></select></label><label>Tanggal<input id="flow31-date" type="date" value="2026-11-10"></label><label>Lot<input id="flow31-lot" value="LOT-01" placeholder="LOT-01"></label><label>Target Qty<input id="flow31-qty" type="number" min="1" placeholder="Qty"></label></div><p>Tambah operator sebanyak diperlukan; setiap warna/lot memiliki alokasi tersendiri. Tidak menggunakan jadwal mesin.</p>`;

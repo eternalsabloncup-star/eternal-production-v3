@@ -1,14 +1,15 @@
 # Matriks Kesesuaian HTML Final — Eternal Production V3 (Fase 3)
 
-**Diperbarui:** 2026-11-16 02:20 WIB (Asia/Jakarta)  
-**Repository:** `eternalsabloncup-star/eternal-production-v3`  
-**Branch:** `cursor/epv3-production-schedule-83bf`  
-**Checkpoint:** Fase 3 **PARSIAL** (bukan COMPLETE)  
-**Worktree:** `/tmp/epv3-fase1b-wt`  
-**PR #15:** OPEN · **PR #14:** HOLD · **Otorisasi:** `legacy` (enforced tidak aktif)  
-**Dokumen terkait:** `fase3-master-cabang-rancangan.md`, `fase3-pr14-authz-dependensi.md`
+**Diperbarui:** 2026-11-16 03:20 WIB (Asia/Jakarta)
+**Repository:** `eternalsabloncup-star/eternal-production-v3`
+**Branch:** `cursor/epv3-production-schedule-83bf`
+**HEAD baseline (committed):** `b58d00017a9bbd7cc688621fb752fd4c36e9ddf8`
+**Worktree lokal (belum commit):** `/tmp/epv3-fase1b-wt` — UI Fase 3 + authz #14 + finalisasi privilege/role packs
+**Checkpoint:** Fase 3 authorization completion **PARSIAL→tinggi** (bukan COMPLETE); Production tetap **legacy**
+**PR #15:** OPEN · **PR #14:** HOLD · **Otorisasi Production:** `legacy`
+**Dokumen terkait:** `fase3-master-cabang-rancangan.md`, `fase3-permission-role-matrix.md`, `fase3-pr14-authz-dependensi.md`, `authorization-enforced-cutover.md`
 
-Acuan produk: Handoff Final + sandbox spreadsheet. Acuan teknis: Backend V3 + PostgreSQL.  
+Acuan produk: Handoff Final + sandbox spreadsheet. Acuan teknis: Backend V3 + PostgreSQL.
 Status `SELESAI*` = terbukti uji (bukan Live apply). Klaim Fase 3 COMPLETE / 100% **dilarang**.
 
 ---
@@ -17,25 +18,30 @@ Status `SELESAI*` = terbukti uji (bukan Live apply). Klaim Fase 3 COMPLETE / 100
 
 | Kategori | Jumlah fitur matriks | Keterangan |
 |----------|---------------------|------------|
-| SELESAI* (terverifikasi lokal) | **18** | API/FE/tes/smoke fokus |
-| PARSIAL | **16** | Ada kode + bukti terbatas; belum Full Final |
-| BLOCKED / BELUM ADA | **5** | Kontrak/keputusan/HOLD |
-| **Total fitur dilacak** | **39** | |
-| **% kesesuaian terverifikasi** | **≈ 46%** (18/39) | SELESAI* saja |
-| **% SELESAI* + PARSIAL bermanfaat** | **≈ 87%** (34/39) | belum 100% |
+| SELESAI* (terverifikasi lokal) | **22** | +1 paket grant 6 role + matriks privilege (sandbox enforced) |
+| PARSIAL | **13** | −1 (Tugas Tim authz packs naik; FE E2E mutasi tetap parsial di modul lain) |
+| BLOCKED / BELUM ADA | **4** | Master Cabang writable, SJ list-all, enforced Live, reskin |
+| **Total fitur dilacak** | **39** | Denominator tetap |
+| **% kesesuaian terverifikasi** | **≈ 56%** (22/39) | SELESAI* saja |
+| **% SELESAI* + PARSIAL bermanfaat** | **≈ 90%** (35/39) | belum 100% |
 
-Jangan dibaca sebagai “46% produk selesai” semata — banyak PARSIAL sudah usable Live-path, tetapi belum setara HTML Final penuh.
+Promosi SELESAI* hanya dengan bukti tes (bukan aktivasi Production).
 
 | Modul | Status | Bukti utama |
 |-------|--------|-------------|
-| Approval Payment Settings | SELESAI* | API+audit+tes; migrasi 0016 disposable PASS |
-| Monitoring Penerimaan | SELESAI*→tinggi | Fase 2 + UNKNOWN/`approval_source`/`can_bypass` |
-| Jadwal Pengiriman SJ-centric | PARSIAL→tinggi | 1 baris/SJ + SO-link enrich; list-all Accurate **BLOCKED** |
-| Master Pengaturan | PARSIAL | Payment SoT + Cabang RO jujur + Mesin PG; Users/Grup HOLD #14 |
-| Tugas Tim 6 role | PARSIAL→tinggi | Derive + FE defs; smoke roles=6; spreadsheet Final browser belum penuh |
-| Inbox / Jadwal Produksi / Kontrol | PARSIAL | Regresi ada; parity Final penuh belum |
-| Browser smoke gap-closure | SELESAI* (terbatas) | `scripts/fase3_gap_browser_smoke.mjs` PASS pada test DB |
-| Accurate SJ inventaris lengkap | BLOCKED | Gateway **tidak** punya list-all |
+| Approval Payment Settings | SELESAI* | API+audit+tes; mapped `settings.payment_approval.*` |
+| Monitoring Penerimaan | SELESAI* | sticky/sort/col + smoke |
+| Jadwal Pengiriman SJ-centric | PARSIAL→tinggi | FE parity SELESAI*; Accurate list-all **BLOCKED** |
+| Users / Grup / ScopedGrant / Audit | SELESAI* | Settings API + panel + AccessAudit; auto-import NONAKTIF |
+| Authorization status / startup gate | SELESAI* (sandbox) | `mode.py` + role packs + privilege_options; Production legacy |
+| Paket grant 6 role + 3 privilege | SELESAI* (sandbox) | `role_packs.py` + `test_fase3_enforced_role_packs` HTTP 200/403 |
+| Master Pengaturan (agregat) | PARSIAL→tinggi | Users SELESAI*; Cabang writable / enforced Live masih BLOCKED |
+| Tugas Tim 6 role | PARSIAL→tinggi | Verb Kerjakan + packs backend; mutasi E2E FE terbatas |
+| Inbox / Jadwal Produksi | PARSIAL | Inbox 403 tanpa gateway; KPI strip SELESAI* |
+| Kontrol qty horizontal | SELESAI* | Summary + Status Kerja |
+| Browser smoke gap-closure | SELESAI* | interaktif `ok=true` |
+| Accurate SJ inventaris lengkap | BLOCKED | tidak ada list-all |
+| Enforced cutover Production | BLOCKED | butuh approval ref + keputusan Direktur |
 | Mode Live dummy | SELESAI* (guard) | Preview terpisah |
 
 ---
@@ -44,7 +50,7 @@ Jangan dibaca sebagai “46% produk selesai” semata — banyak PARSIAL sudah u
 
 | Fitur Final | FE V3 | Endpoint | Store | Perm | Status | Bukti |
 |-------------|-------|----------|-------|------|--------|-------|
-| Daftar/cari/filter/pagination | live-runtime inbox | `GET /production/inbox` | Accurate RO | inbox/job read | PARSIAL | smoke inbox 403 tanpa gateway; tes inbox sebelumnya |
+| Daftar/cari/filter/pagination | live-runtime inbox | `GET /production/inbox` | Accurate RO | inbox/job read | PARSIAL | smoke inbox 403 tanpa gateway |
 | Detail + qty/item | drawer | order detail | Accurate | read | PARSIAL | — |
 | Tidak auto-create job on view | guard | ensure_job eksplisit | PG | job.create | SELESAI* | live-runtime + smoke `v3EnsureJob` |
 | PO tanpa job | unsynced notice | ops unsynced | Accurate | read | PARSIAL | payment monitor |
@@ -57,6 +63,7 @@ Jangan dibaca sebagai “46% produk selesai” semata — banyak PARSIAL sudah u
 | Gate vs finansial UNKNOWN | SELESAI* | monitor fields | unit + FE |
 | Bypass + settings flag | SELESAI* | POST bypass + settings | Fase 2/3 + marker bypass |
 | Invoice Lunas palsu | SELESAI* (dicegah) | null/UNKNOWN | unit |
+| Sticky/sort/col/scroll tabel | SELESAI* | `v3-payment-sheet` | smoke: sticky `so,customer`, sort, scroll |
 
 ## 3. Jadwal Produksi & Kontrol Qty
 
@@ -64,22 +71,22 @@ Jangan dibaca sebagai “46% produk selesai” semata — banyak PARSIAL sudah u
 |-------|--------|---------|
 | Cetak-only schedule API | PARSIAL | `/production/ops/schedule` smoke 200 |
 | Multi-op / HOLD / filter / kolom | PARSIAL | sheet + resize di production.html |
-| KPI qty horizontal | PARSIAL | schedule overview strip |
-| Browser Final parity penuh | PARSIAL | nav terlihat di smoke; interaksi Final belum |
+| KPI qty horizontal + Status Kerja | SELESAI* | summary server anti double-count; smoke `v3-kontrol-qty` / labels |
+| Browser Final parity penuh sheet | PARSIAL | overview+search OK; parity kolom Final penuh belum |
 
 ## 4. Tugas Tim (6 role)
 
 | Role | Backend | FE card/action | Status | Bukti |
 |------|---------|----------------|--------|-------|
-| Kepala Produksi | schedule tasks | Atur jadwal | PARSIAL→tinggi | derive + smoke roles |
+| Kepala Produksi | schedule tasks | Atur jadwal | PARSIAL→tinggi | derive + role filter smoke |
 | Designer | design upload/approve | panel + API | PARSIAL→tinggi | sama |
 | Screener | prep screener | prep API | PARSIAL→tinggi | sama |
-| Helper | prep/packing | prep/packing | PARSIAL→tinggi | sama |
-| Operator | output/sample | sample approve API | PARSIAL→tinggi | sama |
-| Driver | loading/delivery | FE defs + Kerjakan | PARSIAL→tinggi | teamTasks.ts + smoke |
-| No fiktif / no duplikat | derived from job | filter visible | PARSIAL→tinggi | mapOfficialTasks + engine |
-| Filter header / resize / sticky / kolom | sheet UI production.html | — | PARSIAL | kode ada; browser Final per-kolom belum |
-| Tombol Kerjakan + Approval Sampel | verbs + sample_approve | API | PARSIAL→tinggi | FE defs + endpoints |
+| Helper | prep/packing | prep/packing | PARSIAL→tinggi | roles API Helper+Driver |
+| Operator | output/sample | sample approve API | PARSIAL→tinggi | focus map sample_approve |
+| Driver | loading/delivery | Kerjakan loading/pengiriman | PARSIAL→tinggi | verb resmi + smoke role Driver |
+| No fiktif / no duplikat | derived from job | filter visible | PARSIAL→tinggi | mapOfficialTasks; Live tanpa FLOW31 |
+| Filter header / resize / sticky / kolom | sheet UI | — | PARSIAL→tinggi | smoke: filterMenu + search + 6 role |
+| Tombol Kerjakan + Approval Sampel | verbs + sample_approve | API + inFlight lock | PARSIAL→tinggi | `taskActionLabel` + mutate lock; tombol tidak muncul tanpa job official |
 
 ## 5. Jadwal Pengiriman (SJ) — Accurate inventory
 
@@ -106,7 +113,7 @@ Jangan dibaca sebagai “46% produk selesai” semata — banyak PARSIAL sudah u
 | Alamat/zona/ekspedisi jika Accurate isi | normalize passthrough | SELESAI* | gateway normalize + link test |
 | Field kosong = BELUM TERSEDIA | `field_availability` | SELESAI* | jujur |
 | Accurate SJ list-all | **tidak ada endpoint** | **BLOCKED** | `coverage.accurate_sj_list_endpoint=null` |
-| Column resize/sticky Final penuh | scroll + resize shared | PARSIAL | belum Final spreadsheet shipping |
+| Sort / sticky / col toggle / pagination / empty / scroll internal | `v3-delivery-sheet` | SELESAI* | smoke interaktif: sort↑, colToggle, sticky sj,so, searchEmpty |
 
 ## 6. Pengaturan
 
@@ -117,11 +124,15 @@ Jangan dibaca sebagai “46% produk selesai” semata — banyak PARSIAL sudah u
 | Cabang efektif | user grants + job branches | **Read-only** (`can_manage=false`) | SELESAI* (jujur, bukan fake save) |
 | Master Cabang editable | — | Butuh skema baru + keputusan Direktur | **BLOCKED / BELUM ADA** |
 | Master Mesin | PG `production_machines` | Ya via `/ops/machines` + summary settings | SELESAI*→tinggi |
-| Pengguna/Grup/Grant/Workflow enforced | Settings API / PR #14 | AccessAudit | **PARSIAL (HOLD #14)** |
+| Pengguna/Grup/ScopedGrant/AccessAudit | Settings API (integrasi selektif #14) | Ya (manual, no auto-import) | SELESAI* |
+| Authorization-status + startup gate | `mode.py` / owner_policy / role_packs | Baca status + packs; tidak mengaktifkan | SELESAI* (sandbox) |
+| Paket grant jabatan (6 role) | `role_packs.py` + Settings panel | Panduan saja; grant manual | SELESAI* (sandbox HTTP) |
+| Tiga privilege review → packs | `PRIVILEGE_OPTIONS` | mapped_manual_packs; no auto-import | SELESAI* (mapping); Live apply BLOCKED |
+| Workflow enforced Production | env + approval ref | — | **BLOCKED** (tidak diaktifkan) |
 | Urgent/Buffer/Payroll demo | localStorage | Label demo non-SoT | PARSIAL (eksplisit) |
 | Bypass default instalasi baru | `bypass_enabled=false` | Ber-audit | SELESAI* |
 
-**Integrasi aman tanpa merge PR #14:** tetap `legacy`; panel Users/Grup/Grant penuh dari #14 jangan di-merge; Payment/Cabang RO/Mesin jalan independen. Enforced **tidak** diaktifkan.
+**Integrasi selektif tanpa merge PR #14:** Users/Grup/Grant + gate + status terpasang di worktree #15. Production tetap `legacy`. Enforced **tidak** diaktifkan di VPS.
 
 ## 7. Navigasi / UX
 
@@ -144,32 +155,53 @@ Jangan dibaca sebagai “46% produk selesai” semata — banyak PARSIAL sudah u
 
 ## Dependensi PR #14
 
-ScopedGrant enforced, panel grant penuh, capability catalog cutover → **HOLD**. Legacy Direktur/JSONB tetap. Jangan merge #14 / jangan `enforced`.
+Kode gate/status/panel diintegrasikan selektif (lihat `fase3-pr14-authz-dependensi.md`). Merge Git #14 **tidak** dilakukan. Manifest enforced: **70** endpoint (WORKFLOW+INBOX+PAYROLL+SETTINGS_PROD). Production tetap `legacy`.
 
-## Bukti tes (sesi gap closure)
+## Bukti tes (sesi authorization completion — lokal, NO COMMIT)
 
 | Lapisan | Hasil |
 |---------|-------|
-| Backend focused (settings+delivery+links) | **PASS** (9) |
-| Migrasi 0016 disposable | **PASS** |
-| Authz regression | **PASS** (33) |
-| Frontend vitest (payment/delivery/teamRoles) | **PASS** |
-| Browser+API smoke `fase3_gap_browser_smoke.mjs` | **PASS** (`ok=true`; 6 roles; bypass=false; sj_list=null; cabang can_manage=false) |
-| Inbox Accurate live tanpa gateway | **403** (diharapkan di env smoke tanpa gateway token) |
+| Frontend Vitest lengkap | **PASS** 39 files / **218** tests (+1 status packs) |
+| Frontend build | **PASS** |
+| Backend enforced role packs | **PASS** 5/5 (`test_fase3_enforced_role_packs`) |
+| Backend authz focused (gate+workflow+foundation+role) | **PASS** **137** |
+| Backend payment/workflow business | **PASS** 9 |
+| Browser smoke interaktif (sesi UI sebelumnya) | **PASS** (`ok=true`) — tidak diulang sesi ini |
+| `git diff --check` | **PASS** |
+| Default Production mode | **legacy** (approval ref kosong; enforced hanya APP_ENV=test) |
+
+### Bukti browser per fitur (interaktif)
+
+| Fitur | Bukti smoke |
+|-------|-------------|
+| Coverage SJ | `#v3-del-coverage` berisi COVERAGE TERBATAS |
+| Sticky SJ/SO | `data-v3-sticky=sj,so` |
+| Sort kolom | klik Pelanggan → `Pelanggan ↑` |
+| Toggle kolom | checkbox Alamat mengubah state |
+| Search + empty | query fiktif → empty state tabel |
+| Scroll internal | `.v3-delivery-scroll`; page body tidak overflow-x |
+| Tugas Tim 6 role | select berisi 6 role Final |
+| Filter header tugas | `#task-filter-menu` terbuka |
+| Payment sticky/sort | sticky `so,customer`; sort Pelanggan |
+| Kontrol qty + Status Kerja | `#v3-kontrol-qty` / labels + status |
+| Pagination SJ | pager `del-prev`/`del-next` di DOM |
 
 ## Inventaris 39 fitur (ringkas)
 
-Lihat tabel per-modul di atas. Agregat: **18 SELESAI\* · 16 PARSIAL · 5 BLOCKED/BELUM**.  
-Rincian BLOCKED/BELUM: (1) Accurate SJ list-all, (2) Master Cabang writable, (3) Users/Grup/Grant #14, (4) Enforced workflow cutover, (5) Reskin HTML Final penuh.
+Agregat: **22 SELESAI\* · 13 PARSIAL · 4 BLOCKED/BELUM**.
+Rincian BLOCKED/BELUM: (1) Accurate SJ list-all, (2) Master Cabang writable, (3) Enforced cutover Production, (4) Reskin HTML Final penuh.
 
 ## Keputusan Direktur (tersisa)
 
 1. Apply migrasi `0016` ke staging disposable / Live? (**belum**)
 2. Kontrak Accurate: endpoint **list SJ**?
-3. Setujui rancangan Master Cabang (`fase3-master-cabang-rancangan.md`)?
-4. Urutan integrasi PR #14 setelah checkpoint #15?
+3. Setujui rancangan Master Cabang (`fase3-master-cabang-rancangan.md`) + skema/migrasi?
+4. Cutover enforced Production: inventory clear + grant manual + `V3_WORKFLOW_ENFORCED_APPROVAL_REF`?
 5. Loading+SO-link cukup operasional sampai list-all ada?
+6. Di Live: grup mana memakai paket mana (6 role packs sudah siap; **tidak** auto-apply)?
+7. Apakah `settings.payment_approval.*` / `settings.branch.read` tetap Director-only, atau boleh grantable (perlu ubah evaluator modul settings)?
 
 ## Lampiran
 
 Handoff Final + sandbox. Backend V3 SoT; `server.py` Handoff tidak digabung. Smoke hanya DB `eternal_production_v3_test`.
+Perubahan sesi ini **belum di-commit / push** sesuai batasan Owner.

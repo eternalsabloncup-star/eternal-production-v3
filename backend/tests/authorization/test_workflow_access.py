@@ -10,7 +10,7 @@ from app.models.production.job import ProductionJob
 from app.models.production.schedule import ScheduleAssignment
 from app.authorization.models import ScopedGrant, Membership
 from app.authorization.ownership import TaskOwnership
-from app.authorization.workflow_map import WORKFLOW, INBOX, PAYROLL
+from app.authorization.workflow_map import WORKFLOW, INBOX, PAYROLL, SETTINGS_PROD
 from app.authorization.catalog import CATALOG
 from tests.authorization.test_foundation import db
 from tests.authorization.test_runtime import runtime, login
@@ -36,7 +36,8 @@ def test_manifest_covers_actual_routes():
     from app.api.production_inbox import router as i
     from app.api.production.payroll import router as p
     from app.api.production.operations import router as o
-    for routers,mapping in [((w,o),WORKFLOW),((i,),INBOX),((p,),PAYROLL)]:
+    from app.api.production.payment_settings_api import router as s
+    for routers,mapping in [((w,o),WORKFLOW),((i,),INBOX),((p,),PAYROLL),((s,),SETTINGS_PROD)]:
         assert {r.endpoint.__name__ for router in routers for r in router.routes}==set(mapping)
         assert all(cap in CATALOG for cap,_ in mapping.values())
 

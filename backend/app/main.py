@@ -29,10 +29,8 @@ def create_app() -> FastAPI:
     from app.authorization.ownership import TaskOwnership  # noqa: F401
     from app.authorization.accounts import AccountCredential  # noqa: F401
     settings = get_settings()
-    if settings.v3_workflow_authorization not in {"legacy", "enforced"}:
-        raise RuntimeError("Unknown workflow authorization mode")
-    if settings.v3_workflow_authorization == "enforced" and (not settings.v3_settings_enabled or settings.app_env != "test"):
-        raise RuntimeError("Workflow cutover is restricted to Settings-enabled test sandbox")
+    from app.authorization.mode import enforced_startup_allowed
+    enforced_startup_allowed(settings)
     application = FastAPI(
         title=settings.app_name,
         version="0.2.0",

@@ -68,7 +68,10 @@ def user_may_manage_payment_settings(user: User) -> bool:
         access = getattr(ctx, "access", None)
         if access is not None and getattr(access, "director", False):
             return True
-        return bool(getattr(ctx, "can", lambda _c: False)("settings.grant.manage"))
+        return bool(
+            getattr(ctx, "can", lambda _c: False)("settings.payment_approval.manage")
+            or getattr(ctx, "can", lambda _c: False)("settings.grant.manage")
+        )
     access = getattr(user, "_managed_access", None)
     if access is not None and getattr(access, "director", False):
         return True

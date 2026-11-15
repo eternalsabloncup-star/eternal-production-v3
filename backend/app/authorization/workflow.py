@@ -6,7 +6,7 @@ from app.authorization.catalog import CATALOG
 from app.core.errors import AppError
 from app.authorization.models import AccessState
 from app.authorization.evaluator import Resource, evaluate, validate_grant
-from app.authorization.workflow_map import WORKFLOW, PAYROLL, INBOX
+from app.authorization.workflow_map import WORKFLOW, PAYROLL, INBOX, SETTINGS_PROD
 from app.authorization.ownership import owned
 from app.models.production.job import ProductionJob
 from app.models.production.schedule import ScheduleAssignment
@@ -93,7 +93,13 @@ def role_for(capability):
 async def authorize_request(session,user,request):
     endpoint=request.scope.get('endpoint')
     module=getattr(endpoint,'__module__',''); name=getattr(endpoint,'__name__','')
-    maps={'app.api.production.workflow':WORKFLOW,'app.api.production.operations':WORKFLOW,'app.api.production.payroll':PAYROLL,'app.api.production_inbox':INBOX}
+    maps={
+        'app.api.production.workflow': WORKFLOW,
+        'app.api.production.operations': WORKFLOW,
+        'app.api.production.payroll': PAYROLL,
+        'app.api.production_inbox': INBOX,
+        'app.api.production.payment_settings_api': SETTINGS_PROD,
+    }
     mapping=maps.get(module)
     if mapping is None:
         if module.startswith('app.authorization.'): return  # separately guarded new routes

@@ -3203,7 +3203,21 @@
     opts = opts || {};
     selectedSo = so;
     const focus = opts.focus || null;
+    const taskKind = opts.taskKind || opts.intent || null;
     let order = resolveScheduleOrder(so, focus || {});
+    if (!order) {
+      // Official tasks may reference SO not yet in inbox page — seed minimal order.
+      if (!orderBySo(so)) {
+        monitorOrders[so] = {
+          id: so,
+          name: so,
+          branch: "",
+          sourceLines: [],
+          v3OfficialTask: true,
+        };
+      }
+      order = resolveScheduleOrder(so, focus || {}) || orderBySo(so);
+    }
     if (!order) {
       toast(
         "SO belum tersedia di Jadwal Produksi / Inbox — tidak dapat membuka panel",
@@ -3221,6 +3235,32 @@
     }
     renderWorkflowDrawer(so);
     if (focus) applyScheduleFocus(focus);
+    if (taskKind) {
+      window.__v3TaskFocus = String(taskKind);
+      const map = {
+        design_upload: "v3-design-file",
+        design_approve: "v3-design-file",
+        schedule: "v3-asg-date",
+        screen: "v3-prep-screen",
+        prepare: "v3-prep-helper",
+        sample: "v3-sample-file",
+        sample_approve: "v3-sample-file",
+        print: "v3-out-qty",
+        packing: "v3-pack-qty",
+        loading: "v3-sj-id",
+        delivery: "v3-pod-qty",
+      };
+      const elId = map[String(taskKind)] || null;
+      if (elId) {
+        setTimeout(function () {
+          const el = document.getElementById(elId);
+          if (el && typeof el.scrollIntoView === "function") {
+            el.scrollIntoView({ block: "center", behavior: "smooth" });
+            try { el.focus(); } catch (_e) { /* ignore */ }
+          }
+        }, 50);
+      }
+    }
   };
 
   function renderPoSummaryDrawer(number) {
@@ -4225,15 +4265,22 @@
           }
           const s = sched.summary || {};
           const cells = [
-            ["Total Qty Cetak", scheduleNum(s.qty_print_po)],
+            ["Total Qty SO (Cetak)", scheduleNum(s.qty_print_po)],
             ["Qty Terjadwal", scheduleNum(s.qty_allocated)],
-            ["Sudah Dicetak", scheduleNum(s.qty_printed_done)],
-            ["Belum Dicetak", scheduleNum(s.qty_unprinted)],
+            ["Qty Sudah Dicetak", scheduleNum(s.qty_printed_done)],
+            ["Qty Belum Selesai", scheduleNum(s.qty_unprinted)],
             ["Belum Dijadwalkan", scheduleNum(s.qty_unallocated)],
             ["Baris Cetak", scheduleNum(s.print_line_count)],
           ];
           const unk = sched.unverified && scheduleNum(sched.unverified.unknown_print_candidate_lines);
           const empty = !sched.items.length;
+          const statusKerja = empty
+            ? "Tidak ada antrean"
+            : scheduleNum(s.qty_unprinted) > 0
+              ? "Dalam pengerjaan"
+              : scheduleNum(s.qty_printed_done) > 0
+                ? "Cetak selesai (filter)"
+                : "Menunggu jadwal";
           let banner = "";
           if (empty) {
             banner = '<div class="flat-notice" role="status">Tidak ada item Cetak pada filter Jadwal Produksi saat ini.</div>';
@@ -4278,14 +4325,17 @@
                 (sched.has_more ? "" : " disabled") + ">›</button>"
               : "") +
             "</div>" +
-            '<div class="v44-production-strip-items">' +
+            '<div class="v44-production-strip-items" id="v3-kontrol-qty">' +
             cells.map(function (c) {
               return '<div class="v44-production-metric"><span>' + escapeHtml(c[0]) +
                 "</span><strong>" + (typeof window.fmt === "function" ? window.fmt(c[1]) : c[1]) +
                 " <small>pcs</small></strong></div>";
             }).join("") +
+            '<div class="v44-production-metric" id="v3-status-kerja"><span>Status Kerja</span><strong>' +
+            escapeHtml(statusKerja) + "</strong></div>" +
             "</div>" + banner +
-            '<small>Sumber: PostgreSQL JobLineQty print · total ' + (sched.total || 0) +
+            '<small>Sumber: PostgreSQL JobLineQty print (summary server, anti double-count multi-operator) · total ' +
+            (sched.total || 0) +
             " baris · tidak bergantung halaman Inbox</small></section>";
         }
         return prevOverview.apply(this, arguments);
@@ -4413,38 +4463,201 @@
   const DEL_STATUS = { belum_dikirim: "Belum dikirim", sebagian: "Sebagian", terkirim: "Terkirim", dibatalkan: "Dibatalkan" };
   const DEL_SCHEDULE = { belum_dijadwalkan: "Belum dijadwalkan", terjadwal: "Terjadwal", hari_ini: "Hari ini", terlambat: "Terlambat" };
   if (ops.delQ == null) ops.delQ = "";
+  if (ops.delPage == null) ops.delPage = 1;
+  if (ops.delSort == null) ops.delSort = { key: "sj", dir: "asc" };
+  if (ops.delCols == null) ops.delCols = { address: true, zone: true, expedition: true, remarks: true };
   if (ops.delDetail == null) ops.delDetail = null;
+  function delSortValue(r, key) {
+    if (key === "sj") return String(r.sj_number || r.accurate_sj_number || r.accurate_sj_id || "");
+    if (key === "so") return String(r.po_number || r.accurate_so_number || "");
+    if (key === "customer") return String(r.customer_name || "");
+    if (key === "date") return String(r.delivery_date || r.planned_date || "");
+    if (key === "qty") return Number(r.total_qty || r.qty_sj || 0);
+    if (key === "status") return String(r.delivery_status || "");
+    return "";
+  }
+  function delSortedItems(items) {
+    const sort = ops.delSort || { key: "sj", dir: "asc" };
+    const dir = sort.dir === "desc" ? -1 : 1;
+    return (items || []).slice().sort(function (a, b) {
+      const va = delSortValue(a, sort.key);
+      const vb = delSortValue(b, sort.key);
+      if (typeof va === "number" && typeof vb === "number") return (va - vb) * dir;
+      return String(va).localeCompare(String(vb), "id-ID", { numeric: true }) * dir;
+    });
+  }
+  function delSortBtn(key, label) {
+    const active = ops.delSort && ops.delSort.key === key;
+    const arrow = active ? (ops.delSort.dir === "desc" ? " ↓" : " ↑") : "";
+    return '<button type="button" class="btn sm sheet-filter-trigger" data-ops="del-sort" data-key="' + key + '" aria-label="Urut ' + escapeHtml(label) + '">' + escapeHtml(label) + arrow + "</button>";
+  }
   guardDemoView("shippingScheduleView", function () {
     const q = (ops.delQ || "").trim();
+    const page = Math.max(1, Number(ops.delPage) || 1);
     const path = "/production/ops/deliveries?" + [
       ops.status ? "status=" + encodeURIComponent(ops.status) : "",
       q ? "q=" + encodeURIComponent(q) : "",
       "include_accurate_links=true",
-      "page=1",
+      "page=" + page,
       "page_size=50",
     ].filter(Boolean).join("&");
     if (opsStale("del") && !ops.err.del) opsLoad("del", path, function (d) { ops.del = d; });
     const d = ops.del;
+    const cov = d && d.coverage ? d.coverage : null;
+    const coverageBanner = cov
+      ? '<div class="flat-notice" id="v3-del-coverage" role="status"><b>COVERAGE TERBATAS.</b> Sumber: ' +
+        escapeHtml(String(cov.source || "V3 Loading + SO-link opsional")) +
+        ". Accurate list-all SJ: " +
+        (cov.accurate_sj_list_endpoint ? escapeHtml(String(cov.accurate_sj_list_endpoint)) : "<b>tidak tersedia</b>") +
+        ". include_accurate_links=" +
+        (cov.include_accurate_links ? "true" : "false") +
+        ". accurate_write_on_view=" +
+        (cov.accurate_write_on_view ? "true" : "false") +
+        ". Bukan inventaris lengkap seluruh SJ Accurate.</div>"
+      : "";
     let body;
     if (ops.err.del) body = '<div class="flat-notice" role="alert">' + escapeHtml(ops.err.del) + ' <button type="button" class="btn sm" data-ops="del-reload">Coba lagi</button></div>';
     else if (!d) body = '<div class="flat-notice" role="status">Memuat jadwal pengiriman (satu baris per SJ)…</div>';
-    else if (!d.items.length) body = '<div class="flat-notice">Belum ada Surat Jalan dengan Loading V3 pada cabang Anda. Melihat halaman ini tidak menulis Accurate.</div>';
-    else body = '<div class="v36-table-container" style="overflow:auto;max-height:70vh"><table class="v36-table"><thead><tr><th>No. SJ</th><th>PO/SO</th><th>Pelanggan</th><th>Tgl rencana</th><th>Alamat</th><th>Zona</th><th>Ekspedisi/Kurir</th><th>Item</th><th>Qty SJ</th><th>Catatan</th><th>Status</th><th>Bukti</th><th>Aksi</th></tr></thead><tbody>' +
-      d.items.map(function (r) {
-        const act = r.delivery_status === "terkirim" || r.delivery_status === "dibatalkan" ? "" :
-          '<button type="button" class="btn sm" data-ops="plan" data-jid="' + escapeHtml(r.job_id) + '" data-sj="' + escapeHtml(r.accurate_sj_id) + '" data-courier="' + escapeHtml(r.courier_user_id == null ? "" : r.courier_user_id) + '" data-so="' + escapeHtml(r.accurate_so_number) + '" data-branch="' + escapeHtml(r.branch_id) + '" data-date="' + escapeHtml(r.planned_date || "") + '">' + (r.planned_date ? "Jadwal ulang" : "Jadwalkan") + "</button>";
-        const zone = r.zone != null && r.zone !== "" ? escapeHtml(r.zone) : '<span class="muted">BELUM TERSEDIA</span>';
-        const exped = r.expedition != null && r.expedition !== "" ? escapeHtml(r.expedition) : (r.courier_name ? escapeHtml(r.courier_name) : '<span class="muted">BELUM TERSEDIA</span>');
-        const addr = r.address || r.customer_address || r.recipient_name;
-        const items = (r.item_count != null ? r.item_count + " baris" : "—") + (r.items && r.items.length ? "<br><small>" + escapeHtml((r.item_names || "").slice(0, 80)) + "</small>" : "");
-        return "<tr><td><b>" + opsDash(r.sj_number || r.accurate_sj_number) + "</b><br><small>ID " + escapeHtml(r.sj_id || r.accurate_sj_id) + "</small></td>" +
-          "<td>" + escapeHtml(r.po_number || r.accurate_so_number) + "</td><td>" + opsDash(r.customer_name) + "</td><td>" + opsDash(r.delivery_date || r.planned_date) + "</td>" +
-          "<td>" + (addr ? escapeHtml(addr) : '<span class="muted">BELUM TERSEDIA</span>') + "</td><td>" + zone + "</td><td>" + exped + "</td><td>" + items + "</td>" +
-          "<td>" + opsNum(r.total_qty || r.qty_sj) + "</td><td>" + (r.remarks != null && r.remarks !== "" ? escapeHtml(r.remarks) : '<span class="muted">BELUM TERSEDIA</span>') + "</td>" +
-          "<td>" + escapeHtml(DEL_STATUS[r.delivery_status] || r.delivery_status) + "<br><small>" + escapeHtml(DEL_SCHEDULE[r.schedule_status] || r.schedule_status) + "</small></td>" +
-          "<td>" + escapeHtml(r.proof_status || "—") + "</td><td>" + act +
-          ' <button type="button" class="btn sm" data-ops="sj-detail" data-sj="' + escapeHtml(r.accurate_sj_id) + '">Detail</button></td></tr>';
-      }).join("") + "</tbody></table></div><small>Entitas utama = Surat Jalan (bukan PO). Alamat/zona/ekspedisi Accurate list: BELUM TERSEDIA hingga kontrak gateway. accurate_write_on_view=false.</small>";
+    else {
+      const cols = ops.delCols || {};
+      const items = delSortedItems(d.items || []);
+      const head =
+        '<th data-column="sj">' + delSortBtn("sj", "No. SJ") + "</th>" +
+        '<th data-column="so">' + delSortBtn("so", "PO/SO") + "</th>" +
+        '<th data-column="customer">' + delSortBtn("customer", "Pelanggan") + "</th>" +
+        '<th data-column="date">' + delSortBtn("date", "Tgl rencana") + "</th>" +
+        (cols.address !== false ? '<th data-column="address">Alamat</th>' : "") +
+        (cols.zone !== false ? '<th data-column="zone">Zona</th>' : "") +
+        (cols.expedition !== false ? '<th data-column="expedition">Ekspedisi/Kurir</th>' : "") +
+        '<th data-column="items">Item</th>' +
+        '<th data-column="qty">' + delSortBtn("qty", "Qty SJ") + "</th>" +
+        (cols.remarks !== false ? '<th data-column="remarks">Catatan</th>' : "") +
+        '<th data-column="status">' + delSortBtn("status", "Status") + "</th>" +
+        '<th data-column="proof">Bukti</th>' +
+        '<th data-column="action">Aksi</th>';
+      const colSpan =
+        9 +
+        (cols.address !== false ? 1 : 0) +
+        (cols.zone !== false ? 1 : 0) +
+        (cols.expedition !== false ? 1 : 0) +
+        (cols.remarks !== false ? 1 : 0);
+      const emptyRow =
+        '<tr><td colspan="' +
+        colSpan +
+        '" class="sheetempty v165-state v165-state--empty"><b>Belum ada Surat Jalan</b> Loading V3 / tautan SO belum ada pada filter ini. Melihat halaman ini tidak menulis Accurate.</td></tr>';
+      body =
+        '<div class="v36-table-container v3-delivery-scroll" style="overflow:auto;max-height:70vh;max-width:100%">' +
+        '<table class="v36-table excel-sheet v3-delivery-sheet" data-v3-colw="epv3:colw:shipping" data-v3-colw-locked="1" data-v3-sticky="sj,so">' +
+        "<thead><tr>" + head + "</tr></thead><tbody>" +
+        (items.length
+          ? items.map(function (r) {
+          const act =
+            r.delivery_status === "terkirim" || r.delivery_status === "dibatalkan"
+              ? ""
+              : '<button type="button" class="btn sm" data-ops="plan" data-jid="' +
+                escapeHtml(r.job_id) +
+                '" data-sj="' +
+                escapeHtml(r.accurate_sj_id) +
+                '" data-courier="' +
+                escapeHtml(r.courier_user_id == null ? "" : r.courier_user_id) +
+                '" data-so="' +
+                escapeHtml(r.accurate_so_number) +
+                '" data-branch="' +
+                escapeHtml(r.branch_id) +
+                '" data-date="' +
+                escapeHtml(r.planned_date || "") +
+                '">' +
+                (r.planned_date ? "Jadwal ulang" : "Jadwalkan") +
+                "</button>";
+          const zone =
+            r.zone != null && r.zone !== ""
+              ? escapeHtml(r.zone)
+              : '<span class="muted">BELUM TERSEDIA</span>';
+          const exped =
+            r.expedition != null && r.expedition !== ""
+              ? escapeHtml(r.expedition)
+              : r.courier_name
+                ? escapeHtml(r.courier_name)
+                : '<span class="muted">BELUM TERSEDIA</span>';
+          const addr = r.address || r.customer_address || r.recipient_name;
+          const itemsLabel =
+            (r.item_count != null ? r.item_count + " baris" : "—") +
+            (r.items && r.items.length
+              ? "<br><small>" + escapeHtml((r.item_names || "").slice(0, 80)) + "</small>"
+              : "");
+          const src =
+            r.inventory_source === "accurate_so_link"
+              ? '<br><span class="tag amber">SO-link</span>'
+              : '<br><span class="tag green">V3 Loading</span>';
+          return (
+            '<tr><td data-column="sj"><b>' +
+            opsDash(r.sj_number || r.accurate_sj_number) +
+            "</b><br><small>ID " +
+            escapeHtml(r.sj_id || r.accurate_sj_id) +
+            "</small>" +
+            src +
+            '</td><td data-column="so">' +
+            escapeHtml(r.po_number || r.accurate_so_number) +
+            '</td><td data-column="customer">' +
+            opsDash(r.customer_name) +
+            '</td><td data-column="date">' +
+            opsDash(r.delivery_date || r.planned_date) +
+            "</td>" +
+            (cols.address !== false
+              ? '<td data-column="address">' +
+                (addr ? escapeHtml(addr) : '<span class="muted">BELUM TERSEDIA</span>') +
+                "</td>"
+              : "") +
+            (cols.zone !== false ? '<td data-column="zone">' + zone + "</td>" : "") +
+            (cols.expedition !== false
+              ? '<td data-column="expedition">' + exped + "</td>"
+              : "") +
+            '<td data-column="items">' +
+            itemsLabel +
+            '</td><td data-column="qty">' +
+            opsNum(r.total_qty || r.qty_sj) +
+            "</td>" +
+            (cols.remarks !== false
+              ? '<td data-column="remarks">' +
+                (r.remarks != null && r.remarks !== ""
+                  ? escapeHtml(r.remarks)
+                  : '<span class="muted">BELUM TERSEDIA</span>') +
+                "</td>"
+              : "") +
+            '<td data-column="status">' +
+            escapeHtml(DEL_STATUS[r.delivery_status] || r.delivery_status) +
+            "<br><small>" +
+            escapeHtml(DEL_SCHEDULE[r.schedule_status] || r.schedule_status) +
+            "</small></td><td data-column=\"proof\">" +
+            escapeHtml(r.proof_status || "—") +
+            '</td><td data-column="action">' +
+            act +
+            ' <button type="button" class="btn sm" data-ops="sj-detail" data-sj="' +
+            escapeHtml(r.accurate_sj_id) +
+            '">Detail</button></td></tr>'
+          );
+        }).join("")
+          : emptyRow) +
+        "</tbody></table></div>" +
+        '<div class="sheetfoot"><span>Menampilkan ' +
+        items.length +
+        " dari " +
+        (d.total != null ? d.total : items.length) +
+        " SJ · halaman " +
+        (d.page || page) +
+        " · scroll hanya di dalam tabel</span>" +
+        '<div class="pager">' +
+        '<button type="button" class="btn sm" data-ops="del-prev"' +
+        (page <= 1 ? " disabled" : "") +
+        ">‹ Sebelumnya</button>" +
+        "<span>" +
+        page +
+        "</span>" +
+        '<button type="button" class="btn sm" data-ops="del-next"' +
+        (d.has_more ? "" : " disabled") +
+        ">Berikutnya ›</button></div></div>" +
+        "<small>Entitas utama = Surat Jalan (bukan PO). Field kosong = BELUM TERSEDIA (tidak dikarang).</small>";
+    }
     let planForm = "";
     if (ops.plan) {
       const cs = ops.couriers[ops.plan.branch];
@@ -4452,7 +4665,8 @@
     }
     let detail = "";
     if (ops.delDetail) {
-      if (ops.delDetail.error) detail = '<section class="flat-notice" role="alert"><b>Detail SJ:</b> ' + escapeHtml(ops.delDetail.error) + "</section>";
+      if (ops.delDetail.loading) detail = '<section class="flat-notice" id="v3-sj-detail" role="status">Memuat detail SJ…</section>';
+      else if (ops.delDetail.error) detail = '<section class="flat-notice" role="alert"><b>Detail SJ:</b> ' + escapeHtml(ops.delDetail.error) + "</section>";
       else if (ops.delDetail.item) {
         const it = ops.delDetail.item;
         const lines = (it.items || []).map(function (ln, i) {
@@ -4463,9 +4677,34 @@
           '<button type="button" class="btn sm" data-ops="sj-detail-close">Tutup</button></section>';
       }
     }
-    return opsHead("Jadwal Pengiriman", "Satu baris per Surat Jalan Accurate · Loading/POD V3 · tanpa tulis Accurate saat lihat") + planForm +
+    const colToggles =
+      '<div class="row" id="v3-del-col-toggles" aria-label="Pengaturan kolom">' +
+      [
+        ["address", "Alamat"],
+        ["zone", "Zona"],
+        ["expedition", "Ekspedisi"],
+        ["remarks", "Catatan"],
+      ]
+        .map(function (pair) {
+          const on = !ops.delCols || ops.delCols[pair[0]] !== false;
+          return (
+            '<label class="btn sm" data-ops="del-col-label" data-col="' +
+            pair[0] +
+            '"><input type="checkbox" data-ops="del-col" data-col="' +
+            pair[0] +
+            '"' +
+            (on ? " checked" : "") +
+            "> " +
+            escapeHtml(pair[1]) +
+            "</label>"
+          );
+        })
+        .join("") +
+      ' <button type="button" class="btn sm" onclick="typeof resetV3ColumnWidths===\'function\'&&resetV3ColumnWidths(\'epv3:colw:shipping\')">Reset lebar kolom</button></div>';
+    return opsHead("Jadwal Pengiriman", "Satu baris per Surat Jalan · Loading V3 + SO-link · tanpa tulis Accurate saat lihat") + coverageBanner + planForm +
       '<form class="v36-toolbar" id="v3-del-form"><label class="v36-search"><span>⌕</span><input id="v3-del-q" aria-label="Cari SJ atau PO" placeholder="No. SJ / PO / pelanggan" value="' + escapeHtml(ops.delQ || "") + '"></label>' +
-      '<label>Status <select id="v3-ops-status">' + [["", "Semua"], ["belum_dikirim", "Belum dikirim"], ["sebagian", "Sebagian"], ["terkirim", "Terkirim"], ["terlambat", "Terlambat"]].map(function (o) { return '<option value="' + o[0] + '"' + (ops.status === o[0] ? " selected" : "") + ">" + o[1] + "</option>"; }).join("") + '</select></label> <button class="btn sm" type="submit">Terapkan</button> <button type="button" class="btn sm" data-ops="del-reload">Muat ulang</button></form>' + body + detail;
+      '<label>Status <select id="v3-ops-status">' + [["", "Semua"], ["belum_dikirim", "Belum dikirim"], ["sebagian", "Sebagian"], ["terkirim", "Terkirim"], ["terlambat", "Terlambat"]].map(function (o) { return '<option value="' + o[0] + '"' + (ops.status === o[0] ? " selected" : "") + ">" + o[1] + "</option>"; }).join("") + '</select></label> <button class="btn sm" type="submit">Terapkan</button> <button type="button" class="btn sm" data-ops="del-reload">Muat ulang</button></form>' +
+      colToggles + body + detail;
   });
   guardDemoView("salarySlipView", function () {
     if (opsStale("payroll") && !ops.err.payroll) opsLoad("payroll", "/production/ops/payroll/runs", function (d) { ops.payroll = d; });
@@ -4513,6 +4752,7 @@
       const stEl = document.getElementById("v3-ops-status");
       ops.delQ = qEl ? String(qEl.value || "").trim() : "";
       ops.status = stEl ? stEl.value : (ops.status || "");
+      ops.delPage = 1;
       ops.del = null; ops.err.del = ""; ops.delDetail = null; ops.ts = {};
       if (typeof window.render === "function") window.render();
     }
@@ -4534,8 +4774,15 @@
     }
   }
   document.addEventListener("change", function (ev) {
+    if (ev.target && ev.target.getAttribute && ev.target.getAttribute("data-ops") === "del-col") {
+      const col = ev.target.getAttribute("data-col");
+      if (!ops.delCols) ops.delCols = { address: true, zone: true, expedition: true, remarks: true };
+      if (col) ops.delCols[col] = !!ev.target.checked;
+      if (typeof window.render === "function") window.render();
+      return;
+    }
     if (ev.target && ev.target.id === "v3-ops-status") {
-      ops.status = ev.target.value; ops.del = null; ops.err.del = ""; ops.ts = {};
+      ops.status = ev.target.value; ops.delPage = 1; ops.del = null; ops.err.del = ""; ops.ts = {};
       if (typeof window.render === "function") window.render();
     }
     if (ev.target && ev.target.id === "v3-sched-month") {
@@ -4593,8 +4840,25 @@
       if (typeof window.render === "function") window.render();
       return;
     }
-    if (act === "del-reload") { ops.del = null; ops.err.del = ""; ops.delDetail = null; ops.ts = {}; }
-    else if (act === "sj-detail") {
+    if (act === "del-reload" || act === "del-prev" || act === "del-next") {
+      if (act === "del-next") ops.delPage = (ops.delPage || 1) + 1;
+      if (act === "del-prev") ops.delPage = Math.max(1, (ops.delPage || 1) - 1);
+      if (act === "del-reload") ops.delPage = ops.delPage || 1;
+      ops.del = null; ops.err.del = ""; ops.delDetail = null; ops.ts = {};
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    if (act === "del-sort") {
+      const key = t.getAttribute("data-key") || "sj";
+      if (ops.delSort && ops.delSort.key === key) {
+        ops.delSort.dir = ops.delSort.dir === "asc" ? "desc" : "asc";
+      } else {
+        ops.delSort = { key: key, dir: "asc" };
+      }
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    if (act === "sj-detail") {
       const sj = t.getAttribute("data-sj");
       ops.delDetail = { loading: true };
       if (typeof window.render === "function") window.render();
@@ -4735,8 +4999,47 @@
 
   // Monitoring Penerimaan (operasional): daftar resmi lintas PO dari
   // GET /production/jobs/payment/receipts. Tidak ada fixture/peran demo/simulasi.
-  const rm = { q: "", paymentStatus: "", receiptStatus: "", receipts: "", dateFrom: "", dateTo: "", review: "", page: 1, pageSize: 25, data: null, loading: false, error: "", stale: true, detail: null };
+  const rm = {
+    q: "",
+    paymentStatus: "",
+    receiptStatus: "",
+    receipts: "",
+    dateFrom: "",
+    dateTo: "",
+    review: "",
+    page: 1,
+    pageSize: 25,
+    data: null,
+    loading: false,
+    error: "",
+    stale: true,
+    detail: null,
+    sort: { key: "so", dir: "asc" },
+    cols: { evidence: true, financial: true },
+  };
   const RM_PAY = { approved: ["APPROVED", "Gate produksi: terverifikasi"], bypassed: ["BYPASSED", "Gate produksi: bypass"], pending: ["PENDING", "Gate produksi: menunggu"] };
+  function rmSortValue(r, key) {
+    if (key === "so") return String(r.so_number || "");
+    if (key === "customer") return String(r.customer_name || "");
+    if (key === "amount") return Number(r.verified_amount || 0);
+    if (key === "status") return String(r.payment_status || "");
+    return "";
+  }
+  function rmSortedItems(items) {
+    const sort = rm.sort || { key: "so", dir: "asc" };
+    const dir = sort.dir === "desc" ? -1 : 1;
+    return (items || []).slice().sort(function (a, b) {
+      const va = rmSortValue(a, sort.key);
+      const vb = rmSortValue(b, sort.key);
+      if (typeof va === "number" && typeof vb === "number") return (va - vb) * dir;
+      return String(va).localeCompare(String(vb), "id-ID", { numeric: true }) * dir;
+    });
+  }
+  function rmSortBtn(key, label) {
+    const active = rm.sort && rm.sort.key === key;
+    const arrow = active ? (rm.sort.dir === "desc" ? " ↓" : " ↑") : "";
+    return '<button type="button" class="btn sm sheet-filter-trigger" data-rm="sort" data-key="' + key + '">' + escapeHtml(label) + arrow + "</button>";
+  }
   function rmAmount(v) {
     if (v == null || v === "") return "Belum terverifikasi";
     const n = Number(v);
@@ -4796,13 +5099,18 @@
     const review = r.payment_review_required
       ? "<br><small class=\"v44-production-alert\" role=\"status\">⚠ Exception keuangan — review berwenang</small>"
       : "";
-    return "<tr><td><b>" + escapeHtml(r.so_number) + "</b><br><small>" + escapeHtml(r.branch_id) + "</small></td>" +
-      "<td>" + escapeHtml(r.customer_name || "Belum terverifikasi") + "</td><td>" + ref + "</td>" +
-      "<td>" + escapeHtml(amount) + "<br><small>" + escapeHtml(rmDate(r.payment_date)) + "</small></td><td>" + evidence + "<br><small>" + settle + "</small><br><small>Status finansial: " + escapeHtml(finLabel) + "</small></td>" +
-      "<td><span class=\"tag v165-status--" + (pay[0] === "APPROVED" ? "done" : pay[0] === "PENDING" ? "pending" : "process") + "\">" + pay[1] + "</span><br><small>Sumber: " + escapeHtml(src) + "</small>" + (r.bypass_active ? "<br><small>Bypass aktif</small>" : "") + review + "</td>" +
-      "<td>" + (none ? "" : "<button type=\"button\" class=\"btn sm\" data-rm=\"detail\" data-jid=\"" + escapeHtml(r.job_id) + "\">Detail</button> ") +
-      "<button type=\"button\" class=\"btn sm\" data-rm=\"open\" data-jid=\"" + escapeHtml(r.job_id) + "\">Buka PO &amp; Payment</button>" +
-      (r.can_bypass ? " <button type=\"button\" class=\"btn sm\" data-rm=\"open\" data-jid=\"" + escapeHtml(r.job_id) + "\">Bypass…</button>" : "") +
+    const showEv = !rm.cols || rm.cols.evidence !== false;
+    const showFin = !rm.cols || rm.cols.financial !== false;
+    return "<tr>" +
+      '<td data-column="so"><b>' + escapeHtml(r.so_number) + "</b><br><small>" + escapeHtml(r.branch_id) + "</small></td>" +
+      '<td data-column="customer">' + escapeHtml(r.customer_name || "Belum terverifikasi") + "</td>" +
+      '<td data-column="ref">' + ref + "</td>" +
+      '<td data-column="amount">' + escapeHtml(amount) + "<br><small>" + escapeHtml(rmDate(r.payment_date)) + "</small></td>" +
+      (showEv ? '<td data-column="evidence">' + evidence + (showFin ? "<br><small>" + settle + "</small><br><small>Status finansial: " + escapeHtml(finLabel) + "</small>" : "") + "</td>" : "") +
+      '<td data-column="status"><span class="tag v165-status--' + (pay[0] === "APPROVED" ? "done" : pay[0] === "PENDING" ? "pending" : "process") + '">' + pay[1] + "</span><br><small>Sumber: " + escapeHtml(src) + "</small>" + (r.bypass_active ? "<br><small>Bypass aktif</small>" : "") + review + "</td>" +
+      '<td data-column="action">' + (none ? "" : '<button type="button" class="btn sm" data-rm="detail" data-jid="' + escapeHtml(r.job_id) + '">Detail</button> ') +
+      '<button type="button" class="btn sm" data-rm="open" data-jid="' + escapeHtml(r.job_id) + '">Buka PO &amp; Payment</button>' +
+      (r.can_bypass ? ' <button type="button" class="btn sm" data-rm="open" data-jid="' + escapeHtml(r.job_id) + '">Bypass…</button>' : "") +
       "</td></tr>";
   }
   async function rmOpen(jobId) {
@@ -4839,12 +5147,31 @@
     const sel = function (id, label, cur, opts) {
       return "<label>" + label + " <select id=\"" + id + "\">" + opts.map(function (o) { return "<option value=\"" + o[0] + "\"" + (cur === o[0] ? " selected" : "") + ">" + o[1] + "</option>"; }).join("") + "</select></label>";
     };
+    const showEv = !rm.cols || rm.cols.evidence !== false;
     let body;
     if (rm.loading && !d) body = "<div class=\"flat-notice\" role=\"status\">Memuat monitoring pembayaran…</div>";
     else if (rm.error) body = "<div class=\"flat-notice\" role=\"alert\"><b>Gagal memuat:</b> " + escapeHtml(rm.error) + " <button type=\"button\" class=\"btn sm\" data-rm=\"reload\">Coba lagi</button></div>";
-    else if (!d || !d.items.length) body = "<div class=\"flat-notice\">Tidak ada PO sesuai filter. PO muncul setelah job V3 dibuat dari Inbox/Tugas Tim.</div>";
-    else body = "<div class=\"v36-table-container\"><table class=\"v36-table\"><thead><tr><th>No. PO</th><th>Pelanggan</th><th>Referensi penerimaan</th><th>Nominal terverifikasi</th><th>Evidence</th><th>Status pembayaran</th><th>Aksi</th></tr></thead><tbody>" + d.items.map(rmRowHtml).join("") + "</tbody></table></div>" +
-      "<div class=\"row\"><button type=\"button\" class=\"btn sm\" data-rm=\"prev\"" + (rm.page <= 1 ? " disabled" : "") + ">‹ Sebelumnya</button><span>Halaman " + d.page + " · " + d.total + " PO</span><button type=\"button\" class=\"btn sm\" data-rm=\"next\"" + (d.has_more ? "" : " disabled") + ">Berikutnya ›</button></div>";
+    else if (!d || !d.items.length) body = "<div class=\"flat-notice v165-state v165-state--empty\" role=\"status\"><b>Tidak ada data</b> Tidak ada PO sesuai filter. PO muncul setelah job V3 dibuat dari Inbox/Tugas Tim.</div>";
+    else {
+      const rows = rmSortedItems(d.items);
+      body =
+        '<div class="row" id="v3-rm-col-toggles" style="gap:6px;flex-wrap:wrap;margin:8px 0">' +
+        '<label class="btn sm"><input type="checkbox" data-rm="col" data-col="evidence"' + (showEv ? " checked" : "") + "> Evidence</label>" +
+        '<button type="button" class="btn sm" onclick="typeof resetV3ColumnWidths===\'function\'&&resetV3ColumnWidths(\'epv3:colw:payment\')">Reset lebar kolom</button></div>' +
+        '<div class="v36-table-container v3-rm-scroll" role="region" aria-label="Tabel monitoring penerimaan" tabindex="0">' +
+        '<table class="v36-table excel-sheet v3-payment-sheet" data-v3-colw="epv3:colw:payment" data-v3-colw-locked="1" data-v3-sticky="so,customer">' +
+        "<thead><tr>" +
+        '<th data-column="so">' + rmSortBtn("so", "No. PO") + "</th>" +
+        '<th data-column="customer">' + rmSortBtn("customer", "Pelanggan") + "</th>" +
+        "<th data-column=\"ref\">Referensi penerimaan</th>" +
+        '<th data-column="amount">' + rmSortBtn("amount", "Nominal terverifikasi") + "</th>" +
+        (showEv ? "<th data-column=\"evidence\">Evidence</th>" : "") +
+        '<th data-column="status">' + rmSortBtn("status", "Status pembayaran") + "</th>" +
+        "<th data-column=\"action\">Aksi</th></tr></thead><tbody>" +
+        rows.map(rmRowHtml).join("") +
+        "</tbody></table></div>" +
+        '<div class="row"><button type="button" class="btn sm" data-rm="prev"' + (rm.page <= 1 ? " disabled" : "") + ">‹ Sebelumnya</button><span>Halaman " + d.page + " · " + d.total + " PO · " + rows.length + " baris halaman</span><button type=\"button\" class=\"btn sm\" data-rm=\"next\"" + (d.has_more ? "" : " disabled") + ">Berikutnya ›</button></div>";
+    }
     let detail = "";
     if (rm.detail && d) {
       const r = d.items.find(function (x) { return x.job_id === rm.detail; });
@@ -4885,6 +5212,13 @@
     rm.page = 1; rm.detail = null; rm.stale = true;
     if (typeof window.render === "function") window.render();
   });
+  document.addEventListener("change", function (ev) {
+    if (!ev.target || !ev.target.getAttribute || ev.target.getAttribute("data-rm") !== "col") return;
+    const col = ev.target.getAttribute("data-col");
+    if (!rm.cols) rm.cols = { evidence: true, financial: true };
+    if (col) rm.cols[col] = !!ev.target.checked;
+    if (typeof window.render === "function") window.render();
+  });
   document.addEventListener("click", function (ev) {
     const t = ev.target && ev.target.closest ? ev.target.closest("[data-rm]") : null;
     if (!t) return;
@@ -4893,6 +5227,13 @@
     else if (act === "next") { rm.page++; rm.stale = true; rm.detail = null; }
     else if (act === "reload") { rm.stale = true; }
     else if (act === "detail") { rm.detail = Number(t.getAttribute("data-jid")); }
+    else if (act === "sort") {
+      const key = t.getAttribute("data-key") || "so";
+      if (rm.sort && rm.sort.key === key) rm.sort.dir = rm.sort.dir === "asc" ? "desc" : "asc";
+      else rm.sort = { key: key, dir: "asc" };
+      if (typeof window.render === "function") window.render();
+      return;
+    }
     else if (act === "open") { rmOpen(Number(t.getAttribute("data-jid"))); return; }
     else return;
     if (typeof window.render === "function") window.render();

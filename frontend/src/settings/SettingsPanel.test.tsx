@@ -93,6 +93,47 @@ describe("isolated Settings UI", () => {
   });
 });
 
+it("runtime mode shows enforced status, endpoint map, and role grant packs", async () => {
+  const { api, request } = adapter();
+  request.mockImplementation(async (path: string) => {
+    if (path === "/authorization-status") {
+      return {
+        workflow_authorization: "enforced",
+        active_now: true,
+        automatic_grant_import: false,
+        production_endpoints_mapped: 70,
+        inventory_audit: { conclusion: "not_run" },
+        branch_management: "Cabang via grant.",
+        mapping_review_required: {
+          "production.tracking.read": {
+            status: "mapped_manual_packs",
+            impact: "read ≠ link",
+            recommendation: "grant terpisah",
+            owner_decision: "manual",
+          },
+        },
+        role_grant_packs: {
+          automatic_apply_allowed: false,
+          usage: "Grant manual via Pengaturan.",
+          packs: { driver: { label: "Driver", ownership_default: "all", capabilities: ["loading.record"], notes: "POD" } },
+        },
+      };
+    }
+    if (path === "/users" || path.startsWith("/users?")) {
+      return { revision: 0, items: [{ id: 1, username: "user", display_name: "User", is_active: true }] };
+    }
+    if (path === "/groups") return { revision: 0, items: [] };
+    if (path === "/capabilities") return { revision: 0, items: [] };
+    return { revision: 0, items: [] };
+  });
+  render(<SettingsPanel api={api} runtime workflowAuthorization="legacy" />);
+  expect(await screen.findByTestId("authorization-status")).toHaveAttribute("data-mode", "enforced");
+  expect(screen.getByTestId("endpoint-map-count")).toHaveTextContent("70");
+  expect(screen.getByTestId("role-grant-packs")).toHaveTextContent("Driver");
+  expect(screen.getByTestId("mapping-review")).toHaveTextContent("production.tracking.read");
+  expect(screen.getByText(/Mode enforced AKTIF/)).toBeInTheDocument();
+});
+
 it("reports partial grant writes and does not retry the saved grant", async () => {
   const { api, request } = adapter();
   let writes = 0;
