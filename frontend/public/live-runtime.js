@@ -3395,9 +3395,16 @@
       .querySelectorAll('button[onclick*="resetDemo"]')
       .forEach((x) => x.remove());
 
-    // Step 158: do not inject legacy "V3" workflow buttons on Inbox rows.
+    // Step 158: strip legacy "Panel V3" twins on Inbox rows only.
+    // Jadwal Produksi action cells share the same td with Atur Operator —
+    // removing the whole cell hid schedule actions after every render.
     root.querySelectorAll(".v3-open-wf").forEach(function (btn) {
+      if (window.section === "schedule") return;
       const cell = btn.closest("td");
+      if (cell && cell.querySelector("button.actionlink, button:not(.v3-open-wf)")) {
+        btn.remove();
+        return;
+      }
       if (cell) cell.remove();
       else btn.remove();
     });
@@ -3913,7 +3920,9 @@
     if (ops.busy[key]) return;
     ops.busy[key] = true; ops.err[key] = "";
     request(API + url).then(function (d) { assign(d); }).catch(function (e) {
-      assign(null); ops.err[key] = String((e && e.message) || "Gagal memuat");
+      // Set ops.err before assign(null): schedule/errorKind classifiers read it synchronously.
+      ops.err[key] = String((e && e.message) || "Gagal memuat");
+      assign(null);
     }).then(function () {
       ops.busy[key] = false; ops.ts[key] = Date.now();
       if (typeof window.render === "function") window.render();

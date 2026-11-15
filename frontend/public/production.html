@@ -1770,24 +1770,29 @@ function contiguousCategorySpans(visibleOrderedKeys){
  return spans;
 }
 function buildScheduleGroupSpans(orderedKeys,vis){
- const keys=orderedKeys.filter(k=>vis.has(k));
+ // Span ALL ordered columns (including hidden). Filtering to visible-only made
+ // group colspan << detail/body column count and the browser dropped trailing
+ // body cells — including Aksi V3 / Atur Operator.
+ const keys=orderedKeys.slice();
  const out=[];
  let i=0;
  while(i<keys.length){
   const key=keys[i];
-  if(key==='action'){out.push({key:'action',span:1,label:'',keys:['action'],action:true});i++;continue}
+  if(key==='action'){out.push({key:'action',span:1,label:'',keys:['action'],action:true,hidden:!vis.has('action')});i++;continue}
   const cat=COLUMN_CATEGORY[key]||'LAINNYA';
   let span=1;
   while(i+span<keys.length&&keys[i+span]!=='action'&&(COLUMN_CATEGORY[keys[i+span]]||'LAINNYA')===cat)span++;
-  out.push({key,span,label:cat,keys:keys.slice(i,i+span)});
+  const slice=keys.slice(i,i+span);
+  out.push({key,span,label:cat,keys:slice,hidden:!slice.some(k=>vis.has(k))});
   i+=span;
  }
  return out;
 }
 function sheetGroupHeaderHtml(orderedKeys,vis){
  return buildScheduleGroupSpans(orderedKeys,vis).map(s=>{
-  if(s.action)return `<th class="sheet-group-th sheet-group-action" data-column="action" colspan="1"></th>`;
-  return `<th class="sheet-group-th" data-column="${s.key}" data-group-keys="${s.keys.join(',')}" colspan="${s.span}">${escape(s.label)}</th>`;
+  const hid=s.hidden?' v40-col-hidden':'';
+  if(s.action)return `<th class="sheet-group-th sheet-group-action${hid}" data-column="action" colspan="1"></th>`;
+  return `<th class="sheet-group-th${hid}" data-column="${s.key}" data-group-keys="${s.keys.join(',')}" colspan="${s.span}">${escape(s.label)}</th>`;
  }).join('');
 }
 function sheetColgroupHtml(orderedKeys,vis){
@@ -1818,10 +1823,12 @@ function syncScheduleHeaderGeometry(table){
   if(gName&&gName!==gId){gName.style.left=idW+'px';gName.classList.add('sheet-group-sticky')}
   group.querySelectorAll('th[data-group-keys]').forEach(th=>{
    const keys=(th.getAttribute('data-group-keys')||'').split(',').filter(Boolean);
-   let sum=0;let ok=true;
+   let sum=0;let ok=false;
    keys.forEach(k=>{
     const child=table.querySelector('thead tr:not(.sheet-group-row) th[data-column="'+k+'"]');
-    if(!child||child.classList.contains('v40-col-hidden')){ok=false;return}
+    if(!child)return;
+    if(child.classList.contains('v40-col-hidden'))return;
+    ok=true;
     sum+=child.getBoundingClientRect().width;
    });
    if(ok&&sum>0){th.style.minWidth=Math.round(sum)+'px';th.style.width=Math.round(sum)+'px'}
