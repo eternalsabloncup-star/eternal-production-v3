@@ -29,6 +29,9 @@ DELIVERY_LOADING_RETURN_APPROVE = "production.delivery.loading_return.approve"
 TRACKING_READ = "production.tracking.read"
 JOB_READ = "production.job.read"
 JOB_CREATE = "production.job.create"
+JOB_CANCEL = "production.job.cancel"
+# Default cancel grant: Direktur only. Other roles need explicit permissions JSONB.
+JOB_CANCEL_DEFAULT_ROLES: frozenset[str] = frozenset({"direktur", "director"})
 PREP_SCREENER = "production.prep.screener"
 PREP_HELPER = "production.prep.helper"
 PAYROLL_MANAGE = "production.payroll.manage"
@@ -72,6 +75,11 @@ PERMISSION_CATALOG: tuple[dict[str, str], ...] = (
     {"code": TRACKING_READ, "group": "tracking", "label": "Read tracking"},
     {"code": JOB_READ, "group": "job", "label": "Read production job"},
     {"code": JOB_CREATE, "group": "job", "label": "Create production job"},
+    {
+        "code": JOB_CANCEL,
+        "group": "job",
+        "label": "Cancel production job (soft; default Direktur only)",
+    },
     {"code": PREP_SCREENER, "group": "prep", "label": "Prep screener"},
     {"code": PREP_HELPER, "group": "prep", "label": "Prep helper"},
     {"code": PAYROLL_MANAGE, "group": "payroll", "label": "Manage payroll"},
@@ -122,11 +130,42 @@ def merge_role_default_permissions(
     return base
 
 
+def is_job_cancel_default_role(role: str | None) -> bool:
+    return normalize_role_id(role) in JOB_CANCEL_DEFAULT_ROLES
+
+
+def user_may_cancel_job(user) -> bool:
+    """Least privilege: explicit grant OR Direktur default. Never invents grants."""
+    from app.authorization.workflow import context
+
+    ctx = context(user)
+    if ctx is not None:
+        access = getattr(ctx, "access", None)
+        if access is not None and getattr(access, "director", False):
+            return True
+        # Catalog capability code (enforced grants) — not production.* JSONB.
+        if getattr(ctx, "capability", None) == "job.cancel":
+            return True
+        return bool(getattr(ctx, "can", lambda _c: False)("job.cancel"))
+    access = getattr(user, "_managed_access", None)
+    if access is not None and getattr(access, "director", False):
+        return True
+    perms = set(user.permissions or [])
+    if JOB_CANCEL in perms or "job.cancel" in perms:
+        return True
+    return is_job_cancel_default_role(getattr(user, "role", None))
+
+
 def permission_catalog_payload() -> dict:
     return {
         "permissions": [dict(row) for row in PERMISSION_CATALOG],
         "role_defaults": {
             rid: list(codes) for rid, codes in ROLE_DEFAULT_PERMISSIONS.items()
+        },
+        "job_cancel": {
+            "code": JOB_CANCEL,
+            "default_roles": sorted(JOB_CANCEL_DEFAULT_ROLES),
+            "note": "Direktur default; other roles require explicit grant",
         },
         "loading_return": {
             "request_code": DELIVERY_LOADING_RETURN_REQUEST,

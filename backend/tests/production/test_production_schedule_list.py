@@ -358,13 +358,13 @@ async def test_branch_scope_and_403(client):
 
 
 @pytest.mark.asyncio
-async def test_cancelled_jobs_not_supported_flag(client):
+async def test_cancelled_jobs_supported_flag(client):
     factory = get_session_factory()
     async with factory() as session:
         await _seed_core(session)
     r = await client.get("/api/v1/production/ops/schedule")
     assert r.status_code == 200
-    assert r.json()["cancelled_jobs_supported"] is False
+    assert r.json()["cancelled_jobs_supported"] is True
 
 
 @pytest.mark.asyncio

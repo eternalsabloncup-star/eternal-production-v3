@@ -1005,9 +1005,12 @@ async def list_production_schedule(
             "has_more": False,
             "incomplete": False,
             "unverified": {"unknown_print_candidate_lines": 0, "note": note},
-            "cancelled_jobs_supported": False,
+            "cancelled_jobs_supported": True,
             "source": "postgresql_job_line_qtys",
         }
+
+    from app.models.production.job import LIFECYCLE_CANCELLED
+    from app.models.production.prep import LINE_STATUS_REMOVED
 
     lines_stmt = (
         select(JobLineQty, ProductionJob)
@@ -1015,6 +1018,8 @@ async def list_production_schedule(
         .where(
             JobLineQty.production_process == "print",
             ProductionJob.branch_id.in_(allowed),
+            ProductionJob.lifecycle_status != LIFECYCLE_CANCELLED,
+            JobLineQty.line_status != LINE_STATUS_REMOVED,
         )
     )
     if q and q.strip():
@@ -1048,6 +1053,8 @@ async def list_production_schedule(
                     JobLineQty.production_process == "unknown",
                 ),
                 ProductionJob.branch_id.in_(allowed),
+                ProductionJob.lifecycle_status != LIFECYCLE_CANCELLED,
+                JobLineQty.line_status != LINE_STATUS_REMOVED,
             )
         )
         or 0
@@ -1065,7 +1072,7 @@ async def list_production_schedule(
                 "unknown_print_candidate_lines": unknown_count,
                 "note": "unknown_excluded_from_print_totals",
             },
-            "cancelled_jobs_supported": False,
+            "cancelled_jobs_supported": True,
             "source": "postgresql_job_line_qtys",
         }
 
@@ -1135,7 +1142,13 @@ async def list_production_schedule(
             Decimal(0),
         )
         done = max(done_by_line.get((job.id, ln.so_line_id), Decimal(0)), Decimal(0))
-        hold = ln.source_qty is not None
+        conflict = (ln.line_status or "") == "revision_conflict"
+        hold = ln.source_qty is not None or conflict
+        hold_reason = (
+            "revision_conflict"
+            if conflict
+            else ("qty_drift" if ln.source_qty is not None else None)
+        )
         design = job.design_status or "pending"
         pay = payment.get(job.id, job.payment_status or "pending")
         if hold:
@@ -1172,7 +1185,10 @@ async def list_production_schedule(
             "qty_unallocated": str(max(po_qty - allocated, Decimal(0))),
             "qty_unprinted": str(max(po_qty - done, Decimal(0))),
             "hold": hold,
-            "hold_reason": "qty_drift" if hold else None,
+            "hold_reason": hold_reason,
+            "line_status": ln.line_status or "active",
+            "revision_note": ln.revision_note,
+            "lifecycle_status": job.lifecycle_status or "active",
             "design_status": design,
             "payment_status": pay,
             "schedule_bucket": bucket_line,
@@ -1293,7 +1309,7 @@ async def list_production_schedule(
             "unknown_print_candidate_lines": unknown_count,
             "note": "unknown_excluded_from_print_totals",
         },
-        "cancelled_jobs_supported": False,
+        "cancelled_jobs_supported": True,
         "source": "postgresql_job_line_qtys",
         "summary": {k: (str(v) if isinstance(v, Decimal) else v) for k, v in summary.items()},
         "qty_semantics": {

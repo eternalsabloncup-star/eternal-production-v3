@@ -6,6 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Integer,
@@ -19,6 +20,13 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 
+LINE_STATUS_ACTIVE = "active"
+LINE_STATUS_REMOVED = "removed_from_source"
+LINE_STATUS_CONFLICT = "revision_conflict"
+LINE_STATUSES = frozenset(
+    {LINE_STATUS_ACTIVE, LINE_STATUS_REMOVED, LINE_STATUS_CONFLICT}
+)
+
 
 class JobLineQty(Base):
     """PO physical qty ceiling + classification per Accurate SO line."""
@@ -26,6 +34,10 @@ class JobLineQty(Base):
     __tablename__ = "job_line_qtys"
     __table_args__ = (
         UniqueConstraint("job_id", "so_line_id", name="uq_job_line_qty"),
+        CheckConstraint(
+            "line_status IN ('active', 'removed_from_source', 'revision_conflict')",
+            name="ck_job_line_qtys_line_status",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -39,6 +51,14 @@ class JobLineQty(Base):
     # Accurate qty seen after scheduling/production began; po_qty is never silently rewritten.
     source_qty: Mapped[Decimal | None] = mapped_column(Numeric(18, 3), nullable=True)
     drift_detected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Fase 1C revision markers — history rows are never hard-deleted.
+    line_status: Mapped[str] = mapped_column(
+        String(32), default=LINE_STATUS_ACTIVE, server_default=LINE_STATUS_ACTIVE, index=True
+    )
+    revision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    removed_from_source_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     created_at: Mapped[datetime] = mapped_column(

@@ -1966,6 +1966,8 @@
       (job
         ? "<p>Job #<b>" +
           escapeHtml(job.id) +
+          "</b> · Lifecycle <b>" +
+          escapeHtml(job.lifecycle_status || "active") +
           "</b> · Design <b>" +
           escapeHtml(job.design_status) +
           "</b> · Payment <b>" +
@@ -1979,7 +1981,23 @@
       (!job
         ? '<p><button type="button" class="btn" id="v3-create-job">Mulai Proses V3</button></p>'
         : "") +
+      (job && (job.lifecycle_status || "active") === "cancelled"
+        ? '<div class="flat-notice" role="status">Job cancelled' +
+          (job.cancel_reason ? (" — " + escapeHtml(job.cancel_reason)) : "") +
+          ". Histori tetap tersedia; tidak muncul sebagai pekerjaan aktif di Jadwal.</div>"
+        : "") +
       '<div class="v3-actions-grid">' +
+      (job &&
+      (job.lifecycle_status || "active") !== "cancelled" &&
+      canPerm("production.job.cancel")
+        ? section(
+            "Cancel ProductionJob",
+            '<p class="v49-quiet">Soft cancel — tidak menghapus histori, stok, SJ, POD, atau Accurate.</p>' +
+              '<label>Alasan cancel<input id="v3-job-cancel-reason" placeholder="wajib, min 5 karakter"/></label>' +
+              '<label><input type="checkbox" id="v3-job-cancel-review"/> Konfirmasi review (wajib jika gate requires_review)</label>' +
+              '<button type="button" class="btn sm" data-v3="job-cancel">Cancel job</button>',
+          )
+        : "") +
       section(
         "Design",
         '<label>File<input id="v3-design-file" value="design.pdf"/></label>' +
@@ -2249,9 +2267,16 @@
 
 
   function driftHtml(board) {
-    const lines = ((board && board.job_lines) || []).filter(function (ln) { return ln.accurate_qty != null; });
+    const lines = ((board && board.job_lines) || []).filter(function (ln) {
+      return ln.accurate_qty != null || ln.line_status === "revision_conflict" || ln.line_status === "removed_from_source";
+    });
     if (!lines.length) return '<p class="v49-quiet">Tidak ada perbedaan qty dengan Accurate.</p>';
     return lines.map(function (ln) {
+      if (ln.line_status === "removed_from_source" || ln.line_status === "revision_conflict") {
+        return '<div class="flat-notice" role="alert"><b>Line ' + escapeHtml(ln.so_line_id) +
+          "</b>: status <b>" + escapeHtml(ln.line_status) + "</b>" +
+          (ln.revision_note ? (" — " + escapeHtml(ln.revision_note)) : "") + "</div>";
+      }
       return '<div class="flat-notice" role="alert"><b>Line ' + escapeHtml(ln.so_line_id) + "</b>: snapshot job V3 " + opsNum(ln.po_qty) + " ≠ Accurate terbaru " + opsNum(ln.accurate_qty) +
         (ln.drift_detected_at ? " (terdeteksi " + escapeHtml(ln.drift_detected_at.slice(0, 10)) + ")" : "") + "<br>" +
         (ln.drift_acknowledged ? "Sudah ditinjau (tercatat di audit)." :
@@ -2475,6 +2500,52 @@
         );
         toast("Receipt diinvalidasi + audit event");
         return;
+      }
+      if (action === "job-cancel") {
+        if (!canPerm("production.job.cancel")) {
+          throw new Error("Izin production.job.cancel tidak ada");
+        }
+        const reason = field("v3-job-cancel-reason");
+        const reviewEl = document.getElementById("v3-job-cancel-review");
+        const confirmReview = !!(reviewEl && reviewEl.checked);
+        if (!reason || reason.length < 5) {
+          throw new Error("Alasan cancel wajib (min 5 karakter)");
+        }
+        let gate = null;
+        try {
+          gate = await request(API + "/production/jobs/" + jid + "/cancel-gate");
+        } catch (e) {
+          throw new Error(String((e && e.message) || "Gagal memuat cancel gate"));
+        }
+        const impact =
+          "Gate: " +
+          (gate && gate.decision) +
+          " · " +
+          ((gate && gate.reasons && gate.reasons.join(", ")) || "—") +
+          "\nCancel tidak mengubah Accurate/stok/SJ/POD.";
+        if (!window.confirm("Batalkan ProductionJob #" + jid + "?\n" + impact)) {
+          return;
+        }
+        if (gate && gate.decision === "blocked") {
+          throw new Error("Cancel diblokir: " + ((gate.reasons && gate.reasons.join(", ")) || "dependency"));
+        }
+        if (gate && gate.requires_confirm_review && !confirmReview) {
+          throw new Error("Centang konfirmasi review karena job sudah punya aktivitas");
+        }
+        const result = await request(API + "/production/jobs/" + jid + "/cancel", {
+          method: "POST",
+          body: {
+            reason: reason,
+            idempotency_key: idemKey("job-cancel"),
+            confirm_review: confirmReview,
+          },
+        });
+        toast(
+          result.replay
+            ? "Cancel replay (sudah cancelled)"
+            : "Job cancelled — dihapus dari Jadwal aktif",
+        );
+        return result;
       }
       if (action === "drift-ack") {
         const line = window.__v3DriftLine;
@@ -4167,7 +4238,9 @@
             banner += '<div class="v44-production-alert" role="status">' + unk +
               " line proses UNKNOWN/NULL — tidak dihitung sebagai Cetak. Tinjau klasifikasi di Detail PO.</div>";
           }
-          if (!sched.cancelled_jobs_supported) {
+          if (sched.cancelled_jobs_supported) {
+            banner += '<div class="flat-notice">Job cancelled disembunyikan dari Jadwal aktif; histori tetap tersedia di Panel V3.</div>';
+          } else {
             banner += '<div class="flat-notice">Cancel ProductionJob belum didukung di V3 — filter Cancelled aktif tidak tersedia.</div>';
           }
           const buckets = [

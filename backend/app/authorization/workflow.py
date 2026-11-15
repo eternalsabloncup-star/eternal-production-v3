@@ -156,7 +156,11 @@ async def authorize_request(session,user,request):
         if job is not None and assignment.job_id!=job.id: raise HTTPException(403,'Cross-job assignment denied')
         job=await session.get(ProductionJob,assignment.job_id)
     if name=='get_job_by_so':
-        job=await session.scalar(select(ProductionJob).where(ProductionJob.accurate_so_number==params['so_number']))
+        from app.models.production.job import LIFECYCLE_ACTIVE
+        job=await session.scalar(select(ProductionJob).where(
+            ProductionJob.accurate_so_number==params['so_number'],
+            ProductionJob.lifecycle_status==LIFECYCLE_ACTIVE,
+        ))
         if job is None: raise HTTPException(404,'Job not found')
     branch=job.branch_id if job else body.get('branch_id')
     if name=='machine_update':

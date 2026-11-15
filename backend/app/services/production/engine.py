@@ -219,6 +219,20 @@ def _coerce_urgent_state(value) -> str | None:
     return None
 
 
+async def find_active_job_by_so(
+    session: AsyncSession, accurate_so_number: str
+) -> ProductionJob | None:
+    """Return the single active job for an SO, if any (never cancelled history)."""
+    from app.models.production.job import LIFECYCLE_ACTIVE
+
+    return await session.scalar(
+        select(ProductionJob).where(
+            ProductionJob.accurate_so_number == accurate_so_number,
+            ProductionJob.lifecycle_status == LIFECYCLE_ACTIVE,
+        )
+    )
+
+
 async def ensure_job(
     session: AsyncSession,
     user: User,
@@ -232,21 +246,20 @@ async def ensure_job(
     line_items: list[dict] | None = None,
     commit: bool = True,
 ) -> ProductionJob:
-    """Create or refresh job. Classifications stay null/unknown unless explicit.
+    """Create or refresh the active job. Classifications stay null/unknown unless explicit.
 
     commit=False leaves the write pending in the caller's transaction (bulk sync).
+    Cancelled jobs are never reactivated. Re-input after cancel creates a distinct
+    active job; cancelled history stays queryable by job id.
     """
+    from app.models.production.job import LIFECYCLE_ACTIVE
     from app.services.production.prep import sync_job_lines_from_so_detail
 
     _require(user, P.JOB_CREATE)
     _branch(user, branch_id)
     buffer_v = _coerce_buffer_stock(buffer_stock)
     urgent_v = _coerce_urgent_state(urgent_state)
-    existing = await session.scalar(
-        select(ProductionJob).where(
-            ProductionJob.accurate_so_number == accurate_so_number
-        )
-    )
+    existing = await find_active_job_by_so(session, accurate_so_number)
     if existing:
         _branch(user, existing.branch_id)
         if accurate_id and not existing.accurate_id:
@@ -258,7 +271,7 @@ async def ensure_job(
             existing.buffer_stock = buffer_v
         if urgent_state is not None:
             existing.urgent_state = urgent_v
-        if line_items:
+        if line_items is not None:
             await sync_job_lines_from_so_detail(session, existing, line_items)
         if not commit:
             await session.flush()
@@ -274,12 +287,29 @@ async def ensure_job(
         buffer_stock=buffer_v,
         urgent_state=urgent_v,
         processing_status="Baru",
+        lifecycle_status=LIFECYCLE_ACTIVE,
     )
-    session.add(job)
-    await session.flush()
+    try:
+        async with session.begin_nested():
+            session.add(job)
+            await session.flush()
+    except IntegrityError:
+        # Concurrent re-input raced on partial UNIQUE — adopt the winner.
+        winner = await find_active_job_by_so(session, accurate_so_number)
+        if winner is None:
+            raise HTTPException(409, "Konflik re-input SO — coba ulang")
+        _branch(user, winner.branch_id)
+        if line_items is not None:
+            await sync_job_lines_from_so_detail(session, winner, line_items)
+        if not commit:
+            await session.flush()
+            return winner
+        await session.commit()
+        await session.refresh(winner)
+        return winner
     if line_items:
         await sync_job_lines_from_so_detail(session, job, line_items)
-    # Keep inbox WO mirror in sync.
+    # Keep inbox WO mirror in sync (one WO per SO number — not lifecycle-scoped).
     wo = await session.scalar(
         select(WorkOrder).where(WorkOrder.accurate_so_number == accurate_so_number)
     )
@@ -338,6 +368,9 @@ async def job_needs_design_gate(
 async def gates_open_for_schedule(
     job: ProductionJob, session: AsyncSession | None = None
 ) -> None:
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     needs_design = await job_needs_design_gate(session, job)
     if needs_design:
         if job.design_status == "bypassed":
@@ -3271,11 +3304,9 @@ async def tracking_timeline(
 async def find_job_by_so(
     session: AsyncSession, user: User, so_number: str
 ) -> ProductionJob | None:
-    """Read-only lookup — never creates a job."""
+    """Read-only lookup of the active job — never creates; never returns cancelled."""
     _require(user, P.JOB_READ)
-    job = await session.scalar(
-        select(ProductionJob).where(ProductionJob.accurate_so_number == so_number)
-    )
+    job = await find_active_job_by_so(session, so_number)
     if job is None:
         return None
     _branch(user, job.branch_id)
@@ -3516,6 +3547,10 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
             "payment_status": payment_status,
             "sample_status": job.sample_status,
             "processing_status": job.processing_status,
+            "lifecycle_status": job.lifecycle_status or "active",
+            "cancelled_at": job.cancelled_at.isoformat() if job.cancelled_at else None,
+            "cancel_reason": job.cancel_reason,
+            "cancel_gate": job.cancel_gate,
         },
         "design_versions": [
             {
@@ -3616,6 +3651,8 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                     and str(ln.source_qty) in (e.payload_json or "")
                     for e in events
                 ),
+                "line_status": ln.line_status or "active",
+                "revision_note": ln.revision_note,
             }
             for ln in lines
         ],

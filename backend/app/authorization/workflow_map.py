@@ -28,6 +28,8 @@ WORKFLOW = {
  'get_job_board': ('job.board.read', ('job.read',)),
  'get_loading_authority': ('loading.authority.read', ('job.read',)),
  'get_job': ('job.read', ('job.read',)),
+ 'cancel_gate_preview': ('job.cancel', ('job.cancel',)),
+ 'cancel_production_job': ('job.cancel', ('job.cancel',)),
  'design_upload': ('design.version.create', ('design.upload',)),
  'design_decide': ('design.decision.record', ('design.approve',)),
  'design_approval_link': ('design.approval_link.create', ('design.upload',)),

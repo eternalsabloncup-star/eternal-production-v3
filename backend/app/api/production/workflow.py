@@ -244,6 +244,10 @@ async def _job_summary(job, session) -> dict:
         "payment_status": await effective_status(session, job.id),
         "sample_status": job.sample_status,
         "processing_status": job.processing_status,
+        "lifecycle_status": getattr(job, "lifecycle_status", None) or "active",
+        "cancelled_at": job.cancelled_at.isoformat() if getattr(job, "cancelled_at", None) else None,
+        "cancel_reason": getattr(job, "cancel_reason", None),
+        "cancel_gate": getattr(job, "cancel_gate", None),
     }
 
 
@@ -408,6 +412,55 @@ async def get_loading_authority(
         accurate_sj_number=accurate_sj_number,
         accurate_sj_line_id=accurate_sj_line_id,
         so_line_id=so_line_id,
+    )
+
+
+class CancelJobBody(BaseModel):
+    reason: str = Field(min_length=5, max_length=2000)
+    idempotency_key: str = Field(min_length=8, max_length=120)
+    confirm_review: bool = False
+
+
+@router.get("/{job_id}/cancel-gate")
+async def cancel_gate_preview(
+    job_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    """Preview cancel classification without mutating state."""
+    from app.services.production import lifecycle as life
+
+    from app.services.production.permissions import user_may_cancel_job
+
+    job = await engine.get_job(session, job_id)
+    if not user_may_cancel_job(user):
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            403,
+            "Izin production.job.cancel tidak mencukupi (Direktur atau grant eksplisit)",
+        )
+    engine._branch(user, job.branch_id)
+    return await life.classify_cancel_gate(session, job)
+
+
+@router.post("/{job_id}/cancel")
+async def cancel_production_job(
+    job_id: int,
+    body: CancelJobBody,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    """Soft-cancel ProductionJob. Never hard-deletes history or Accurate docs."""
+    from app.services.production import lifecycle as life
+
+    return await life.cancel_job(
+        session,
+        user,
+        job_id,
+        reason=body.reason,
+        idempotency_key=body.idempotency_key,
+        confirm_review=body.confirm_review,
     )
 
 

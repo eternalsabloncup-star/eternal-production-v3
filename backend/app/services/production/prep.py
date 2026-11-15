@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import HTTPException
@@ -12,7 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.production.event import ProductionEvent
 from app.models.production.job import ProductionJob
-from app.models.production.prep import JobLineQty, PrepEvent, PrepState
+from app.models.production.prep import (
+    LINE_STATUS_ACTIVE,
+    LINE_STATUS_CONFLICT,
+    LINE_STATUS_REMOVED,
+    JobLineQty,
+    PrepEvent,
+    PrepState,
+)
 from app.models.production.schedule import ScheduleAssignment
 from app.models.user import User
 from app.services.production import permissions as P
@@ -22,6 +30,7 @@ from app.services.production.engine import (
     _require,
     gates_open_for_schedule,
 )
+from app.services.production.lifecycle import require_job_active
 
 SCREEN_SIZES = frozenset({"kecil", "besar"})
 
@@ -33,6 +42,31 @@ def _normalize_production_process(value: str | None) -> str:
     if normalized in {"print", "non_print", "unknown"}:
         return normalized
     return "unknown"
+
+
+async def _line_has_committed_work(
+    session: AsyncSession, job_id: int, so_line_id: str
+) -> bool:
+    for stmt in (
+        select(func.count())
+        .select_from(ScheduleAssignment)
+        .where(
+            ScheduleAssignment.job_id == job_id,
+            ScheduleAssignment.so_line_id == so_line_id,
+        ),
+        select(func.count())
+        .select_from(ProductionEvent)
+        .where(
+            ProductionEvent.job_id == job_id,
+            ProductionEvent.so_line_id == so_line_id,
+        ),
+        select(func.count())
+        .select_from(PrepState)
+        .where(PrepState.job_id == job_id, PrepState.so_line_id == so_line_id),
+    ):
+        if int(await session.scalar(stmt) or 0) > 0:
+            return True
+    return False
 
 
 async def upsert_job_line_qty(
@@ -62,29 +96,44 @@ async def upsert_job_line_qty(
             po_qty=po_qty,
             accurate_item_id=(accurate_item_id or None),
             production_process=process,
+            line_status=LINE_STATUS_ACTIVE,
         )
         session.add(row)
     else:
+        # Reappearing source line clears removed marker when qty/process reconcile.
+        if row.line_status == LINE_STATUS_REMOVED:
+            row.line_status = LINE_STATUS_ACTIVE
+            row.removed_from_source_at = None
+            row.revision_note = None
+        if from_accurate and production_process is not None:
+            prev = (row.production_process or "unknown").strip().lower()
+            if prev != process and await _line_has_committed_work(
+                session, job.id, so_line_id
+            ):
+                row.line_status = LINE_STATUS_CONFLICT
+                row.revision_note = (
+                    f"Klasifikasi berubah {prev} → {process} sementara line sudah beraktivitas"
+                )
+                # Do not silently rewrite classification once work exists.
+                if accurate_item_id is not None:
+                    row.accurate_item_id = accurate_item_id or None
+                await session.flush()
+                return row
         if from_accurate and row.po_qty != po_qty:
-            committed = await session.scalar(
-                select(func.count()).select_from(ScheduleAssignment).where(
-                    ScheduleAssignment.job_id == job.id,
-                    ScheduleAssignment.so_line_id == so_line_id,
-                )
-            ) or await session.scalar(
-                select(func.count()).select_from(ProductionEvent).where(
-                    ProductionEvent.job_id == job.id,
-                    ProductionEvent.so_line_id == so_line_id,
-                )
-            ) or await session.scalar(
-                select(func.count()).select_from(PrepState).where(
-                    PrepState.job_id == job.id, PrepState.so_line_id == so_line_id
-                )
-            )
+            committed = await _line_has_committed_work(session, job.id, so_line_id)
             if committed:
-                # Historical approvals and quantities stay; the change is surfaced for review.
+                completed = await _confirmed_pass1(session, job.id, so_line_id)
+                # Historical approvals and quantities stay; change is surfaced for review.
                 row.source_qty = po_qty
                 row.drift_detected_at = func.now()
+                if po_qty < completed:
+                    row.line_status = LINE_STATUS_CONFLICT
+                    row.revision_note = (
+                        f"Qty Accurate {po_qty} < qty completed {completed}"
+                    )
+                elif row.line_status != LINE_STATUS_CONFLICT:
+                    row.line_status = LINE_STATUS_ACTIVE
+                    row.revision_note = "Qty Accurate berubah setelah aktivitas — butuh review"
                 if accurate_item_id is not None:
                     row.accurate_item_id = accurate_item_id or None
                 await session.flush()
@@ -92,6 +141,11 @@ async def upsert_job_line_qty(
         if from_accurate and row.po_qty == po_qty and row.source_qty is not None:
             row.source_qty = None
             row.drift_detected_at = None
+            if row.line_status == LINE_STATUS_CONFLICT and not (
+                row.revision_note or ""
+            ).startswith("Klasifikasi"):
+                row.line_status = LINE_STATUS_ACTIVE
+                row.revision_note = None
         if row.po_qty != po_qty:
             if from_accurate:
                 row.source_qty = None
@@ -113,6 +167,9 @@ async def upsert_job_line_qty(
         # Helper/screener qty updates must not clobber Accurate classification.
         if production_process is not None:
             row.production_process = process
+        if from_accurate and row.line_status != LINE_STATUS_CONFLICT:
+            row.line_status = LINE_STATUS_ACTIVE
+            row.removed_from_source_at = None
     await session.flush()
     return row
 
@@ -126,8 +183,12 @@ async def sync_job_lines_from_so_detail(
 
     Slice 1M: unverified / missing / non-finite quantity must not become a
     production line with verified zero — eligibility rejects those rows.
+    Fase 1C: lines missing from Accurate are marked removed/conflict — never
+    hard-deleted. Does not fake a successful silent sync.
     """
+    require_job_active(job)
     synced: list[JobLineQty] = []
+    seen_ids: set[str] = set()
     for line in line_items:
         if not isinstance(line, dict):
             continue
@@ -171,7 +232,26 @@ async def sync_job_lines_from_so_detail(
             production_process=line.get("production_process"),
             from_accurate=True,
         )
+        seen_ids.add(line_id)
         synced.append(row)
+
+    existing_rows = (
+        await session.scalars(select(JobLineQty).where(JobLineQty.job_id == job.id))
+    ).all()
+    now = datetime.now(UTC)
+    for row in existing_rows:
+        if row.so_line_id in seen_ids:
+            continue
+        if await _line_has_committed_work(session, job.id, row.so_line_id):
+            row.line_status = LINE_STATUS_CONFLICT
+            row.revision_note = (
+                "Line hilang dari Accurate sementara sudah ada assignment/progress"
+            )
+        else:
+            row.line_status = LINE_STATUS_REMOVED
+            row.removed_from_source_at = now
+            row.revision_note = "Line dihapus dari sumber Accurate"
+    await session.flush()
     return synced
 
 
