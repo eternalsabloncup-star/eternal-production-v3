@@ -56,6 +56,11 @@ class ProductionJob(Base):
     design_status: Mapped[str] = mapped_column(String(32), default="pending")
     # pending|approved|bypassed|rejected
     payment_status: Mapped[str] = mapped_column(String(32), default="pending")
+    # True when verified receipt was lost after production progress — review required.
+    # Does not delete physical history; financial exception only.
+    payment_review_required: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
+    )
     sample_status: Mapped[str] = mapped_column(String(32), default="not_required")
     # not_required|pending|approved|rejected
     processing_status: Mapped[str] = mapped_column(String(16), default="Baru")

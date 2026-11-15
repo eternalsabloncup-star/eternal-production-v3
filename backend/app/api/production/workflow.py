@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
@@ -77,6 +77,7 @@ class PaymentReceiptBody(BaseModel):
 
 class PaymentBypassBody(BaseModel):
     reason: str
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class RevokeBody(BaseModel):
@@ -292,6 +293,9 @@ async def payment_receipts_list(
     receipt_status: str | None = Query(None, pattern="^(valid|invalidated|reversed)$"),
     receipts: str | None = Query(None, pattern="^(with|without)$"),
     branch: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    review_required: bool | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     session: AsyncSession = Depends(get_db_session),
@@ -299,8 +303,18 @@ async def payment_receipts_list(
 ):
     """Official per-PO payment monitor, with or without receipts (read-only, branch scoped)."""
     return await engine.list_payment_receipts(
-        session, user, q=q, payment_status=payment_status, receipt_status=receipt_status,
-        receipts=receipts, branch=branch, page=page, page_size=page_size,
+        session,
+        user,
+        q=q,
+        payment_status=payment_status,
+        receipt_status=receipt_status,
+        receipts=receipts,
+        branch=branch,
+        date_from=date_from,
+        date_to=date_to,
+        review_required=review_required,
+        page=page,
+        page_size=page_size,
     )
 
 
@@ -611,8 +625,19 @@ async def payment_bypass(
     user: User = Depends(get_current_user),
 ):
     job = await engine.get_job(session, job_id)
-    row = await engine.bypass_payment(session, user, job, reason=body.reason)
-    return {"id": row.id, "active": row.active}
+    row = await engine.bypass_payment(
+        session,
+        user,
+        job,
+        reason=body.reason,
+        idempotency_key=body.idempotency_key,
+    )
+    return {
+        "id": row.id,
+        "active": row.active,
+        "gate_before": getattr(row, "gate_before", None),
+        "idempotency_key": getattr(row, "idempotency_key", None),
+    }
 
 
 @router.post("/payment/bypass/{bypass_id}/revoke")

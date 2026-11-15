@@ -2028,11 +2028,14 @@
       ) +
       section(
         "Payment",
-        '<p class="v49-quiet" id="v3-evidence-note">Receipt/SJ membutuhkan verifikasi gateway Accurate bila enforce aktif. Bypass payment tetap berizin+audit.</p>' +
+        '<p class="v49-quiet" id="v3-evidence-note">Gate produksi ≠ status lunas Accurate. Receipt harus verifikasi gateway. Bypass berizin+audit tidak mengubah outstanding Accurate.</p>' +
+          (((board && board.job && board.job.payment_review_required) || (job && job.payment_review_required))
+            ? '<div class="flat-notice" role="alert"><b>Exception keuangan:</b> bukti pembayaran hilang setelah progres produksi. Histori fisik tetap; perlu review berwenang.</div>'
+            : "") +
           '<label>Accurate receipt id<input id="v3-pay-rid"/></label>' +
-          '<label>Amount<input id="v3-pay-amt" type="number" min="0" step="0.01"/></label>' +
+          '<label>Amount (diabaikan — nilai dari Accurate)<input id="v3-pay-amt" type="number" min="0" step="0.01"/></label>' +
           '<button type="button" class="btn sm" data-v3="pay-receipt">Catat receipt (verified)</button>' +
-          '<label>Bypass reason<input id="v3-pay-bypass-reason"/></label>' +
+          '<label>Bypass reason (wajib)<input id="v3-pay-bypass-reason"/></label>' +
           '<button type="button" class="btn sm" data-v3="pay-bypass">Bypass payment</button>' +
           (activeBypass
             ? '<button type="button" class="btn sm" data-v3="pay-revoke">Revoke bypass #' +
@@ -2450,9 +2453,10 @@
       if (action === "pay-bypass") {
         const reason = field("v3-pay-bypass-reason");
         if (!reason) throw new Error("Alasan bypass wajib");
+        const bypassKey = "pay-bypass-" + jid + "-" + String(reason).trim().slice(0, 40);
         await request(API + "/production/jobs/" + jid + "/payment/bypass", {
           method: "POST",
-          body: { reason: reason },
+          body: { reason: reason, idempotency_key: bypassKey },
         });
         toast("Payment bypass aktif");
         return;
@@ -4679,12 +4683,17 @@
 
   // Monitoring Penerimaan (operasional): daftar resmi lintas PO dari
   // GET /production/jobs/payment/receipts. Tidak ada fixture/peran demo/simulasi.
-  const rm = { q: "", paymentStatus: "", receiptStatus: "", receipts: "", page: 1, pageSize: 25, data: null, loading: false, error: "", stale: true, detail: null };
-  const RM_PAY = { approved: ["APPROVED", "Disetujui (terverifikasi)"], bypassed: ["BYPASSED", "Bypass berwenang"], pending: ["PENDING", "Belum terverifikasi"] };
+  const rm = { q: "", paymentStatus: "", receiptStatus: "", receipts: "", dateFrom: "", dateTo: "", review: "", page: 1, pageSize: 25, data: null, loading: false, error: "", stale: true, detail: null };
+  const RM_PAY = { approved: ["APPROVED", "Gate produksi: terverifikasi"], bypassed: ["BYPASSED", "Gate produksi: bypass"], pending: ["PENDING", "Gate produksi: menunggu"] };
   function rmAmount(v) {
     if (v == null || v === "") return "Belum terverifikasi";
     const n = Number(v);
     return Number.isFinite(n) ? "Rp " + n.toLocaleString("id-ID") : "Belum terverifikasi";
+  }
+  function rmDate(v) {
+    if (v == null || v === "") return "Belum terverifikasi";
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? "Belum terverifikasi" : d.toLocaleString("id-ID");
   }
   function unsyncedHtml() {
     if (opsStale("unsynced") && !ops.err.unsynced) opsLoad("unsynced", "/production/ops/payment/unsynced?page=1&limit=50", function (d) { ops.unsynced = d; });
@@ -4704,6 +4713,10 @@
     if (rm.paymentStatus) params.set("payment_status", rm.paymentStatus);
     if (rm.receiptStatus) params.set("receipt_status", rm.receiptStatus);
     if (rm.receipts) params.set("receipts", rm.receipts);
+    if (rm.dateFrom) params.set("date_from", rm.dateFrom);
+    if (rm.dateTo) params.set("date_to", rm.dateTo);
+    if (rm.review === "1") params.set("review_required", "true");
+    if (rm.review === "0") params.set("review_required", "false");
     try {
       rm.data = await request(API + "/production/jobs/payment/receipts?" + params.toString());
       rm.stale = false;
@@ -4723,10 +4736,16 @@
       : escapeHtml(latest.accurate_receipt_number || latest.accurate_receipt_id) + "<br><small>" + escapeHtml(r.receipt_count) + " penerimaan</small>";
     const amount = none ? "Belum ada penerimaan" : rmAmount(r.verified_amount);
     const evidence = none ? "—" : latest.evidence_verified ? "Evidence terverifikasi" : "Evidence belum terverifikasi";
+    const settle = r.financial_settlement_known
+      ? rmAmount(r.outstanding_amount)
+      : "<span class=\"muted\">Outstanding Accurate tidak dipetakan</span>";
+    const review = r.payment_review_required
+      ? "<br><small class=\"v44-production-alert\" role=\"status\">⚠ Exception keuangan — review berwenang</small>"
+      : "";
     return "<tr><td><b>" + escapeHtml(r.so_number) + "</b><br><small>" + escapeHtml(r.branch_id) + "</small></td>" +
       "<td>" + escapeHtml(r.customer_name || "Belum terverifikasi") + "</td><td>" + ref + "</td>" +
-      "<td>" + escapeHtml(amount) + "</td><td>" + evidence + "</td>" +
-      "<td><span class=\"tag v165-status--" + (pay[0] === "APPROVED" ? "done" : pay[0] === "PENDING" ? "pending" : "process") + "\">" + pay[1] + "</span>" + (r.bypass_active ? "<br><small>Bypass aktif</small>" : "") + "</td>" +
+      "<td>" + escapeHtml(amount) + "<br><small>" + escapeHtml(rmDate(r.payment_date)) + "</small></td><td>" + evidence + "<br><small>" + settle + "</small></td>" +
+      "<td><span class=\"tag v165-status--" + (pay[0] === "APPROVED" ? "done" : pay[0] === "PENDING" ? "pending" : "process") + "\">" + pay[1] + "</span>" + (r.bypass_active ? "<br><small>Bypass aktif</small>" : "") + review + "</td>" +
       "<td>" + (none ? "" : "<button type=\"button\" class=\"btn sm\" data-rm=\"detail\" data-jid=\"" + escapeHtml(r.job_id) + "\">Detail</button> ") +
       "<button type=\"button\" class=\"btn sm\" data-rm=\"open\" data-jid=\"" + escapeHtml(r.job_id) + "\">Buka PO &amp; Payment</button></td></tr>";
   }
@@ -4773,16 +4792,22 @@
     let detail = "";
     if (rm.detail && d) {
       const r = d.items.find(function (x) { return x.job_id === rm.detail; });
-      if (r) detail = "<section class=\"flat-notice\" id=\"v3-rm-detail\"><b>Penerimaan " + escapeHtml(r.so_number) + " · cabang " + escapeHtml(r.branch_id) + "</b><ul>" +
-        r.receipts.map(function (x) { return "<li>#" + escapeHtml(x.receipt_id) + " · " + escapeHtml(x.accurate_receipt_number || x.accurate_receipt_id) + " (ID " + escapeHtml(x.accurate_receipt_id) + ") · " + escapeHtml(rmAmount(x.amount)) + " · " + escapeHtml(x.receipt_status) + " · evidence " + (x.evidence_verified ? "terverifikasi" : "belum terverifikasi") + " · " + escapeHtml(x.recorded_at || "Belum terverifikasi") + "</li>"; }).join("") +
-        "</ul><small>Revalidasi, invalidasi, dan bypass tersedia pada panel Payment (Buka PO &amp; Payment).</small></section>";
+      if (r) detail = "<section class=\"flat-notice\" id=\"v3-rm-detail\"><b>Penerimaan " + escapeHtml(r.so_number) + " · cabang " + escapeHtml(r.branch_id) + "</b>" +
+        (r.payment_review_required ? "<p role=\"alert\"><b>Exception keuangan:</b> bukti pembayaran hilang setelah progres produksi — histori fisik tidak dihapus; perlu review berwenang.</p>" : "") +
+        "<p><small>Gate produksi: <b>" + escapeHtml((RM_PAY[r.payment_status] || RM_PAY.pending)[1]) + "</b> · Receipt state: " + escapeHtml(r.financial_receipt_state || "—") + " · Update: " + escapeHtml(rmDate(r.last_updated_at)) + "</small></p><ul>" +
+        r.receipts.map(function (x) { return "<li>#" + escapeHtml(x.receipt_id) + " · " + escapeHtml(x.accurate_receipt_number || x.accurate_receipt_id) + " (ID " + escapeHtml(x.accurate_receipt_id) + ") · " + escapeHtml(rmAmount(x.amount)) + " · bayar " + escapeHtml(rmDate(x.paid_at)) + " · " + escapeHtml(x.receipt_status) + " · evidence " + (x.evidence_verified ? "terverifikasi" : "belum terverifikasi") + " · catat " + escapeHtml(x.recorded_at || "Belum terverifikasi") + "</li>"; }).join("") +
+        "</ul>" + (r.bypasses && r.bypasses.length ? "<b>Riwayat bypass</b><ul>" + r.bypasses.map(function (b) { return "<li>#" + escapeHtml(b.bypass_id) + " · " + (b.active ? "AKTIF" : "dicabut") + " · gate sebelum: " + escapeHtml(b.gate_before || "—") + " · " + escapeHtml(b.reason || "") + " · " + escapeHtml(rmDate(b.created_at)) + (b.revoked_at ? " → cabut " + escapeHtml(rmDate(b.revoked_at)) : "") + "</li>"; }).join("") + "</ul>" : "") +
+        "<small>Invoice/outstanding Accurate tidak ditampilkan karena kontrak alokasi belum ditetapkan. Revalidasi, invalidasi, dan bypass ada di panel Payment.</small></section>";
     }
-    return h("Monitoring Penerimaan Penjualan", "Status pembayaran resmi dari backend Payment Gate; tidak ada simulasi.") +
-      "<div class=\"flat-notice\" id=\"v3-rm-coverage\"><b>Cakupan:</b> hanya PO yang sudah menjadi job V3 (dibuka dari Inbox/Tugas Tim). PO Accurate yang belum menjadi job V3 dicantumkan terpisah di bagian bawah (tanpa membuat job). \"Disetujui\" berarti ada receipt valid dengan evidence terverifikasi; ini bukan penanda lunas (nilai PO tidak dibandingkan). Receipt dibatalkan/reversed tidak dihitung.</div>" +
+    return h("Monitoring Penerimaan Penjualan", "Gate produksi dari Payment Gate V3; terpisah dari status lunas Accurate.") +
+      "<div class=\"flat-notice\" id=\"v3-rm-coverage\"><b>Cakupan:</b> hanya PO yang sudah menjadi job V3. \"Gate terverifikasi\" = ada receipt valid ber-evidence positif — <b>bukan</b> penanda lunas invoice. Outstanding/invoice Accurate tidak dipetakan di V3. Receipt dibatalkan/reversed tidak dihitung. Bypass tidak mengubah outstanding Accurate.</div>" +
       "<form class=\"v36-toolbar\" id=\"v3-rm-form\"><label class=\"v36-search\"><span>⌕</span><input id=\"v3-rm-q\" aria-label=\"Cari PO atau penerimaan\" placeholder=\"No. PO / pelanggan / receipt\" value=\"" + escapeHtml(rm.q) + "\"></label>" +
-      sel("v3-rm-pay", "Status pembayaran", rm.paymentStatus, [["", "Semua"], ["approved", "Disetujui"], ["bypassed", "Bypass"], ["pending", "Belum terverifikasi"]]) +
+      sel("v3-rm-pay", "Gate produksi", rm.paymentStatus, [["", "Semua"], ["approved", "Terverifikasi"], ["bypassed", "Bypass"], ["pending", "Menunggu"]]) +
       sel("v3-rm-has", "Penerimaan", rm.receipts, [["", "Semua"], ["with", "Sudah ada"], ["without", "Belum ada"]]) +
       sel("v3-rm-rs", "Status receipt", rm.receiptStatus, [["", "Semua"], ["valid", "Valid"], ["invalidated", "Dibatalkan"], ["reversed", "Reversed"]]) +
+      sel("v3-rm-review", "Exception", rm.review, [["", "Semua"], ["1", "Perlu review"], ["0", "Tanpa exception"]]) +
+      "<label>Dari <input id=\"v3-rm-from\" type=\"date\" value=\"" + escapeHtml(rm.dateFrom) + "\"></label>" +
+      "<label>Sampai <input id=\"v3-rm-to\" type=\"date\" value=\"" + escapeHtml(rm.dateTo) + "\"></label>" +
       "<button type=\"submit\" class=\"btn sm\">Terapkan</button></form>" + body + detail + unsyncedHtml();
   }
   if (typeof window.v36ReceiptView === "function") {
@@ -4798,6 +4823,9 @@
     rm.paymentStatus = document.getElementById("v3-rm-pay").value;
     rm.receiptStatus = document.getElementById("v3-rm-rs").value;
     rm.receipts = document.getElementById("v3-rm-has").value;
+    rm.review = (document.getElementById("v3-rm-review") || {}).value || "";
+    rm.dateFrom = (document.getElementById("v3-rm-from") || {}).value || "";
+    rm.dateTo = (document.getElementById("v3-rm-to") || {}).value || "";
     rm.page = 1; rm.detail = null; rm.stale = true;
     if (typeof window.render === "function") window.render();
   });

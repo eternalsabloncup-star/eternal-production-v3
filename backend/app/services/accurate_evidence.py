@@ -161,6 +161,9 @@ async def require_valid_receipt(
     ):
         raise HTTPException(409, "Receipt Accurate tidak cocok dengan customer job")
 
+    paid_raw = data.get("paid_at")
+    paid_at = str(paid_raw).strip() if paid_raw not in (None, "") else None
+
     return {
         "verified": True,
         "mode": "gateway",
@@ -171,6 +174,7 @@ async def require_valid_receipt(
         "branch_id": branch_id or None,
         "customer_id": customer_id or None,
         "amount": effective_amount,
+        "paid_at": paid_at,
         "live_verified": bool(data.get("live_verified")),
         "source": data.get("source"),
     }

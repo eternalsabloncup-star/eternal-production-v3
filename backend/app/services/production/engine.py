@@ -530,6 +530,35 @@ async def decide_design(
 # ---- Payment ----
 
 
+def _parse_paid_at(raw) -> datetime | None:
+    """Parse Accurate paid_at when present; never invent a timestamp."""
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=UTC)
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        # Support date-only Accurate transDate and ISO datetimes.
+        if len(text) == 10 and text[4] == "-" and text[7] == "-":
+            text = text + "T00:00:00+00:00"
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+async def _maybe_clear_payment_review(session: AsyncSession, job: ProductionJob) -> None:
+    """Clear review flag only when verified evidence or active bypass reopens the gate."""
+    from app.services.production.payment_gate import effective_status
+
+    if job.payment_review_required and await effective_status(session, job.id) in {
+        "approved",
+        "bypassed",
+    }:
+        job.payment_review_required = False
+
+
 async def revalidate_receipt(session, user, receipt_id, *, reason, idempotency_key):
     """Explicit, fail-closed verification; never revive invalidated evidence."""
     import hashlib
@@ -572,11 +601,17 @@ async def revalidate_receipt(session, user, receipt_id, *, reason, idempotency_k
         row.evidence_verified = True
         row.amount = evidence["amount"]
         row.accurate_receipt_number = evidence.get("accurate_receipt_number")
+        paid = _parse_paid_at(evidence.get("paid_at"))
+        if paid is not None:
+            row.paid_at = paid
         result.update(verified=True, amount=str(row.amount), live_verified=evidence["live_verified"],
-                      source=evidence.get("source"), payload_status=evidence["payload_status"])
+                      source=evidence.get("source"), payload_status=evidence["payload_status"],
+                      paid_at=row.paid_at.isoformat() if row.paid_at else None)
     await session.flush()
     await _refresh_payment_gate(session, job)
-    result.update(payment_status=job.payment_status, before=before)
+    await _maybe_clear_payment_review(session, job)
+    result.update(payment_status=job.payment_status, before=before,
+                  payment_review_required=bool(job.payment_review_required))
     session.add(ProductionEvent(job_id=job.id, event_type="payment_receipt_revalidated",
         actor_user_id=user.id, idempotency_key=key, reason=reason.strip(), payload_json=json.dumps(result)))
     await session.commit()
@@ -631,23 +666,30 @@ async def record_payment_receipt(
             raise HTTPException(409, "Receipt sudah memiliki idempotency key berbeda")
         if idempotency_key and existing.idempotency_key is None:
             existing.idempotency_key = idempotency_key
+        paid = _parse_paid_at(evidence.get("paid_at"))
         if existing.status == "valid" and not existing.evidence_verified:
             existing.amount = evidence["amount"]
             existing.evidence_verified = True
+            if paid is not None:
+                existing.paid_at = paid
             session.add(ProductionEvent(
                 job_id=job.id, event_type="payment_receipt_reverified",
                 idempotency_key=f"pay-reverified:{existing.id}", actor_user_id=user.id,
                 payload_json=json.dumps({"receipt_id": existing.id}),
             ))
+        elif existing.status == "valid" and paid is not None and existing.paid_at is None:
+            existing.paid_at = paid
         await session.flush()
         # Do not revive invalidated evidence on an idempotent replay.
         await _refresh_payment_gate(session, job)
+        await _maybe_clear_payment_review(session, job)
         await session.commit()
         return existing
     row = PaymentReceiptRef(
         job_id=job.id, accurate_receipt_id=rid,
         accurate_receipt_number=evidence.get("accurate_receipt_number"),
         amount=evidence["amount"], evidence_verified=True,
+        paid_at=_parse_paid_at(evidence.get("paid_at")),
         idempotency_key=idempotency_key, status="valid", recorded_by=user.id,
         note=(note or "") + f" | evidence:{evidence['mode']}:{evidence['payload_status']}",
     )
@@ -655,12 +697,14 @@ async def record_payment_receipt(
     try:
         await session.flush()
         await _refresh_payment_gate(session, job)
+        await _maybe_clear_payment_review(session, job)
         await _mark_terproses(session, job)
         session.add(ProductionEvent(
             job_id=job.id, event_type="payment_receipt_verified",
             idempotency_key=f"pay-receipt:{row.id}", actor_user_id=user.id,
             payload_json=json.dumps({"receipt_id": row.id, "accurate_receipt_id": rid,
-                                     "amount": str(row.amount)}),
+                                     "amount": str(row.amount),
+                                     "paid_at": row.paid_at.isoformat() if row.paid_at else None}),
         ))
         await session.commit()
     except IntegrityError as exc:
@@ -676,33 +720,75 @@ async def bypass_payment(
     job: ProductionJob,
     *,
     reason: str,
+    idempotency_key: str | None = None,
 ) -> PaymentBypass:
-    _require(user, P.PAYMENT_BYPASS)
+    # Direktur default mirrors job.cancel — never trust client-supplied role/perms.
+    if not P.user_may_bypass_payment(user):
+        raise HTTPException(
+            403,
+            "Izin production.payment.bypass tidak mencukupi (Direktur atau grant eksplisit)",
+        )
     job = await _lock_payment_job(session, user, job)
     if not reason.strip():
         raise HTTPException(422, "Bypass payment memerlukan alasan")
+    key = idempotency_key.strip() if idempotency_key else None
+    if key is not None and not 8 <= len(key) <= 120:
+        raise HTTPException(422, "Idempotency key tidak valid")
+    from app.services.production.payment_gate import effective_status
+
+    gate_before = await effective_status(session, job.id)
+    if key:
+        existing = await session.scalar(
+            select(PaymentBypass).where(
+                PaymentBypass.job_id == job.id,
+                PaymentBypass.idempotency_key == key,
+            )
+        )
+        if existing is not None:
+            if existing.reason != reason.strip():
+                raise HTTPException(409, "Idempotency key dipakai untuk alasan bypass berbeda")
+            await _refresh_payment_gate(session, job)
+            await _maybe_clear_payment_review(session, job)
+            await session.commit()
+            return existing
     row = PaymentBypass(
         job_id=job.id,
         reason=reason.strip(),
         authorized_by=user.id,
+        idempotency_key=key,
+        gate_before=gate_before,
         active=True,
     )
     session.add(row)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(409, "Idempotency key bypass sudah digunakan") from exc
     await _refresh_payment_gate(session, job)
+    await _maybe_clear_payment_review(session, job)
     await _mark_terproses(session, job)
+    event_key = key or (
+        f"pay-bypass:{job.id}:{user.id}:"
+        f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
+    )
     session.add(
         ProductionEvent(
             job_id=job.id,
             event_type="payment_bypass_authorized",
-            idempotency_key=(
-                f"pay-bypass:{job.id}:{user.id}:"
-                f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
-            ),
+            idempotency_key=f"pay-bypass-event:{event_key}" if key else event_key,
             actor_user_id=user.id,
             reason=reason.strip(),
-            payload_json=(
-                f'{{"permission":"{P.PAYMENT_BYPASS}","actor_user_id":{user.id}}}'
+            payload_json=json.dumps(
+                {
+                    "permission": P.PAYMENT_BYPASS,
+                    "actor_user_id": user.id,
+                    "bypass_id": row.id,
+                    "gate_before": gate_before,
+                    "gate_after": job.payment_status,
+                    "idempotency_key": key,
+                    "accurate_outstanding_unchanged": True,
+                }
             ),
         )
     )
@@ -729,12 +815,25 @@ async def revoke_payment_bypass(
     await session.refresh(row)
     if not row.active:
         raise HTTPException(409, "Bypass sudah dicabut")
+    from app.services.production.payment_gate import (
+        effective_status,
+        job_has_production_progress,
+    )
+
+    gate_before = await effective_status(session, job.id)
+    had_progress = await job_has_production_progress(session, job.id)
     row.active = False
     row.revoked_by = user.id
     row.revoke_reason = reason
     row.revoked_at = datetime.now(UTC)
     await session.flush()
     await _refresh_payment_gate(session, job)
+    gate_after = job.payment_status
+    exception = bool(
+        had_progress and gate_before == "bypassed" and gate_after == "pending"
+    )
+    if exception:
+        job.payment_review_required = True
     session.add(
         ProductionEvent(
             job_id=job.id,
@@ -745,9 +844,16 @@ async def revoke_payment_bypass(
             ),
             actor_user_id=user.id,
             reason=reason.strip(),
-            payload_json=(
-                f'{{"bypass_id":{row.id},"permission":"{P.PAYMENT_REVOKE}",'
-                f'"actor_user_id":{user.id}}}'
+            payload_json=json.dumps(
+                {
+                    "bypass_id": row.id,
+                    "permission": P.PAYMENT_REVOKE,
+                    "actor_user_id": user.id,
+                    "gate_before": gate_before,
+                    "gate_after": gate_after,
+                    "financial_exception": exception,
+                    "payment_review_required": bool(job.payment_review_required),
+                }
             ),
         )
     )
@@ -776,10 +882,27 @@ async def invalidate_receipt(
         await _refresh_payment_gate(session, job)
         await session.commit()
         return row
+    from app.services.production.payment_gate import (
+        effective_status,
+        job_has_production_progress,
+    )
+
+    gate_before = await effective_status(session, job.id)
+    had_progress = await job_has_production_progress(session, job.id)
     row.status = "invalidated"
     row.note = (row.note or "") + f" | invalidated: {reason}"
     await session.flush()
     await _refresh_payment_gate(session, job)
+    gate_after = job.payment_status
+    # Financial exception: production already progressed and gate lost verified evidence.
+    # Never delete or rewrite physical production history.
+    exception = bool(
+        had_progress
+        and gate_before == "approved"
+        and gate_after == "pending"
+    )
+    if exception:
+        job.payment_review_required = True
     # Append-only audit event (never silent overwrite).
     session.add(
         ProductionEvent(
@@ -788,12 +911,41 @@ async def invalidate_receipt(
             idempotency_key=f"pay-invalidate:{row.id}:{int(datetime.now(UTC).timestamp())}",
             actor_user_id=user.id,
             reason=reason.strip(),
-            payload_json=(
-                f'{{"receipt_id":{row.id},"accurate_receipt_id":'
-                f'"{row.accurate_receipt_id}"}}'
+            payload_json=json.dumps(
+                {
+                    "receipt_id": row.id,
+                    "accurate_receipt_id": row.accurate_receipt_id,
+                    "gate_before": gate_before,
+                    "gate_after": gate_after,
+                    "financial_exception": exception,
+                    "payment_review_required": bool(job.payment_review_required),
+                    "physical_history_preserved": True,
+                }
             ),
         )
     )
+    if exception:
+        session.add(
+            ProductionEvent(
+                job_id=job.id,
+                event_type="payment_financial_exception",
+                idempotency_key=(
+                    f"pay-fin-exc:{row.id}:{int(datetime.now(UTC).timestamp())}"
+                ),
+                actor_user_id=user.id,
+                reason=reason.strip(),
+                payload_json=json.dumps(
+                    {
+                        "receipt_id": row.id,
+                        "requires_authorized_review": True,
+                        "note": (
+                            "Verified payment lost after production progress; "
+                            "physical output/SJ/POD history unchanged"
+                        ),
+                    }
+                ),
+            )
+        )
     await session.commit()
     await session.refresh(row)
     return row
@@ -3545,6 +3697,8 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
             "urgent_state": job.urgent_state,
             "design_status": job.design_status,
             "payment_status": payment_status,
+            "production_approval_status": payment_status,
+            "payment_review_required": bool(getattr(job, "payment_review_required", False)),
             "sample_status": job.sample_status,
             "processing_status": job.processing_status,
             "lifecycle_status": job.lifecycle_status or "active",
@@ -3571,7 +3725,10 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                 "accurate_receipt_id": r.accurate_receipt_id,
                 "accurate_receipt_number": r.accurate_receipt_number,
                 "amount": str(r.amount) if r.amount is not None else None,
+                "paid_at": r.paid_at.isoformat() if getattr(r, "paid_at", None) else None,
+                "evidence_verified": bool(r.evidence_verified),
                 "status": r.status,
+                "recorded_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in receipts
         ],
@@ -3580,7 +3737,12 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                 "id": b.id,
                 "reason": b.reason,
                 "active": b.active,
+                "gate_before": getattr(b, "gate_before", None),
+                "idempotency_key": getattr(b, "idempotency_key", None),
+                "authorized_by": b.authorized_by,
+                "created_at": b.created_at.isoformat() if b.created_at else None,
                 "revoke_reason": b.revoke_reason,
+                "revoked_at": b.revoked_at.isoformat() if b.revoked_at else None,
             }
             for b in bypasses
         ],
@@ -4291,16 +4453,21 @@ async def list_payment_receipts(
     receipt_status: str | None = None,
     receipts: str | None = None,
     branch: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    review_required: bool | None = None,
     page: int = 1,
     page_size: int = 25,
 ) -> dict:
     """Per-PO payment monitor: one row per job (with or without receipts), read-only.
 
     Derived from PaymentReceiptRef/PaymentBypass through the existing payment gate; no ledger copy.
+    Invoice outstanding / fully-paid settlement is intentionally null until Accurate
+    receivable allocation is an Owner-approved contract.
     """
     _require(user, P.JOB_READ)
     from app.authorization.workflow import branch_allowed
-    from app.services.production.payment_gate import status_expression
+    from app.services.production.payment_gate import monitor_financial_fields, status_expression
 
     page = max(1, int(page))
     page_size = min(100, max(1, int(page_size)))
@@ -4316,6 +4483,8 @@ async def list_payment_receipts(
                 PaymentReceiptRef.evidence_verified.is_(True),
                 PaymentReceiptRef.amount > 0,
             ).label("verified_amount"),
+            func.max(PaymentReceiptRef.paid_at).label("latest_paid_at"),
+            func.max(PaymentReceiptRef.created_at).label("latest_receipt_at"),
         )
         .group_by(PaymentReceiptRef.job_id)
         .subquery()
@@ -4326,7 +4495,14 @@ async def list_payment_receipts(
     if branch:
         allowed = [b for b in allowed if b == branch]
     base = (
-        select(ProductionJob, st.c.payment_status, count_col.label("receipt_count"), agg.c.verified_amount)
+        select(
+            ProductionJob,
+            st.c.payment_status,
+            count_col.label("receipt_count"),
+            agg.c.verified_amount,
+            agg.c.latest_paid_at,
+            agg.c.latest_receipt_at,
+        )
         .join(st, st.c.job_id == ProductionJob.id)
         .outerjoin(agg, agg.c.job_id == ProductionJob.id)
         .where(ProductionJob.branch_id.in_(allowed or [""]))
@@ -4343,6 +4519,21 @@ async def list_payment_receipts(
             .where(PaymentReceiptRef.job_id == ProductionJob.id, PaymentReceiptRef.status == receipt_status)
             .exists()
         )
+    if review_required is True:
+        base = base.where(ProductionJob.payment_review_required.is_(True))
+    elif review_required is False:
+        base = base.where(ProductionJob.payment_review_required.is_(False))
+    # Date filter uses Accurate paid_at when present, else local receipt recorded_at.
+    if date_from is not None or date_to is not None:
+        day_expr = func.coalesce(PaymentReceiptRef.paid_at, PaymentReceiptRef.created_at)
+        date_exists = select(PaymentReceiptRef.id).where(
+            PaymentReceiptRef.job_id == ProductionJob.id
+        )
+        if date_from is not None:
+            date_exists = date_exists.where(day_expr >= date_from)
+        if date_to is not None:
+            date_exists = date_exists.where(day_expr <= date_to)
+        base = base.where(date_exists.exists())
     term = (q or "").strip()
     if term:
         like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
@@ -4363,40 +4554,68 @@ async def list_payment_receipts(
     )).all()
     job_ids = [job.id for job, *_ in rows]
     by_job: dict[int, list] = {}
+    bypass_by_job: dict[int, list] = {}
     bypassed: set[int] = set()
     if job_ids:
         for r in (await session.scalars(
             select(PaymentReceiptRef).where(PaymentReceiptRef.job_id.in_(job_ids)).order_by(PaymentReceiptRef.id.desc())
         )).all():
             by_job.setdefault(r.job_id, []).append(r)
-        bypassed = set((await session.scalars(
-            select(PaymentBypass.job_id).where(PaymentBypass.job_id.in_(job_ids), PaymentBypass.active.is_(True))
-        )).all())
-    items = [
-        {
-            "job_id": job.id,
-            "so_number": job.accurate_so_number,
-            "customer_name": job.customer_name,
-            "branch_id": job.branch_id,
-            "payment_status": status,
-            "bypass_active": job.id in bypassed,
-            "receipt_count": int(count),
-            "verified_amount": str(verified) if verified is not None else None,
-            "receipts": [
-                {
-                    "receipt_id": r.id,
-                    "accurate_receipt_id": r.accurate_receipt_id,
-                    "accurate_receipt_number": r.accurate_receipt_number,
-                    "amount": str(r.amount) if r.amount is not None else None,
-                    "receipt_status": r.status,
-                    "evidence_verified": bool(r.evidence_verified),
-                    "recorded_at": r.created_at.isoformat() if r.created_at else None,
-                }
-                for r in by_job.get(job.id, [])
-            ],
-        }
-        for job, status, count, verified in rows
-    ]
+        for b in (await session.scalars(
+            select(PaymentBypass).where(PaymentBypass.job_id.in_(job_ids)).order_by(PaymentBypass.id.desc())
+        )).all():
+            bypass_by_job.setdefault(b.job_id, []).append(b)
+            if b.active:
+                bypassed.add(b.job_id)
+    items = []
+    for job, status, count, verified, latest_paid_at, latest_receipt_at in rows:
+        verified_s = str(verified) if verified is not None else None
+        fin = monitor_financial_fields(verified_amount=verified_s, payment_status=status)
+        latest_bypass = next((b.created_at for b in bypass_by_job.get(job.id, []) if b.active), None)
+        last_parts = [t for t in (latest_paid_at, latest_receipt_at, latest_bypass, job.updated_at) if t]
+        last_updated = max(last_parts).isoformat() if last_parts else None
+        items.append(
+            {
+                "job_id": job.id,
+                "so_number": job.accurate_so_number,
+                "customer_name": job.customer_name,
+                "branch_id": job.branch_id,
+                "payment_status": status,
+                "bypass_active": job.id in bypassed,
+                "payment_review_required": bool(getattr(job, "payment_review_required", False)),
+                "receipt_count": int(count),
+                "verified_amount": verified_s,
+                "payment_date": latest_paid_at.isoformat() if latest_paid_at else None,
+                "last_updated_at": last_updated,
+                **fin,
+                "receipts": [
+                    {
+                        "receipt_id": r.id,
+                        "accurate_receipt_id": r.accurate_receipt_id,
+                        "accurate_receipt_number": r.accurate_receipt_number,
+                        "amount": str(r.amount) if r.amount is not None else None,
+                        "paid_at": r.paid_at.isoformat() if getattr(r, "paid_at", None) else None,
+                        "receipt_status": r.status,
+                        "evidence_verified": bool(r.evidence_verified),
+                        "recorded_at": r.created_at.isoformat() if r.created_at else None,
+                    }
+                    for r in by_job.get(job.id, [])
+                ],
+                "bypasses": [
+                    {
+                        "bypass_id": b.id,
+                        "active": b.active,
+                        "reason": b.reason,
+                        "gate_before": getattr(b, "gate_before", None),
+                        "authorized_by": b.authorized_by,
+                        "created_at": b.created_at.isoformat() if b.created_at else None,
+                        "revoked_at": b.revoked_at.isoformat() if b.revoked_at else None,
+                        "revoke_reason": b.revoke_reason,
+                    }
+                    for b in bypass_by_job.get(job.id, [])
+                ],
+            }
+        )
     return {"items": items, "total": total, "page": page, "page_size": page_size,
             "has_more": page * page_size < total}
 

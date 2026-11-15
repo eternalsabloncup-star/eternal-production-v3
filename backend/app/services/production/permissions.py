@@ -32,6 +32,8 @@ JOB_CREATE = "production.job.create"
 JOB_CANCEL = "production.job.cancel"
 # Default cancel grant: Direktur only. Other roles need explicit permissions JSONB.
 JOB_CANCEL_DEFAULT_ROLES: frozenset[str] = frozenset({"direktur", "director"})
+# Default payment bypass grant: Direktur only. Other roles need explicit grant.
+PAYMENT_BYPASS_DEFAULT_ROLES: frozenset[str] = frozenset({"direktur", "director"})
 PREP_SCREENER = "production.prep.screener"
 PREP_HELPER = "production.prep.helper"
 PAYROLL_MANAGE = "production.payroll.manage"
@@ -134,6 +136,10 @@ def is_job_cancel_default_role(role: str | None) -> bool:
     return normalize_role_id(role) in JOB_CANCEL_DEFAULT_ROLES
 
 
+def is_payment_bypass_default_role(role: str | None) -> bool:
+    return normalize_role_id(role) in PAYMENT_BYPASS_DEFAULT_ROLES
+
+
 def user_may_cancel_job(user) -> bool:
     """Least privilege: explicit grant OR Direktur default. Never invents grants."""
     from app.authorization.workflow import context
@@ -156,6 +162,32 @@ def user_may_cancel_job(user) -> bool:
     return is_job_cancel_default_role(getattr(user, "role", None))
 
 
+def user_may_bypass_payment(user) -> bool:
+    """Least privilege: explicit grant OR Direktur default. Same shape as job.cancel.
+
+    Role is taken only from the authenticated server-side User row / managed
+    access context — never from client-supplied request fields.
+    """
+    from app.authorization.workflow import context
+
+    ctx = context(user)
+    if ctx is not None:
+        access = getattr(ctx, "access", None)
+        if access is not None and getattr(access, "director", False):
+            return True
+        # Catalog capability (enforced ScopedGrant) — not production.* JSONB.
+        if getattr(ctx, "capability", None) == "payment.bypass.create":
+            return True
+        return bool(getattr(ctx, "can", lambda _c: False)("payment.bypass.create"))
+    access = getattr(user, "_managed_access", None)
+    if access is not None and getattr(access, "director", False):
+        return True
+    perms = set(user.permissions or [])
+    if PAYMENT_BYPASS in perms or "payment.bypass" in perms:
+        return True
+    return is_payment_bypass_default_role(getattr(user, "role", None))
+
+
 def permission_catalog_payload() -> dict:
     return {
         "permissions": [dict(row) for row in PERMISSION_CATALOG],
@@ -166,6 +198,12 @@ def permission_catalog_payload() -> dict:
             "code": JOB_CANCEL,
             "default_roles": sorted(JOB_CANCEL_DEFAULT_ROLES),
             "note": "Direktur default; other roles require explicit grant",
+        },
+        "payment_bypass": {
+            "code": PAYMENT_BYPASS,
+            "default_roles": sorted(PAYMENT_BYPASS_DEFAULT_ROLES),
+            "note": "Direktur default (legacy role / enforced system director); "
+            "other roles require explicit grant",
         },
         "loading_return": {
             "request_code": DELIVERY_LOADING_RETURN_REQUEST,
