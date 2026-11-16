@@ -4233,6 +4233,7 @@
     // Live V3 must not depend on Accurate Inbox success (isLiveInbox).
     return !isPreviewFixture();
   }
+  window.isLiveRuntime = isLiveRuntime;
 
   (function patchLiveScheduleSource() {
     const prevScheduleColorRows = window.scheduleColorRows;

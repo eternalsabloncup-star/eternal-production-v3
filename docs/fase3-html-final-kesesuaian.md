@@ -3,11 +3,11 @@
 **Diperbarui:** 2026-11-16 (Asia/Jakarta)
 **Repository:** `eternalsabloncup-star/eternal-production-v3`
 **Branch:** `cursor/epv3-production-schedule-83bf`
-**HEAD committed (pra-checkpoint):** `8636b1f83962bf0e4d0c6892e0ba5410c3aba9c1`
+**HEAD committed:** `a034a6f57e5e445907d3d96ba761983c95a5bcf6`
 **Checkpoint Git (Master Cabang):** lihat SHA commit `feat(settings): add audited production branch management`
 **Checkpoint:** Fase 3 **PARSIAL** (bukan COMPLETE); Production **legacy**; target Final = **enforced**
 **PR #15:** OPEN · **PR #14:** HOLD
-**Dokumen:** `fase3-master-cabang-rancangan.md`, `fase3-e2e-enam-role-rencana.md`, `fase3-permission-role-matrix.md`
+**Dokumen:** `fase3-master-cabang-rancangan.md`, `fase3-e2e-enam-role-hasil.md`, `fase3-permission-role-matrix.md`
 
 Acuan: Handoff Final + Backend V3 PostgreSQL. Klaim COMPLETE / 100% **dilarang**.
 
@@ -17,11 +17,11 @@ Acuan: Handoff Final + Backend V3 PostgreSQL. Klaim COMPLETE / 100% **dilarang**
 
 | Kategori | Jumlah | Keterangan |
 |----------|--------|------------|
-| SELESAI* | **24** | +1 Master Cabang PostgreSQL CRUD lokal |
-| PARSIAL | **12** | — |
+| SELESAI* | **25** | +1 Tugas Tim 6 role browser mutasi (disposable) |
+| PARSIAL | **11** | — |
 | BLOCKED / BELUM ADA | **3** | SJ list-all, enforced Live, reskin penuh |
 | **Total** | **39** | |
-| **% SELESAI*** | **≈ 62%** (24/39) | |
+| **% SELESAI*** | **≈ 64%** (25/39) | |
 | **% SELESAI*+PARSIAL** | **≈ 92%** (36/39) | |
 
 | Modul | Status | Bukti |
@@ -35,7 +35,7 @@ Acuan: Handoff Final + Backend V3 PostgreSQL. Klaim COMPLETE / 100% **dilarang**
 | Users/Grup/Grant/Audit + packs | SELESAI* | sandbox enforced |
 | Master Pengaturan agregat | PARSIAL→tinggi | Cabang writable lokal; Live apply BLOCKED |
 | Master Cabang writable | SELESAI* (lokal) | migrasi 0017 + CRUD + UI + tes; Live apply BLOCKED |
-| Tugas Tim 6 role | PARSIAL→tinggi | 6 role + label; mutasi API E2E browser belum diklaim |
+| Tugas Tim 6 role | SELESAI* (disposable) | API 30/30 + browser 11/11 PASS_MUTATION (Kerjakan→data-v3→DB→audit); Live Accurate tetap terpisah |
 | Inbox Accurate | PARSIAL | 403 tanpa gateway |
 | Accurate SJ list-all | BLOCKED | gateway by-id only |
 | Enforced Production | BLOCKED | approval + grant Live |
@@ -73,7 +73,8 @@ Fondasi terintegrasi di #15. Uji sandbox PASS (termasuk deny branch.manage non-D
 | Backend production+authz focused | PASS (300) |
 | Browser smoke | lihat laporan run |
 | `git diff --check` | PASS setelah koreksi doc |
-| E2E mutasi 6 role browser | NOT RUN / tidak diklaim |
+| E2E API 6 role mutasi | PASS (30 skenario) |
+| E2E browser 6 role klik | PASS_CLICK_NO_MUTATE (bukan PASS_MUTATE) |
 
 ### Keputusan masih diperlukan
 

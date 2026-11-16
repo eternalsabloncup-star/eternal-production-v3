@@ -974,9 +974,14 @@ async def _resolve_operator(
     from app.authorization.service import load_access
 
     scoped = False
+    # Nested savepoint: load_access may fail (missing auth tables / shadow probe)
+    # without poisoning the outer schedule transaction used by legacy fallback.
     try:
-        access = await load_access(session, target.id, lock=False)
-        scoped = evaluate(access, "output.record", Resource(job.branch_id, None)).allowed
+        async with session.begin_nested():
+            access = await load_access(session, target.id, lock=False)
+            scoped = evaluate(
+                access, "output.record", Resource(job.branch_id, None)
+            ).allowed
     except Exception:
         scoped = False
     legacy = (

@@ -1,6 +1,6 @@
 # Rencana E2E Enam Role — Fase 3 (belum dieksekusi mutasi)
 
-**Status:** RENCANA — mutasi browser/API per role **belum diklaim PASS**
+**Status:** API mutasi 6 role **PASS** (lihat `fase3-e2e-enam-role-hasil.md`); browser klik **PASS_CLICK_NO_MUTATE** (mutasi UI belum diklaim)
 **Kebijakan:** DB disposable saja · ProductionJob nyata · NO LIVE WRITES · authz Production = legacy
 **Acuan packs:** `app/authorization/role_packs.py` · matriks 24/12/3
 

@@ -9,7 +9,10 @@ describe('Tugas Tim Kerjakan + workflow focus', () => {
     expect(html).toContain('function taskActionLabel');
     expect(html).toContain('isOfficialTasksLive()&&x&&x.t&&x.t.verb');
     expect(html).toContain('data-task-action="kerjakan"');
-    expect(html).toMatch(/taskKind:type/);
+    // Kerjakan routes to Panel V3 even when Accurate inbox belum live (v3-auth-ok / isLiveRuntime).
+    expect(html).toContain('v3-auth-ok');
+    expect(html).toMatch(/taskKind:kind/);
+    expect(html).toContain("window.v3OpenWorkflow(id,{intent:kind||'detail',taskKind:kind,focus:focus})");
   });
 
   it('opens workflow with taskKind focus map for sample/loading/driver', () => {

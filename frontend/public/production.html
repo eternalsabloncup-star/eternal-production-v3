@@ -2912,10 +2912,27 @@ taskGroupId=function(t){if(isOfficialTasksLive())return t.group||t.id;return t.g
 taskEntry=function(o,t){if(isOfficialTasksLive()){const row=(window.__V3_OFFICIAL_TASKS__||[]).find(x=>x.o.id===o.id&&x.t.id===t.id);return row?row.e:{status:'Menunggu',note:'',updated:'V3',qty:0,file:''}}return flow31Entry(o,t)};
 taskStatus=function(o,t){if(isOfficialTasksLive()){const row=(window.__V3_OFFICIAL_TASKS__||[]).find(x=>x.o.id===o.id&&x.t.id===t.id);return row?row.status:'Menunggu'}return flow31TaskState(o,t)};
 // one detail renderer per task kind; no secondary saveTask() mutation.
-openTask=function(id,type){const o=orders.find(x=>x.id===id&&!x.deleted);if(!o){
- if(isLiveInbox()&&typeof window.v3OpenWorkflow==='function'){window.v3OpenWorkflow(id,{intent:type||'detail',taskKind:type||null});return}
- return}
- if(isLiveInbox()){if(typeof window.v3OpenWorkflow==='function'){window.v3OpenWorkflow(id,{intent:type||'detail',taskKind:type||null});return}toast('Panel V3 belum siap');return}
+// Live V3 / official tasks: always open Panel V3 (jangan fallback demo meski Inbox Accurate belum live).
+openTask=function(id,type){
+ const useV3Panel=(isOfficialTasksLive()||isLiveInbox()||(typeof window.isLiveRuntime==='function'&&window.isLiveRuntime())||document.documentElement.classList.contains('v3-auth-ok'))&&typeof window.v3OpenWorkflow==='function';
+ if(useV3Panel){
+  const kind=type||null;
+  let focus=null;
+  const rows=window.__V3_OFFICIAL_TASKS__||[];
+  const hit=rows.find(x=>x&&x.o&&x.o.id===id&&x.t&&x.t.id===kind)||rows.find(x=>x&&x.o&&x.o.id===id);
+  if(hit&&hit.official){
+   focus={
+    jobId:hit.official.job_id,
+    lineId:hit.official.so_line_id!=null?String(hit.official.so_line_id):'',
+    assignmentId:hit.official.assignment_id!=null?String(hit.official.assignment_id):null
+   };
+  }else if(hit&&hit.o&&hit.o.v3JobId!=null){
+   focus={jobId:hit.o.v3JobId,lineId:'',assignmentId:null};
+  }
+  window.v3OpenWorkflow(id,{intent:kind||'detail',taskKind:kind,focus:focus});
+  return;
+ }
+ const o=orders.find(x=>x.id===id&&!x.deleted);if(!o){return}
  const q=flow31Parse(type),kind=q.kind,lineId=q.lineId,l=flow31Line(o,lineId),src=flow31LineSource(o,lineId),title=flow31TaskNames[kind]||kind;const current=flow31TaskState(o,{kind,lineId});const blocked=current==='Menunggu';let fields='';const readonly=`<p class="flow31-notice">${blocked?'Tugas belum memenuhi gate. Selesaikan tahap sebelumnya.':'Tugas mengikuti bukti dari ledger produksi V1; tidak bisa melewati tahap dengan mengganti status manual.'}</p>`;
  if(kind==='design'||kind==='sample')fields=`<label>File ${kind==='design'?'desain':'sampel'} (nama file demo)<input type="file" id="flow31-file" accept=".pdf,.png,.jpg,.jpeg,.svg,.ai,.cdr"></label><small>File demo hanya menyimpan nama, bukan isi file.</small>`;
  if(kind==='schedule')fields=`<div class="flow31-scroll"><table class="flow31-grid"><thead><tr><th>Operator</th><th>Warna ke</th><th>Ukuran Screen</th><th>Tanggal</th><th>Lot</th><th>Qty Target</th><th>Selesai</th></tr></thead><tbody>${l.schedule.map(a=>`<tr><td>${escape(a.operator)}</td><td>${a.colorIndex}</td><td>${a.screenSize}</td><td>${a.date}</td><td>${escape(a.lotId||'LOT-01')}</td><td>${fmt(a.qty)}</td><td>${fmt(l.output.filter(x=>x.assignmentId===a.id).reduce((s,x)=>s+x.qty,0))}</td></tr>`).join('')||'<tr><td colspan="7">Belum ada operator dijadwalkan</td></tr>'}</tbody></table></div><div class="flow31-gridform"><label>Nama Operator<input id="flow31-operator" placeholder="Bima"></label><label>Warna<select id="flow31-color">${(o.inkColors||[{order:1,name:'Warna 1'}]).map(c=>`<option value="${c.order}">${c.order} — ${escape(c.name)}</option>`).join('')}</select></label><label>Ukuran Screen<select id="flow31-size"><option>Kecil</option><option>Besar</option></select></label><label>Tanggal<input id="flow31-date" type="date" value="2026-11-10"></label><label>Lot<input id="flow31-lot" value="LOT-01" placeholder="LOT-01"></label><label>Target Qty<input id="flow31-qty" type="number" min="1" placeholder="Qty"></label></div><p>Tambah operator sebanyak diperlukan; setiap warna/lot memiliki alokasi tersendiri. Tidak menggunakan jadwal mesin.</p>`;
