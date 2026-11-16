@@ -3,8 +3,8 @@
 **Diperbarui:** 2026-11-16 (Asia/Jakarta)
 **Repository:** `eternalsabloncup-star/eternal-production-v3`
 **Branch:** `cursor/epv3-production-schedule-83bf`
-**HEAD committed:** `a034a6f57e5e445907d3d96ba761983c95a5bcf6`
-**Checkpoint Git (Master Cabang):** lihat SHA commit `feat(settings): add audited production branch management`
+**HEAD committed:** `d110f5fb3b63605ca4e0ecada36c701cc732f6da`
+**Checkpoint:** sticky Output idempotency + enforced browser harness (PR #15)
 **Checkpoint:** Fase 3 **PARSIAL** (bukan COMPLETE); Production **legacy**; target Final = **enforced**
 **PR #15:** OPEN · **PR #14:** HOLD
 **Dokumen:** `fase3-master-cabang-rancangan.md`, `fase3-e2e-enam-role-hasil.md`, `fase3-permission-role-matrix.md`
@@ -17,8 +17,8 @@ Acuan: Handoff Final + Backend V3 PostgreSQL. Klaim COMPLETE / 100% **dilarang**
 
 | Kategori | Jumlah | Keterangan |
 |----------|--------|------------|
-| SELESAI* | **25** | +1 Tugas Tim 6 role browser mutasi (disposable) |
-| PARSIAL | **11** | — |
+| SELESAI* | **25** | Tugas Tim disposable diperkuat (legacy 11/11 + enforced 14/14); hitungan modul Final tidak naik karena Live enforced tetap BLOCKED |
+| PARSIAL | **11** | tidak ada modul PARSIAL yang ditutup penuh putaran ini |
 | BLOCKED / BELUM ADA | **3** | SJ list-all, enforced Live, reskin penuh |
 | **Total** | **39** | |
 | **% SELESAI*** | **≈ 64%** (25/39) | |
@@ -32,13 +32,13 @@ Acuan: Handoff Final + Backend V3 PostgreSQL. Klaim COMPLETE / 100% **dilarang**
 | Jadwal sheet multi-op / HOLD / filter | PARSIAL→tinggi | smoke buckets + sticky; parity kolom Final belum penuh |
 | Kontrol qty | SELESAI* | KPI + Status Kerja |
 | Jadwal Pengiriman SJ-centric | PARSIAL→tinggi | FE+API; Accurate list-all BLOCKED |
-| Users/Grup/Grant/Audit + packs | SELESAI* | sandbox enforced |
+| Users/Grup/Grant/Audit + packs | SELESAI* | sandbox enforced + browser enforced ScopedGrant seed |
 | Master Pengaturan agregat | PARSIAL→tinggi | Cabang writable lokal; Live apply BLOCKED |
 | Master Cabang writable | SELESAI* (lokal) | migrasi 0017 + CRUD + UI + tes; Live apply BLOCKED |
-| Tugas Tim 6 role | SELESAI* (disposable) | API 30/30 + browser 11/11 PASS_MUTATION (Kerjakan→data-v3→DB→audit); Live Accurate tetap terpisah |
+| Tugas Tim 6 role | SELESAI* (disposable) | API 30/30; browser legacy 11/11; **browser enforced 14/14** + sticky Output idem (1 event / 409 replay); Live Accurate + Live enforced tetap terpisah |
 | Inbox Accurate | PARSIAL | 403 tanpa gateway |
 | Accurate SJ list-all | BLOCKED | gateway by-id only |
-| Enforced Production | BLOCKED | approval + grant Live |
+| Enforced Production | BLOCKED | approval + grant Live — disposable enforced E2E **bukan** aktivasi Production |
 | Reskin HTML Final penuh | BLOCKED | disengaja |
 | Browser smoke gap | SELESAI* / jalankan ulang | cabang baca-saja untuk kepala; writable untuk Direktur |
 

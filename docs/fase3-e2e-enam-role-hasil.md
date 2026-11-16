@@ -1,107 +1,75 @@
 # Hasil E2E Enam Role — Fase 3
 
-**Tanggal:** 2026-11-16 (Asia/Jakarta)  
-**HEAD committed:** `a034a6f57e5e445907d3d96ba761983c95a5bcf6`  
-**Mode:** NO COMMIT · DB disposable · Production authz **legacy** · enforced hanya sandbox terpisah  
-**Urutan kontrak backend (terbukti):** design → payment → schedule → screener → helper → sample → sample decide → output → helper-verify → packing → loading → POD  
-(Schedule sebelum payment/design = **409**)
+**Tanggal:** 2026-11-16 (Asia/Jakarta)
+**HEAD committed:** `d110f5fb3b63605ca4e0ecada36c701cc732f6da`
+**Checkpoint:** sticky Output idempotency + harness enforced browser (PR #15)
+**Mode:** checkpoint commit · DB disposable · Production authz **tidak** diaktifkan enforced
+**Urutan kontrak backend (terbukti):** design → payment → schedule → screener → helper → sample → sample decide → output → helper-verify → packing → loading → POD
 
 ## Ringkasan
 
 | Lapisan | Hasil |
 |---------|-------|
 | API mutasi 6 role + deny + qty + tracking | **30/30 PASS** (`test_fase3_e2e_six_role_workflow.py`) |
-| Browser mutasi UI Kerjakan→`data-v3`→HTTP→DB→audit | **11/11 PASS_MUTATION** (`scripts/fase3_e2e_browser_mutation.mjs`) |
-| Browser click-only (baseline lama) | 6/6 PASS_CLICK_NO_MUTATE (digantikan klaim mutasi di atas) |
+| Browser mutasi UI (legacy disposable `:8013`) | **11/11 PASS_MUTATION** (baseline dipertahankan) |
+| Browser mutasi UI **enforced** (`:8014`) | **14/14 PASS_MUTATION** (`scripts/fase3_e2e_browser_enforced.mjs`) |
+| Output sticky idempotency (browser + DB) | **PASS** — 1 event qty=40; double-click/retry tanpa POST kedua; replay key → **409**, count tetap 1 |
 | Enforced Production Live | **TIDAK diaktifkan** |
-| Browser enforced | **NOT_RUN** — butuh seed ScopedGrant per aksi; cover via pytest packs |
 | Accurate write / SJ list-all | **BLOCKED** (kontrak) |
 
-Artifact: `/tmp/epv3-fase3-e2e-six-role-results.json`, `/tmp/epv3-fase3-e2e-browser-mutation.json`
+Artifact: `/tmp/epv3-e2e-enforced-run.log`, `/tmp/epv3-e2e-8014.log`
 
-## Browser mutasi (bukti interaksi pengguna)
+## Browser enforced (bukti)
 
-Jalur wajib: LOGIN → Tugas Tim → Kerjakan / Panel V3 → submit `data-v3` → HTTP 2xx → refresh/DB → audit.  
-Fixture Accurate SJ hanya stub di server disposable `:8013` — aksi utama dari klik UI.
+**Auth mode aktual login:** `workflow_authorization=enforced`, `settings_enabled=true`.
+**DB:** disposable PostgreSQL eksklusif (`epv3_e2e_enf_*_test`), `APP_ENV=test`.
+**ScopedGrant:** ROLE_PACKS per role test di `branch-a` saja; `e2e.nogrant` tanpa grant; `e2e.wrongbranch` grant `branch-b` saja. Direktur = bootstrap Director Full Access. Tidak ada auto-grant ke user existing.
 
-| Role | Aksi UI | HTTP | DB Before/After | Audit | Refresh | Verdict |
-|------|---------|------|-----------------|-------|---------|---------|
-| Designer | Kerjakan Upload desain → `design-upload` | 200 | versions 0→1 (status job pending hingga bypass) | versi desain | status tugas Selesai | PASS_MUTATION |
-| Direktur | `design-bypass` + `pay-bypass` | 200/200 | design/payment → bypassed | ya | ya | PASS_MUTATION |
-| Kepala Produksi | Kerjakan Atur jadwal → `asg-create` | 200 | assignment_id=1 | ya | ya | PASS_MUTATION |
-| Screener | Kerjakan → `prep-screen` | 200 | prep_screener | ya | ya | PASS_MUTATION |
-| Helper | Kerjakan → `prep-helper` | 200 | prep_helper | ya | ya | PASS_MUTATION |
-| Operator | Kerjakan → `sample-upload` | 200 | sample pending | ya | ya | PASS_MUTATION |
-| Kepala Produksi | `sample-approve` | 200 | sample approved | ya | ya | PASS_MUTATION |
-| Operator | Kerjakan → `out-confirm` qty 40 | 200 | output_confirmed qty=40 | ya | ya | PASS_MUTATION |
-| Helper | `out-helper-verify` + `pack` | 200/200 | output_helper_verified, packing_batch | ya | ya | PASS_MUTATION |
-| Driver | Kerjakan → `load-authority` + `load` + `pod` | 200/200/200 | packing_batch, loading, pod | ya | ya | PASS_MUTATION |
-| Designer | `pay-bypass` tanpa izin | 403 | unchanged | deny | ya | PASS_MUTATION |
+| Role | Aksi UI | HTTP | DB / efek | Verdict |
+|------|---------|------|-----------|---------|
+| System | Login | 200 | `system_director=true`, mode enforced | PASS_MUTATION |
+| Designer | Upload desain | 200 | versions 0→1 | PASS_MUTATION |
+| Direktur | design-bypass + pay-bypass | 200/200 | design/payment bypassed | PASS_MUTATION |
+| Kepala Produksi | Assignment | 200 | assignment_id=1 | PASS_MUTATION |
+| Screener | Prep screen | 200 | prep_screener | PASS_MUTATION |
+| Helper | Prep helper | 200 | prep_helper | PASS_MUTATION |
+| Operator | Sample upload | 200 | sample pending | PASS_MUTATION |
+| Kepala Produksi | Sample approve | 200 | sample approved | PASS_MUTATION |
+| Operator | Output + sticky idem | 200 / short-circuit / short-circuit | events=1; qty=40 | PASS_MUTATION |
+| Helper | Verify + packing | 200/200 | helper_verified, packing_batch | PASS_MUTATION |
+| Driver | load-authority + load + POD | 200/200/200 | loading, pod | PASS_MUTATION |
+| NoGrant | GET job | 403 | Capability denied: job.read | PASS_MUTATION |
+| WrongBranch | GET job branch-a | 403 | Resource scope denied | PASS_MUTATION |
+| Designer | pay-bypass | 403 | ditolak | PASS_MUTATION |
 
-Catatan: verifikasi tracking untuk role tanpa `tracking.read` memakai token Kepala (bukti DB), sementara mutasi tetap dari sesi role terkait di browser.
+Tidak ada fallback legacy: server di-boot dengan `V3_WORKFLOW_AUTHORIZATION=enforced`; login body mengonfirmasi mode yang sama.
 
-## Matriks skenario API
+## Idempotency Output UI
 
-| Role | Aksi | Endpoint | Permission | HTTP | DB / efek | Audit | Browser | Verdict |
-|------|------|----------|------------|------|-----------|-------|---------|---------|
-| Direktur | create job | POST `/jobs` | job.create | 200 | job id ada | — | — | PASS |
-| Kepala | schedule sebelum gate | POST `.../schedule/assignments` | schedule.manage | 409 | tidak berubah | gate | — | PASS |
-| Cabang B | baca job A | GET `/jobs/{id}` | job.read salah cabang | 403 | — | — | — | PASS |
-| Designer | schedule | POST schedule | — | 403 | — | — | — | PASS |
-| Designer | upload desain | POST `.../design/versions` | design.upload | 200 | design pending | — | **PASS_MUTATION** | PASS |
-| Direktur | design bypass | POST design decision | design.bypass | 200 | design bypassed | — | **PASS_MUTATION** | PASS |
-| Operator | payment bypass | POST `.../payment/bypass` | — | 403 | — | — | deny 403 | PASS |
-| Direktur | receipt / gate | POST receipts | payment.record | 200 | payment terbuka | payment_receipt_verified | — | PASS |
-| Kepala | assignment | POST schedule | schedule.manage | 200 | assignment aktif | — | **PASS_MUTATION** | PASS |
-| Kepala | list tasks | GET `/jobs/tasks` | job.read | 200 | tasks derived | — | UI | PASS |
-| Operator | prep screener | POST prep/screener | — | 403 | — | — | — | PASS |
-| Screener | prep screen | POST prep/screener | prep.screener | 200 | PrepState | prep_screener | **PASS_MUTATION** | PASS |
-| Helper | prep helper | POST prep/helper | prep.helper | 200 | remaining_vs_po=20 | prep_helper | **PASS_MUTATION** | PASS |
-| Operator | sample upload | POST samples | sample.upload | 200 | sample pending | — | **PASS_MUTATION** | PASS |
-| Operator | sample decide | POST samples/decision | — | 403 | — | — | — | PASS |
-| Operator | output sebelum sample | POST outputs | output.confirm | 409 | gate | — | — | PASS |
-| Kepala | sample approve | POST samples/decision | sample.decide | 200 | sample approved | — | **PASS_MUTATION** | PASS |
-| Kepala | double approve | POST samples/decision | sample.decide | 200/409/422 | aman | — | — | PASS |
-| Operator | output | POST outputs | output.confirm | 200 | qty 40 | output_confirmed | **PASS_MUTATION** | PASS |
-| Operator | double-submit | POST outputs idem | output.confirm | 409 | tidak double-count | — | API baseline | PASS |
-| Readonly | output | POST outputs | job.read saja | 403 | — | — | — | PASS |
-| Helper | verify + packing | helper-verifications / packing | helper_verify, packing | 200 | pack 35 | packing_batch | **PASS_MUTATION** | PASS |
-| Driver | POD sebelum loading | POST pod | delivery.manage | 409 | wajib loading | — | — | PASS |
-| Driver | loading | POST loading | delivery.manage | 200 | loading event | loading | **PASS_MUTATION** | PASS |
-| Driver | POD + foto/ttd/nama | POST pod | delivery.manage | 200 | pod event | pod | **PASS_MUTATION** | PASS |
-| Designer | loading | POST loading | — | 403 | — | — | deny | PASS |
-| Kepala | tracking | GET tracking | tracking.read | 200 | events list | events | — | PASS |
-| System | qty SO | JobLineQty | — | — | print=100 non_print=100 | — | — | PASS |
+| Cek | Bukti | Hasil |
+|-----|-------|-------|
+| Sticky key satu logical submit | slot `out::1\|1\|40\|1\|L1`, key `out-…` committed | PASS |
+| (1) Double-click dicegah frontend | `dup.hit=null` (short-circuit latch/sticky), DB tetap 1 | PASS |
+| (2) Replay key mencapai backend | POST ulang key yang sama → HTTP **409**; count tetap 1 | PASS |
+| Retry setelah sukses (ulang submit UI) | `retry.hit=null`, DB tetap 1 | PASS |
+| UNIQUE constraint | `uq_production_events_idempotency` tetap | PASS |
+| Draft restore qty/lot | `DELIVERY_DRAFT_IDS` mencakup `v3-out-*` agar re-render tidak mint key baru | PASS |
+| 409 reconcile di FE | catch status 409 → loadBoard + cocokkan event → commit sticky | terpasang |
 
-## Payment gate (API)
+### RISIKO RESIDUAL — retry jaringan (skenario 3)
 
-- Belum terbuka → schedule 409: PASS  
-- Bypass operator ditolak 403: PASS  
-- Receipt / bypass Direktur membuka gate: PASS  
-- Bypass OFF di settings default (`bypass_enabled=false`) hingga diaktifkan: terbukti di seed browser  
+Belum diuji end-to-end browser: respons server **sudah sukses** tetapi klien kehilangan jawaban (timeout / drop) sebelum `stickyIdemCommit`, lalu user menekan ulang.
 
-## Enforced (sandbox terpisah, bukan Production)
+Mitigasi kode yang ada: sticky key sama → backend UNIQUE → **409** → FE rekonsiliasi ke board.
+**Klaim:** skenario (1) dan (2) PASS; skenario (3) **belum terbukti di harness browser** — jangan dianggap PASS penuh untuk seluruh retry network.
 
-- Packs HTTP matrix + AccessAudit + deny cross-branch: **PASS** (`test_fase3_enforced_role_packs` + `test_workflow_access`, 20 passed)
-- Activation gate: **PASS** (`test_enforced_activation_gate`)
-- Browser enforced end-to-end: **NOT_RUN** (penyebab: seed ScopedGrant/role packs per tombol UI belum dilengkapi di harness mutasi; bukan karena Production diaktifkan)
-- Production tetap **legacy**
-- Tidak ada fallback klaim legacy sebagai enforced
-
-## Implementasi UI terkait mutasi browser
-
-1. `production.html` — `openTask` mengarah ke `v3OpenWorkflow` bila official tasks / live inbox / `isLiveRuntime` / `v3-auth-ok` (bukan hanya `isLiveInbox`).
-2. `live-runtime.js` — `window.isLiveRuntime` diekspos untuk binding di atas.
-3. `engine.py` — `_resolve_operator` memakai `begin_nested()` agar kegagalan `load_access` (mis. tabel auth belum ada) tidak meracuni transaksi schedule (legacy tetap jalan).
-4. Harness: `scripts/fase3_e2e_browser_mutation_server.py` + `scripts/fase3_e2e_browser_mutation.mjs`.
-
-## Regresi lokal (disposable / APP_ENV=test)
+## Regresi lokal (putaran ini)
 
 | Cek | Hasil |
 |-----|-------|
-| `test_fase3_e2e_six_role_workflow` + master cabang + activation gate | 21 passed |
-| Enforced packs + workflow access | 20 passed |
-| Frontend Vitest penuh | 221 passed |
-| Frontend build + routing/security checks | PASS |
-| `git diff --check` | PASS |
+| Browser enforced 6 role + negatif + idem | **14/14 PASS_MUTATION** |
+| Pytest authz packs + activation + runtime + concurrency + output correction idem | **52 passed** |
+| Frontend Vitest penuh | **223 passed** (41 files) |
+| Frontend build + routing/security | **PASS** |
+| `git diff --check` | **PASS** |
 | Live migration / Live writes / Production enforced | **TIDAK dijalankan** |

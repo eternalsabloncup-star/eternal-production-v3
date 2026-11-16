@@ -154,11 +154,31 @@
   }
 
   function canPerm(code) {
+    const a = window.__V3_AUTH__;
+    // Director Full Access: UI affordance only; API still evaluates director flag.
+    if (a && a.system_director) return true;
     const L = window.V3LoadingLedger;
     if (L && typeof L.hasPermission === "function") {
-      return L.hasPermission(authPermissions(), code);
+      if (L.hasPermission(authPermissions(), code)) return true;
+    } else if (authPermissions().indexOf(code) !== -1) {
+      return true;
     }
-    return authPermissions().indexOf(code) !== -1;
+    // Catalog capability names may appear on /me.permissions for enforced UI mirrors.
+    // Display-only aliases — authorization remains server-side ScopedGrant/director.
+    const aliases = {
+      "production.delivery.manage": [
+        "loading.record",
+        "delivery.pod.record",
+        "production.delivery.manage",
+      ],
+      "production.job.cancel": ["job.cancel", "production.job.cancel"],
+    };
+    const alts = aliases[code] || [];
+    const perms = authPermissions();
+    for (let i = 0; i < alts.length; i++) {
+      if (perms.indexOf(alts[i]) !== -1) return true;
+    }
+    return false;
   }
 
   function isPreviewFixture() {
@@ -438,6 +458,73 @@
       Math.random().toString(36).slice(2, 10)
     );
   }
+
+  /** Sticky idempotency slots: one logical submission → one key until committed. */
+  const idemSlots = Object.create(null);
+  /** Last committed Output per job — survives drawer re-render with restored draft. */
+  const outCommitLatch = Object.create(null);
+
+  function stickyIdemKey(prefix, fingerprint, opts) {
+    const slot =
+      String(prefix || "v3") + "::" + String(fingerprint == null ? "" : fingerprint);
+    const forceNew = opts && opts.forceNew;
+    const cur = idemSlots[slot];
+    // Never remint for an existing slot unless caller explicitly starts a new txn.
+    if (cur && cur.key && !forceNew) return cur.key;
+    const key = idemKey(prefix);
+    idemSlots[slot] = {
+      key: key,
+      fingerprint: String(fingerprint == null ? "" : fingerprint),
+      committed: false,
+      result: null,
+    };
+    return key;
+  }
+
+  function stickyIdemPeek(prefix, fingerprint) {
+    const slot =
+      String(prefix || "v3") + "::" + String(fingerprint == null ? "" : fingerprint);
+    return idemSlots[slot] || null;
+  }
+
+  function stickyIdemCommit(prefix, fingerprint, result) {
+    const slot =
+      String(prefix || "v3") + "::" + String(fingerprint == null ? "" : fingerprint);
+    const cur = idemSlots[slot];
+    if (!cur) return;
+    cur.committed = true;
+    cur.result = result == null ? true : result;
+  }
+
+  function stickyIdemReset(prefix, fingerprint) {
+    const slot =
+      String(prefix || "v3") + "::" + String(fingerprint == null ? "" : fingerprint);
+    delete idemSlots[slot];
+    if (String(prefix) === "out" && fingerprint != null) {
+      const jobId = String(fingerprint).split("|")[0];
+      if (jobId && outCommitLatch[jobId]) delete outCommitLatch[jobId];
+    }
+  }
+
+  function clearOutCommitLatch(jobId) {
+    if (jobId == null) {
+      Object.keys(outCommitLatch).forEach(function (k) {
+        delete outCommitLatch[k];
+      });
+      return;
+    }
+    delete outCommitLatch[String(jobId)];
+  }
+
+  window.__V3_IDEM__ = {
+    stickyIdemKey: stickyIdemKey,
+    stickyIdemPeek: stickyIdemPeek,
+    stickyIdemCommit: stickyIdemCommit,
+    stickyIdemReset: stickyIdemReset,
+    clearOutCommitLatch: clearOutCommitLatch,
+    slots: idemSlots,
+    outCommitLatch: outCommitLatch,
+  };
 
   function toast(msg) {
     if (typeof window.toast === "function") window.toast(msg);
@@ -723,7 +810,9 @@
       throw e;
     }
     if (response.status === 403) {
-      throw new Error("Akses ditolak (izin/cabang)");
+      const e = new Error("Akses ditolak (izin/cabang)");
+      e.status = 403;
+      throw e;
     }
     if (!response.ok) {
       let detail = "";
@@ -757,14 +846,19 @@
       if (response.status === 503) {
         const e = new Error("Gateway Accurate belum siap / tidak berwenang");
         e.kind = "gateway";
+        e.status = 503;
         throw e;
       }
       if (response.status === 502 || response.status === 504) {
         const e = new Error("Backend API tidak merespons (HTTP " + response.status + ")");
         e.kind = "network";
+        e.status = response.status;
         throw e;
       }
-      throw new Error(detail || "API V3 HTTP " + response.status);
+      const fail = new Error(detail || "API V3 HTTP " + response.status);
+      fail.status = response.status;
+      fail.errCode = errCode || "";
+      throw fail;
     }
     if (response.status === 204) return null;
     return response.json();
@@ -1356,6 +1450,17 @@
     "v3-pod-qty",
     "v3-pod-recv",
     "v3-sj-cancel-reason",
+    // Output sticky idempotency: drawer re-render must not wipe logical submission fields.
+    "v3-out-asg",
+    "v3-out-qty",
+    "v3-out-pass",
+    "v3-out-lot",
+    "v3-hv-src",
+    "v3-hv-qty",
+    "v3-out-src",
+    "v3-pack-line",
+    "v3-pack-qty",
+    "v3-pack-lot",
   ];
 
   function snapshotDeliveryDraft() {
@@ -2663,6 +2768,8 @@
       if (action === "out-confirm") {
         let asg = field("v3-out-asg");
         const passNo = Number(field("v3-out-pass") || 1);
+        const qtyRaw = field("v3-out-qty") || "1";
+        const lot = field("v3-out-lot") || null;
         if (!asg) {
           const board = boardCache[so] || (await loadBoard(so, true));
           const match = ((board && board.assignments) || []).find(function (a) {
@@ -2678,18 +2785,79 @@
           }
         }
         if (!asg) throw new Error("Assignment id wajib");
-        await request(API + "/production/jobs/" + jid + "/outputs", {
-          method: "POST",
-          body: {
-            assignment_id: Number(asg),
-            qty_physical: field("v3-out-qty") || "1",
-            color_pass: passNo,
-            lot_code: field("v3-out-lot") || null,
-            idempotency_key: idemKey("out"),
-          },
-        });
+        const fingerprint = [jid, asg, qtyRaw, passNo, lot || ""].join("|");
+        const latch = outCommitLatch[jid];
+        // Same logical submission already committed (incl. after drawer re-render).
+        if (latch && latch.fingerprint === fingerprint && latch.result) {
+          toast("Output sudah tercatat (idempotent)");
+          return latch.result;
+        }
+        const prior = stickyIdemPeek("out", fingerprint);
+        if (prior && prior.committed && prior.result) {
+          outCommitLatch[jid] = {
+            fingerprint: fingerprint,
+            key: prior.key,
+            result: prior.result,
+            assignmentId: asg,
+            colorPass: passNo,
+          };
+          toast("Output sudah tercatat (idempotent)");
+          return prior.result;
+        }
+        const outKey = stickyIdemKey("out", fingerprint);
+        let saved = null;
+        try {
+          saved = await request(API + "/production/jobs/" + jid + "/outputs", {
+            method: "POST",
+            body: {
+              assignment_id: Number(asg),
+              qty_physical: qtyRaw,
+              color_pass: passNo,
+              lot_code: lot,
+              idempotency_key: outKey,
+            },
+          });
+        } catch (err) {
+          const msg = String((err && err.message) || err || "");
+          const isDup =
+            /idempotency|duplikat|concurrent submit/i.test(msg) ||
+            (err && err.status === 409);
+          if (!isDup) throw err;
+          // Reconcile: prior write may have committed; do not mint a new key or treat as fatal.
+          const board = await loadBoard(so, true);
+          const events = (board && board.events) || [];
+          const hit = events.find(function (e) {
+            return (
+              e &&
+              e.event_type === "output_confirmed" &&
+              String(e.assignment_id) === String(asg) &&
+              Number(e.qty_physical) === Number(qtyRaw) &&
+              Number(e.color_pass || 1) === passNo
+            );
+          });
+          if (!hit) throw err;
+          saved = hit;
+          toast("Output sudah ada (rekonsiliasi idempotency 409)");
+          stickyIdemCommit("out", fingerprint, saved);
+          outCommitLatch[jid] = {
+            fingerprint: fingerprint,
+            key: outKey,
+            result: saved,
+            assignmentId: asg,
+            colorPass: passNo,
+          };
+          return saved;
+        }
+        stickyIdemCommit("out", fingerprint, saved);
+        outCommitLatch[jid] = {
+          fingerprint: fingerprint,
+          key: outKey,
+          result: saved,
+          assignmentId: asg,
+          colorPass: passNo,
+        };
         toast("Output confirmed");
-        return;
+        return saved;
       }
       if (action === "out-helper-verify") {
         const src = field("v3-hv-src");
@@ -3825,6 +3993,10 @@
     loadBoard: loadBoard,
     escapeHtml: escapeHtml,
     idemKey: idemKey,
+    stickyIdemKey: stickyIdemKey,
+    stickyIdemPeek: stickyIdemPeek,
+    stickyIdemCommit: stickyIdemCommit,
+    stickyIdemReset: stickyIdemReset,
   };
   window.v3EnsureJob = createJob; // explicit create only — do not use on view
 
