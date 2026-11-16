@@ -1453,6 +1453,35 @@ async def confirm_output(
                 raise HTTPException(409, "Sample wajib disetujui sebelum output cetak")
     if qty_physical <= 0:
         raise HTTPException(422, "Qty fisik harus > 0")
+    if not idempotency_key or not 8 <= len(idempotency_key.strip()) <= 120:
+        raise HTTPException(422, "idempotency_key wajib 8-120 karakter")
+    idempotency_key = idempotency_key.strip()
+    qty_ops = qty_pass_ops if qty_pass_ops is not None else qty_physical
+    job_id = job.id
+    actor_id = user.id
+    so_line_id = assignment.so_line_id
+
+    def _same_output(row: ProductionEvent) -> bool:
+        return (
+            row.job_id == job_id
+            and row.event_type == "output_confirmed"
+            and row.assignment_id == assignment_id
+            and row.qty_physical == qty_physical
+            and row.qty_pass_ops == qty_ops
+            and int(row.color_pass or 1) == int(color_pass)
+            and (row.lot_code or None) == (lot_code or None)
+            and (row.so_line_id or None) == (so_line_id or None)
+        )
+
+    # Idempotent replay before insert — same key+payload returns prior event.
+    prior = await session.scalar(
+        select(ProductionEvent).where(ProductionEvent.idempotency_key == idempotency_key)
+    )
+    if prior is not None:
+        if not _same_output(prior):
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return prior
+
     remaining = (
         assignment.qty_planned
         - assignment.qty_confirmed
@@ -1492,16 +1521,16 @@ async def confirm_output(
             if color_pass == 1 and Decimal(already or 0) + qty_physical > prepared:
                 raise HTTPException(409, "Output melebihi qty helper siap")
     event = ProductionEvent(
-        job_id=job.id,
+        job_id=job_id,
         assignment_id=assignment_id,
         event_type="output_confirmed",
-        so_line_id=assignment.so_line_id,
+        so_line_id=so_line_id,
         color_pass=color_pass,
         lot_code=lot_code,
         qty_physical=qty_physical,
-        qty_pass_ops=qty_pass_ops if qty_pass_ops is not None else qty_physical,
+        qty_pass_ops=qty_ops,
         idempotency_key=idempotency_key,
-        actor_user_id=user.id,
+        actor_user_id=actor_id,
         evidence_ref=evidence_ref,
     )
     session.add(event)
@@ -1509,7 +1538,20 @@ async def confirm_output(
         await session.flush()
     except IntegrityError as exc:
         await session.rollback()
-        raise HTTPException(409, "Idempotency key duplikat / concurrent submit") from exc
+        session.expunge_all()
+        raced = await session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.idempotency_key == idempotency_key
+            )
+        )
+        if raced is None:
+            raise HTTPException(
+                409, "Idempotency key duplikat / concurrent submit"
+            ) from exc
+        if not _same_output(raced):
+            raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+        # Concurrent same-key same-payload: return canonical prior (no double qty).
+        return raced
     assignment.qty_confirmed = assignment.qty_confirmed + qty_physical
     if (
         assignment.qty_confirmed + assignment.qty_cancelled_remaining
@@ -3859,6 +3901,7 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                 "accurate_sj_number": e.accurate_sj_number,
                 "accurate_sj_line_id": e.accurate_sj_line_id,
                 "actor_user_id": e.actor_user_id,
+                "idempotency_key": e.idempotency_key,
                 "payload_json": e.payload_json,
                 "evidence_ref": e.evidence_ref,
                 "reason": e.reason,

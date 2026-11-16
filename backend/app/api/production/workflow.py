@@ -1253,6 +1253,12 @@ async def tracking(
                 "event_type": e.event_type,
                 "qty_physical": str(e.qty_physical) if e.qty_physical is not None else None,
                 "qty_pass_ops": str(e.qty_pass_ops) if e.qty_pass_ops is not None else None,
+                "assignment_id": e.assignment_id,
+                "so_line_id": e.so_line_id,
+                "color_pass": e.color_pass,
+                "lot_code": e.lot_code,
+                "actor_user_id": e.actor_user_id,
+                "idempotency_key": e.idempotency_key,
                 "accurate_sj_number": e.accurate_sj_number,
                 "created_at": e.created_at.isoformat() if e.created_at else None,
             }

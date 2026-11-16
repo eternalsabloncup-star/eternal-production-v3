@@ -8,9 +8,11 @@ describe("Output sticky idempotency_key", () => {
     expect(runtime).toContain("function stickyIdemKey");
     expect(runtime).toContain("function stickyIdemCommit");
     expect(runtime).toContain("function stickyIdemPeek");
+    expect(runtime).toContain("function stickyIdemMarkUncertain");
     expect(runtime).toContain('stickyIdemKey("out", fingerprint)');
     expect(runtime).toContain("idempotency_key: outKey");
-    expect(runtime).toContain("rekonsiliasi idempotency 409");
+    expect(runtime).toContain("BELUM PASTI");
+    expect(runtime).toContain("replay key");
     expect(runtime).toContain("window.__V3_IDEM__");
   });
 

@@ -493,7 +493,17 @@
     const cur = idemSlots[slot];
     if (!cur) return;
     cur.committed = true;
+    cur.uncertain = false;
     cur.result = result == null ? true : result;
+  }
+
+  function stickyIdemMarkUncertain(prefix, fingerprint) {
+    const slot =
+      String(prefix || "v3") + "::" + String(fingerprint == null ? "" : fingerprint);
+    const cur = idemSlots[slot];
+    if (!cur) return;
+    cur.uncertain = true;
+    cur.committed = false;
   }
 
   function stickyIdemReset(prefix, fingerprint) {
@@ -504,6 +514,36 @@
       const jobId = String(fingerprint).split("|")[0];
       if (jobId && outCommitLatch[jobId]) delete outCommitLatch[jobId];
     }
+  }
+
+  function matchOutputEvent(events, opts) {
+    const list = events || [];
+    const key = opts && opts.idempotencyKey;
+    if (key) {
+      const byKey = list.find(function (e) {
+        return (
+          e &&
+          e.event_type === "output_confirmed" &&
+          String(e.idempotency_key || "") === String(key)
+        );
+      });
+      if (byKey) return byKey;
+    }
+    return list.find(function (e) {
+      return (
+        e &&
+        e.event_type === "output_confirmed" &&
+        String(e.assignment_id) === String(opts.assignmentId) &&
+        Number(e.qty_physical) === Number(opts.qty) &&
+        Number(e.color_pass || 1) === Number(opts.colorPass || 1) &&
+        String(e.lot_code || "") === String(opts.lot || "")
+      );
+    });
+  }
+
+  async function reconcileOutputEvent(so, opts) {
+    const board = await loadBoard(so, true);
+    return matchOutputEvent((board && board.events) || [], opts);
   }
 
   function clearOutCommitLatch(jobId) {
@@ -520,8 +560,10 @@
     stickyIdemKey: stickyIdemKey,
     stickyIdemPeek: stickyIdemPeek,
     stickyIdemCommit: stickyIdemCommit,
+    stickyIdemMarkUncertain: stickyIdemMarkUncertain,
     stickyIdemReset: stickyIdemReset,
     clearOutCommitLatch: clearOutCommitLatch,
+    matchOutputEvent: matchOutputEvent,
     slots: idemSlots,
     outCommitLatch: outCommitLatch,
   };
@@ -2804,6 +2846,32 @@
           toast("Output sudah tercatat (idempotent)");
           return prior.result;
         }
+        // Uncertain prior attempt: never mint a new key; reconcile first.
+        if (prior && prior.uncertain && prior.key) {
+          const hit = await reconcileOutputEvent(so, {
+            idempotencyKey: prior.key,
+            assignmentId: asg,
+            qty: qtyRaw,
+            colorPass: passNo,
+            lot: lot || "",
+          });
+          if (hit) {
+            stickyIdemCommit("out", fingerprint, hit);
+            outCommitLatch[jid] = {
+              fingerprint: fingerprint,
+              key: prior.key,
+              result: hit,
+              assignmentId: asg,
+              colorPass: passNo,
+            };
+            toast("Output dipastikan via rekonsiliasi");
+            return hit;
+          }
+          toast("BELUM PASTI: output mungkin sudah tercatat — cek timeline sebelum submit baru");
+          throw new Error(
+            "BELUM PASTI: hasil submit output belum dapat dipastikan. Jangan kirim ulang dengan qty/lot berbeda.",
+          );
+        }
         const outKey = stickyIdemKey("out", fingerprint);
         let saved = null;
         try {
@@ -2819,34 +2887,96 @@
           });
         } catch (err) {
           const msg = String((err && err.message) || err || "");
-          const isDup =
-            /idempotency|duplikat|concurrent submit/i.test(msg) ||
-            (err && err.status === 409);
-          if (!isDup) throw err;
-          // Reconcile: prior write may have committed; do not mint a new key or treat as fatal.
-          const board = await loadBoard(so, true);
-          const events = (board && board.events) || [];
-          const hit = events.find(function (e) {
-            return (
-              e &&
-              e.event_type === "output_confirmed" &&
-              String(e.assignment_id) === String(asg) &&
-              Number(e.qty_physical) === Number(qtyRaw) &&
-              Number(e.color_pass || 1) === passNo
+          const status = err && err.status;
+          const kind = err && err.kind;
+          const payloadMismatch = /payload tidak cocok/i.test(msg);
+          if (payloadMismatch) {
+            // Same key, different body — never treat as success.
+            throw new Error(
+              "Idempotency key sudah dipakai untuk payload berbeda — jangan pakai key lama untuk transaksi baru",
             );
-          });
-          if (!hit) throw err;
-          saved = hit;
-          toast("Output sudah ada (rekonsiliasi idempotency 409)");
-          stickyIdemCommit("out", fingerprint, saved);
-          outCommitLatch[jid] = {
-            fingerprint: fingerprint,
-            key: outKey,
-            result: saved,
+          }
+          const maybeDup =
+            status === 409 &&
+            /idempotency|duplikat|concurrent submit/i.test(msg);
+          const maybeLost =
+            kind === "network" ||
+            status === 502 ||
+            status === 504 ||
+            /tidak dapat dihubungi|tidak merespons|timeout/i.test(msg);
+          if (!maybeDup && !maybeLost) throw err;
+
+          // Preferred recovery after lost response: replay SAME key.
+          // Backend returns prior event (200) when payload matches — no double qty.
+          if (maybeLost) {
+            try {
+              saved = await request(API + "/production/jobs/" + jid + "/outputs", {
+                method: "POST",
+                body: {
+                  assignment_id: Number(asg),
+                  qty_physical: qtyRaw,
+                  color_pass: passNo,
+                  lot_code: lot,
+                  idempotency_key: outKey,
+                },
+              });
+              stickyIdemCommit("out", fingerprint, saved);
+              outCommitLatch[jid] = {
+                fingerprint: fingerprint,
+                key: outKey,
+                result: saved,
+                assignmentId: asg,
+                colorPass: passNo,
+              };
+              toast("Output dipastikan setelah respons hilang (replay key)");
+              return saved;
+            } catch (retryErr) {
+              const rmsg = String((retryErr && retryErr.message) || retryErr || "");
+              if (/payload tidak cocok/i.test(rmsg)) throw retryErr;
+              // fall through to board reconcile / BELUM PASTI
+            }
+          }
+
+          const hit = await reconcileOutputEvent(so, {
+            idempotencyKey: outKey,
             assignmentId: asg,
+            qty: qtyRaw,
             colorPass: passNo,
-          };
-          return saved;
+            lot: lot || "",
+          });
+          if (hit) {
+            if (
+              hit.idempotency_key &&
+              String(hit.idempotency_key) !== String(outKey)
+            ) {
+              stickyIdemMarkUncertain("out", fingerprint);
+              toast("BELUM PASTI: event lain ditemukan — cek timeline");
+              throw new Error("BELUM PASTI: rekonsiliasi tidak cocok idempotency key");
+            }
+            saved = hit;
+            stickyIdemCommit("out", fingerprint, saved);
+            outCommitLatch[jid] = {
+              fingerprint: fingerprint,
+              key: outKey,
+              result: saved,
+              assignmentId: asg,
+              colorPass: passNo,
+            };
+            toast(
+              maybeDup
+                ? "Output sudah ada (rekonsiliasi 409)"
+                : "Output dipastikan setelah respons hilang",
+            );
+            return saved;
+          }
+          if (maybeLost || maybeDup) {
+            stickyIdemMarkUncertain("out", fingerprint);
+            toast("BELUM PASTI: hasil submit belum dapat dipastikan");
+            throw new Error(
+              "BELUM PASTI: submit mungkin sudah tersimpan. Muat ulang timeline; jangan buat transaksi baru dengan key/qty berbeda.",
+            );
+          }
+          throw err;
         }
         stickyIdemCommit("out", fingerprint, saved);
         outCommitLatch[jid] = {
@@ -3996,6 +4126,7 @@
     stickyIdemKey: stickyIdemKey,
     stickyIdemPeek: stickyIdemPeek,
     stickyIdemCommit: stickyIdemCommit,
+    stickyIdemMarkUncertain: stickyIdemMarkUncertain,
     stickyIdemReset: stickyIdemReset,
   };
   window.v3EnsureJob = createJob; // explicit create only — do not use on view
