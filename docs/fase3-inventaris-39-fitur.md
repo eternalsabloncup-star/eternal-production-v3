@@ -1,10 +1,10 @@
 # Inventaris 39 Fitur — Eternal Production V3 (Fase 3)
 
 **Diperbarui:** 2026-11-16 (Asia/Jakarta)
-**HEAD committed:** `5528bb291e573ce426ab89bd02e394cab9a1f72f`
-**WIP lokal (NO COMMIT):** Reskin Iter1 Jadwal+Kontrol (token Handoff Final); sticky/smoke checkpoint sebelumnya sudah di-push `ac6be39`
+**HEAD committed:** `8410a1be2b6cf1f52948e543967c8aae3aeeadab`
+**WIP lokal:** checkpoint Iter2 Global Shell + toolbar/sticky polish (commit menyusul)
 **PR #15:** OPEN · **PR #14:** HOLD · Production authz: **legacy**
-**Checkpoint smoke (committed):** empty/populated/sticky PASS · **Reskin Iter1 browser:** Jadwal KPI Final cards PASS (1440 + 1366) — F3-039 tetap BLOCKED
+**Checkpoint smoke:** empty/populated/sticky/shell/final-QA toolbar+sticky PASS · matriks **29/7/3** · F3-039 tetap BLOCKED
 
 ## Cara baca
 
@@ -40,7 +40,7 @@
 | F3-010 | Jadwal cetak-only API | Jadwal | Kontrak | schedule | list print lines | `…/ops/schedule` | schedule read | SELESAI* | SELESAI* | schedule API | pytest + smoke 200 | — | PG | P1 |
 | F3-011 | Multi-operator / HOLD / filter header | Jadwal | Handoff+V22 | sheet + buckets | HOLD filter | schedule + FE | — | PARSIAL | PARSIAL | buckets HOLD + holdStatus | smoke buckets | parity kolom Final penuh | F3-010 | P1 |
 | F3-012 | Sticky / resize / visibility / pagination Jadwal | Jadwal | Handoff | v3-schedule-sheet | spreadsheet | FE | — | PARSIAL | SELESAI* | `data-v3-sticky=id,name` + CSS | vitest + geometry smoke (scroll hold + align) | — | — | P1 |
-| F3-013 | KPI Kontrol qty + Status Kerja | Kontrol | Sandbox/Handoff | `#v3-kontrol-qty` | ringkasan | schedule summary | read | SELESAI* | SELESAI* | scheduleOverview live + kartu Final Iter1 | smoke + reskin browser 1440/1366 | visual shell sidebar Final belum | F3-010 | P1 |
+| F3-013 | KPI Kontrol qty + Status Kerja | Kontrol | Sandbox/Handoff | `#v3-kontrol-qty` | ringkasan | schedule summary | read | SELESAI* | SELESAI* | scheduleOverview live + kartu Final Iter1 | smoke + reskin browser 1440/1366 | shell Iter2 terpisah; F3-039 penuh belum | F3-010 | P1 |
 | F3-014 | Tugas Kepala Produksi | Tugas | Kontrak | role filter | Atur jadwal | `/tasks` | schedule | SELESAI* | SELESAI* | teamTasks + workflow | E2E + gap populated smoke | enforced Live HOLD; Inbox Accurate tetap PARSIAL | PR14 | P1 |
 | F3-015 | Tugas Designer | Tugas | Kontrak | Kerjakan | upload/approve | tasks API | design | SELESAI* | SELESAI* | sama | E2E + gap populated | sama | PR14 | P1 |
 | F3-016 | Tugas Screener | Tugas | Kontrak | Kerjakan | prep screen | prep API | prep | SELESAI* | SELESAI* | sama | E2E + gap populated | sama | — | P1 |
@@ -65,7 +65,7 @@
 | F3-035 | Workflow config + label browser-only | Pengaturan | Owner | prefs | label jujur demo | localStorage vs PG | — | PARSIAL | PARSIAL | guard demo views | connectionStatus tests | Urgent/Buffer demo non-SoT | — | P2 |
 | F3-036 | Master Pengaturan agregat Live apply | Pengaturan | Owner | — | apply staging/Live | migrasi Live | — | PARSIAL | PARSIAL | lokal OK | — | Live BLOCKED | Direktur | P2 |
 | F3-037 | Enforced Production Live | Authz | Owner | — | cutover | mode enforced | approval | BLOCKED | BLOCKED | fondasi + disposable | E2E enforced test | tidak aktifkan Live | PR14 | P0 |
-| F3-038 | Layout sidebar/header/nav/scroll | Layout | Handoff+V22 | app shell | navigasi | FE | — | PARSIAL | PARSIAL | edge toggle + nav | smoke nav labels | nama nav ≠ Final; reskin penuh | F3-039 | P2 |
+| F3-038 | Layout sidebar/header/nav/scroll | Layout | Handoff+V22 | app shell | navigasi | FE | — | PARSIAL | PARSIAL | shell gelap 226px + rail 65px + handle menempel (Iter2) | browser shell 1440/1366 | label nav ≠ teks Final; modul lain belum | F3-039 | P2 |
 | F3-039 | Reskin HTML Final penuh | Layout | Handoff | seluruh UI | visual parity | aset handoff | — | BLOCKED | BLOCKED | aset di `/tmp` bukan di git | — | serahkan aset ke repo + prioritas modul | Owner | P0 |
 
 ## Daftar ringkas per status (audit baru)

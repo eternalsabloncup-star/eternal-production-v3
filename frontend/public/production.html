@@ -428,11 +428,238 @@ th:hover>.col-resize-handle,th:focus-within>.col-resize-handle,.col-resize-handl
   max-height:calc(100vh - 320px);
 }
 #v3-app.section-schedule .heading h1{letter-spacing:-.45px}
-@media(max-width:1200px){
+/* Desktop (incl. 1366) jaga 5 kartu KPI satu baris; wrap hanya di layar sempit */
+@media(max-width:1100px){
   #v3-app .final-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
 }
 @media(max-width:900px){
   #v3-app .final-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+
+/* Fase 3 Reskin Iter2 — Global Shell Final (sidebar/header/collapse; tanpa ubah routing/permission) */
+#v3-app{
+  --final-sidebar:#102d27;
+  --final-sidebar-line:#315248;
+  --final-sidebar-text:#bfd6cd;
+  --final-sidebar-muted:#a6c5b9;
+  --final-nav-hover:#214c3c;
+  --final-nav-accent:#32ca8b;
+  --final-shell-width:226px;
+  --final-shell-rail:65px;
+  --final-topbar-h:68px;
+}
+@media(min-width:901px){
+  #v3-app.app{grid-template-columns:var(--final-shell-width) minmax(0,1fr)!important}
+  #v3-app .side{
+    width:var(--final-shell-width)!important;
+    min-width:var(--final-shell-width)!important;
+    background:var(--final-sidebar)!important;
+    color:var(--final-sidebar-text)!important;
+    border-right:1px solid var(--final-sidebar-line)!important;
+    box-shadow:none!important;
+    position:sticky;
+    z-index:40;
+    overflow:visible!important;
+  }
+  #v3-app .side .logo{
+    height:var(--final-topbar-h);
+    box-sizing:border-box;
+    padding:15px 17px!important;
+    border-bottom:1px solid var(--final-sidebar-line)!important;
+    gap:11px;
+  }
+  #v3-app .side .mark{
+    width:32px;height:32px;border-radius:9px;
+    background:#158a62!important;color:#fff!important;font-size:18px;
+  }
+  #v3-app .side .brand strong{color:#fff!important;letter-spacing:.4px}
+  #v3-app .side .brand small{color:var(--final-sidebar-muted)!important}
+  #v3-app .side .navgroup{
+    color:#7fa496!important;
+    letter-spacing:1.3px;
+    padding:16px 14px 6px!important;
+  }
+  #v3-app .side .navbtn{
+    width:calc(100% - 16px);
+    margin:2px 8px;
+    padding:11px 12px;
+    border-radius:9px;
+    color:var(--final-sidebar-text)!important;
+    background:transparent!important;
+    gap:10px;
+    justify-content:flex-start;
+  }
+  #v3-app .side .navbtn .nav-label{flex:1;min-width:0;text-align:left}
+  #v3-app .side .navbtn .nav-count{
+    margin-left:auto;
+    background:#1a4036!important;
+    color:#cfe6db!important;
+    border-radius:5px;
+    padding:1px 6px;
+    font-size:10px!important;
+  }
+  #v3-app .side .navbtn:hover,
+  #v3-app .side .navbtn.active{
+    background:var(--final-nav-hover)!important;
+    color:#fff!important;
+  }
+  #v3-app .side .navbtn.active{
+    box-shadow:inset 3px 0 var(--final-nav-accent);
+  }
+  #v3-app .side .navbtn:focus-visible{
+    outline:3px solid #39b989;outline-offset:1px;
+  }
+  #v3-app .side .sidefoot{
+    border-top:1px solid var(--final-sidebar-line)!important;
+    color:var(--final-sidebar-muted)!important;
+  }
+  #v3-app .side .sidefoot .dot{background:var(--final-nav-accent)}
+  #v3-app .main .top{
+    height:var(--final-topbar-h)!important;
+    min-height:var(--final-topbar-h);
+    padding:0 26px!important;
+    gap:12px;
+    background:#fff;
+    border-bottom:1px solid var(--line);
+  }
+  #v3-app .top-left{display:flex;align-items:center;gap:14px;min-width:0}
+  #v3-app .top-right{display:flex;align-items:center;gap:14px;flex-wrap:wrap;justify-content:flex-end}
+  #v3-app .top .crumb{color:#80918b;font-size:12px}
+  #v3-app .top .crumb b{color:#136b4c}
+  #v3-app .top .v3-branch-chip,
+  #v3-app .top .v3-user-chip{
+    display:inline-flex;align-items:center;gap:6px;
+    padding:6px 10px;border-radius:8px;
+    border:1px solid #d7e6dd;background:#f7fbf8;
+    color:#2d5a48;font-size:11px;font-weight:700;white-space:nowrap;
+  }
+  /* Collapse = icon rail (bukan hilang total) */
+  body.v41-nav-collapsed #v3-app.app{grid-template-columns:var(--final-shell-rail) minmax(0,1fr)!important}
+  body.v41-nav-collapsed #v3-app .side{
+    width:var(--final-shell-rail)!important;
+    min-width:var(--final-shell-rail)!important;
+    overflow:visible!important;
+    visibility:visible!important;
+    pointer-events:auto!important;
+    border-right:1px solid var(--final-sidebar-line)!important;
+  }
+  body.v41-nav-collapsed #v3-app .side .hide-shrink,
+  body.v41-nav-collapsed #v3-app .side .navgroup,
+  body.v41-nav-collapsed #v3-app .side .brand,
+  body.v41-nav-collapsed #v3-app .side .nav-count,
+  body.v41-nav-collapsed #v3-app .side .sidefoot b{display:none!important}
+  body.v41-nav-collapsed #v3-app .side .logo{padding:14px 0!important;justify-content:center}
+  body.v41-nav-collapsed #v3-app .side .navbtn{
+    width:calc(100% - 10px);margin:3px 5px;padding:12px 0;justify-content:center;
+  }
+  body.v41-nav-collapsed #v3-app .side .nav-ico{margin:0;font-size:15px}
+  body.v41-nav-collapsed #v3-app .side .sidefoot{padding:10px 0;text-align:center}
+  /* Panah menempel sisi sidebar — bukan floating di konten */
+  #v3-app #v44-sidebar-handle{
+    position:absolute!important;
+    left:auto!important;
+    right:-13px!important;
+    top:172px!important;
+    width:26px!important;
+    height:44px!important;
+    z-index:45!important;
+    border:1px solid #87bba6!important;
+    border-left:0!important;
+    border-radius:0 8px 8px 0!important;
+    background:#075f46!important;
+    color:#fff!important;
+    font:800 22px/1 Arial,sans-serif!important;
+    box-shadow:1px 2px 6px #123b2920!important;
+    transform:none!important;
+    padding:0!important;
+  }
+  body.v41-nav-collapsed #v3-app #v44-sidebar-handle{
+    left:auto!important;
+    right:-13px!important;
+  }
+}
+/* Toolbar Jadwal — hierarki compact: judul → aksi/KPI → sheet tools → tabel */
+#v3-app.section-schedule .content{padding-top:10px!important;padding-bottom:18px!important}
+#v3-app.section-schedule .heading{
+  margin-bottom:6px!important;
+  align-items:center!important;
+  gap:8px!important;
+}
+#v3-app.section-schedule .heading .eyebrow{font-size:9px!important;margin:0;letter-spacing:1.2px}
+#v3-app.section-schedule .heading h1{font-size:20px!important;margin:2px 0!important}
+#v3-app.section-schedule .heading .sub{
+  font-size:11px!important;
+  max-width:720px;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+#v3-app.section-schedule .sheet-notice-compact{
+  display:none!important; /* penjelasan panjang → Panduan; fungsi tidak dihapus dari UI aksi */
+}
+#v3-app.section-schedule #scheduleOverview{margin:0 0 6px}
+#v3-app.section-schedule #scheduleOverview .v36-toolbar{
+  margin:0 0 8px;
+  border-radius:8px;
+  padding:6px 8px!important;
+  gap:6px!important;
+  min-height:0;
+}
+#v3-app.section-schedule #scheduleOverview .v36-toolbar .btn.sm{padding:5px 8px!important}
+#v3-app.section-schedule #scheduleOverview .final-kpis{margin:0 0 6px;gap:8px}
+#v3-app.section-schedule #scheduleOverview .final-kpi{padding:10px 12px}
+#v3-app.section-schedule #scheduleOverview .final-kpi strong{font-size:20px;margin-top:4px}
+#v3-app.section-schedule #scheduleOverview .final-kpis-secondary{margin:0 0 4px;gap:6px}
+#v3-app.section-schedule #scheduleOverview .flat-notice,
+#v3-app.section-schedule #scheduleOverview .v44-production-alert{
+  padding:5px 8px!important;
+  margin:0 0 4px!important;
+  font-size:11px!important;
+  line-height:1.35;
+}
+#v3-app.section-schedule #scheduleOverview>small{
+  display:block;
+  font-size:10px!important;
+  color:#6d857a;
+  margin:0 0 4px;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+#v3-app.section-schedule .sheetbar{
+  margin-top:0;
+  border-radius:8px 8px 0 0;
+  padding:6px 8px!important;
+  gap:6px!important;
+  flex-wrap:wrap!important; /* 1366+sidebar: jangan potong CSV */
+  row-gap:6px!important;
+  overflow-x:visible!important;
+}
+#v3-app.section-schedule .sheetbar input#sheet-search{
+  flex:1 1 150px!important;
+  min-width:140px!important;
+  max-width:260px!important;
+}
+#v3-app.section-schedule .sheetbar .btn.sm,
+#v3-app.section-schedule .sheetbar summary,
+#v3-app.section-schedule .sheetbar select.fieldcontrol{
+  flex:0 0 auto;
+}
+#v3-app.section-schedule .sheet-guidance-compact{display:none!important}
+#v3-app.section-schedule .sheetwrap{max-height:calc(100vh - 248px)!important;min-height:280px}
+@media(max-width:900px){
+  #v3-app .side{
+    background:var(--final-sidebar)!important;
+    color:var(--final-sidebar-text)!important;
+    border-right:1px solid var(--final-sidebar-line)!important;
+  }
+  #v3-app .side .brand strong{color:#fff!important}
+  #v3-app .side .navbtn{color:var(--final-sidebar-text)!important}
+  #v3-app .side .navbtn.active,#v3-app .side .navbtn:hover{background:var(--final-nav-hover)!important;color:#fff!important}
+  #v3-app #v44-sidebar-handle{
+    position:fixed!important;left:0!important;right:auto!important;top:144px!important;z-index:50!important;
+  }
+  body.v3-nav-open #v3-app #v44-sidebar-handle{left:calc(min(280px,83vw) - 1px)!important}
 }
 
 /* Step 161 — sticky scroll + default readable widths + compact notice */
@@ -1121,7 +1348,7 @@ function closeScheduleEditor(){scheduleDraft=null;closeScheduleDetail()}
 
 const gateState={};let intakeRole='Admin',intakeSearch='';
 var orders=[],activityLog=[],section='inbox',selected=null,branch='Semua Cabang',modalAction=null,logFilter='Semua',sheetSearch='',sheetStatus='Semua Status',sheetPage=1,sheetSize=15,sheetView='Semua',drawerId=null,workflowSelected='po',shipDay='all',dashboardFocus=null,urgentEnabled=true,bufferEnabled=true,bufferDefaultPct=10;
-const $=id=>document.getElementById(id);const fmt=n=>Number(n).toLocaleString('id-ID');const escape=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));function toast(t,kind){const x=$('toast');if(!x)return;const msg=String(t??'');let k=kind;if(!k){if(/gagal|error|ditolak|diblokir|invalid|unauthorized|403|401|wajib|belum memenuhi|menunggu prasyarat|tidak dapat|ditolak/i.test(msg))k='error';else if(/berhasil|tersimpan|dibuat|dicabut|di-refresh|aktif|konfirmasi|disimpan|tercatat/i.test(msg))k='success';else k='info';}x.textContent=msg;x.className='toast '+k;x.classList.remove('hidden');clearTimeout(x._v165t);x._v165t=setTimeout(()=>x.classList.add('hidden'),2800)};function record(type,detail,id){activityLog.unshift({at:new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),type,detail,id});queueDemoSave()};function active(){return orders.filter(o=>!o.deleted&&(branch==='Semua Cabang'||o.branch===branch))};function current(){return orders.find(o=>o.id===selected)};function tag(t){const s=String(t??'');let tone='';let role='';if(/Belum\s*Terverifikasi|UNKNOWN/i.test(s)){tone='unverified';role='v165-status--unverified';}else if(/Urgent/i.test(s)){tone='';role='v165-status--urgent';}else if(/Normal/i.test(s)){tone='';role='v165-status--normal';}else if(/Selesai|Lunas|Siap|Synced|Approved|Baru/i.test(s)){tone='green';role=/Selesai/i.test(s)?'v165-status--done':'';}else if(/Hapus|Konflik|Bermasalah/i.test(s)){tone='red';}else if(/Pending|Menunggu|Belum|Sedang|Produksi|QC|Verifikasi|Dijadwalkan|Packing|DP/i.test(s)){tone='amber';role=/(Pending|Menunggu|Belum)/i.test(s)?'v165-status--pending':'v165-status--process';}return `<span class="tag ${tone}${role?' '+role:''}">${escape(s)}</span>`;}function nav(id,label,count){return `<button class="navbtn ${section===id?'active':''}" onclick="go('${id}')"><span>${label}</span>${count!==undefined?`<span>${count}</span>`:''}</button>`};function go(id){if(id==='mapping')id='settings';if(id==='workorder'||id==='qc')id='tasks';if(id==='delivery')id='shippingSchedule';section=id;dashboardFocus=null;if(id==='tasks'){taskStage='all';taskFilterRole='Semua Peran';taskFilterStatus='Semua Status';taskSearch='';taskQuick='all';taskColFilters={};taskSort={key:null,dir:null};taskPage=1;} sheetPage=1;sheetSearch='';sheetStatus='Semua Status';sheetColFilters={};sheetSort={key:null,dir:null};render()};function choose(id){selected=id;render()};function heading(title,desc,extra=''){return `<div class="heading"><div><div class="eyebrow">OPERATIONS / ${escape(section.toUpperCase())}</div><h1>${title}</h1><div class="sub">${desc}</div></div><div class="row">${extra}</div></div>`};function logtype(v){return v.includes('HAPUS')?'red':v.includes('ERROR')?'amber':'green'}
+const $=id=>document.getElementById(id);const fmt=n=>Number(n).toLocaleString('id-ID');const escape=s=>String(s??'').replace(/[&<>\"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));function toast(t,kind){const x=$('toast');if(!x)return;const msg=String(t??'');let k=kind;if(!k){if(/gagal|error|ditolak|diblokir|invalid|unauthorized|403|401|wajib|belum memenuhi|menunggu prasyarat|tidak dapat|ditolak/i.test(msg))k='error';else if(/berhasil|tersimpan|dibuat|dicabut|di-refresh|aktif|konfirmasi|disimpan|tercatat/i.test(msg))k='success';else k='info';}x.textContent=msg;x.className='toast '+k;x.classList.remove('hidden');clearTimeout(x._v165t);x._v165t=setTimeout(()=>x.classList.add('hidden'),2800)};function record(type,detail,id){activityLog.unshift({at:new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),type,detail,id});queueDemoSave()};function active(){return orders.filter(o=>!o.deleted&&(branch==='Semua Cabang'||o.branch===branch))};function current(){return orders.find(o=>o.id===selected)};function tag(t){const s=String(t??'');let tone='';let role='';if(/Belum\s*Terverifikasi|UNKNOWN/i.test(s)){tone='unverified';role='v165-status--unverified';}else if(/Urgent/i.test(s)){tone='';role='v165-status--urgent';}else if(/Normal/i.test(s)){tone='';role='v165-status--normal';}else if(/Selesai|Lunas|Siap|Synced|Approved|Baru/i.test(s)){tone='green';role=/Selesai/i.test(s)?'v165-status--done':'';}else if(/Hapus|Konflik|Bermasalah/i.test(s)){tone='red';}else if(/Pending|Menunggu|Belum|Sedang|Produksi|QC|Verifikasi|Dijadwalkan|Packing|DP/i.test(s)){tone='amber';role=/(Pending|Menunggu|Belum)/i.test(s)?'v165-status--pending':'v165-status--process';}return `<span class="tag ${tone}${role?' '+role:''}">${escape(s)}</span>`;}function pageTitle(id){return({dashboard:'Overview',inbox:'Inbox Accurate',schedule:'Jadwal Produksi',tasks:'Tugas Tim',shippingSchedule:'Jadwal Pengiriman',machineMaster:'Master Mesin',paymentMonitor:'Monitoring Penerimaan',bufferMonitor:'Monitoring Buffer',productionReport:'Laporan Produksi',salarySlip:'Cetak Slip Gaji',history:'Log History',settings:'Pengaturan'})[id]||String(id||'')}function nav(id,label,count){const raw=String(label??'');const m=raw.match(/^(\S+)\s+(.*)$/);const icon=m?m[1]:'•';const text=m?m[2]:raw;return `<button class="navbtn ${section===id?'active':''}" type="button" onclick="go('${id}')" title="${escape(text)}"><span class="nav-ico" aria-hidden="true">${icon}</span><span class="nav-label hide-shrink">${escape(text)}</span>${count!==undefined?`<span class="nav-count hide-shrink">${count}</span>`:''}</button>`};function go(id){if(id==='mapping')id='settings';if(id==='workorder'||id==='qc')id='tasks';if(id==='delivery')id='shippingSchedule';section=id;dashboardFocus=null;if(id==='tasks'){taskStage='all';taskFilterRole='Semua Peran';taskFilterStatus='Semua Status';taskSearch='';taskQuick='all';taskColFilters={};taskSort={key:null,dir:null};taskPage=1;} sheetPage=1;sheetSearch='';sheetStatus='Semua Status';sheetColFilters={};sheetSort={key:null,dir:null};render()};function choose(id){selected=id;render()};function heading(title,desc,extra=''){return `<div class="heading"><div><div class="eyebrow">OPERATIONS / ${escape(section.toUpperCase())}</div><h1>${title}</h1><div class="sub">${desc}</div></div><div class="row">${extra}</div></div>`};function logtype(v){return v.includes('HAPUS')?'red':v.includes('ERROR')?'amber':'green'}
 const WF_STEPS=[
  ['po','PO Masuk','Referensi SO Accurate'],['payment','Approval Payment','Gate penerimaan'],['design','Approval Design','Gate desain'],['schedule','Penjadwalan','Mesin & operator'],['prep','Persiapan Cup','Screen & helper'],['sample','Sample Cetak Operator','Sampel awal'],['confirm','Konfirmasi Cetak','Output tercatat'],['qc','QC & Packing','Pemeriksaan akhir'],['delivery','Pengiriman','Rujukan SJ Accurate']];
 function wfEligible(o,key){if(key==='po')return true;if(key==='payment')return !o.approval||o.receipt!=='Lunas';if(key==='design')return !o.approval;if(key==='schedule')return ['inbox','schedule'].includes(o.stage);if(key==='prep')return ['schedule','run'].includes(o.stage);if(key==='sample')return o.stage==='run';if(key==='confirm')return ['run','qc'].includes(o.stage);if(key==='qc')return ['qc','packing','ready'].includes(o.stage);if(key==='delivery')return !!o.sj||['ready','delivered'].includes(o.stage);return false}
@@ -1589,7 +1816,7 @@ function closeSalarySlip(){document.body.classList.remove('printing-slip');$('mo
 function printSalarySlip(){document.body.classList.add('printing-slip');window.print();setTimeout(()=>document.body.classList.remove('printing-slip'),1200)}
 window.addEventListener('afterprint',()=>document.body.classList.remove('printing-slip'));
 
-function render(){syncSheetSchema();const a=active(); const stats=[['Order Aktif',a.length,'Referensi Accurate'],['Dalam Produksi',a.filter(o=>o.stage==='run').length,'Pekerjaan berjalan'],['Menunggu QC',a.filter(o=>o.stage==='qc').length,'Perlu keputusan'],['Siap Packing',a.filter(o=>o.stage==='packing').length,'Output tersedia']];$('root').innerHTML=`<div class="app section-${section}" id="v3-app"><div class="v3-nav-backdrop" onclick="v3ToggleNav(false)"></div><aside class="side" id="v41-primary-sidebar"><div class="logo"><div class="mark">E</div><div class="brand"><strong>ETERNAL</strong><small>PRODUCTION V3</small></div></div><nav><div class="navgroup">OPERASIONAL</div>${nav('dashboard','◫  Overview')}${nav('inbox','▣  Inbox Accurate',a.length)}${nav('schedule','▤  Jadwal Produksi')}${nav('tasks','☑  Tugas Tim',allTasks().filter(x=>x.status==='Siap').length)}${nav('shippingSchedule','▦  Jadwal Pengiriman')}${nav('machineMaster','▧  Master Mesin')}<div class="navgroup">MONITORING</div>${nav('paymentMonitor','▣  Monitoring Penerimaan')}${nav('bufferMonitor','▤  Monitoring Buffer')}<div class="navgroup">LAPORAN</div>${nav('productionReport','▤  Laporan Produksi')}${nav('salarySlip','▣  Cetak Slip Gaji')}${nav('history','◷  Log History',activityLog.length)}${nav('settings','⚙  Pengaturan')}</nav><div class="sidefoot"><span class="dot"></span> <b id="save-indicator">Memeriksa koneksi…</b></div></aside><button id="v44-sidebar-handle" type="button" onclick="v3ToggleNav()" aria-label="Tutup sidebar" aria-controls="v41-primary-sidebar" aria-expanded="true" title="Tutup sidebar">‹</button><main class="main"><div class="top"><div class="crumb">Eternal Packaging / <b>Production V3</b></div><div class="sync" id="v3-conn" role="status" aria-live="polite"><span id="v3-conn-api">API: MEMERIKSA</span><span id="v3-conn-gw">Gateway Accurate: BELUM DIPERIKSA</span><span id="v3-conn-sync">Sinkronisasi PO: BELUM TERSEDIA</span></div></div><div class="content"><div class="v3-quickbar" role="region" aria-label="Akses cepat"><div class="v3-quick-left"><span class="v3-quick-title">Akses cepat</span><button class="v3-quick" type="button" onclick="go('dashboard')">Overview</button><button class="v3-quick" type="button" onclick="go('inbox')">PO Masuk</button><button class="v3-quick" type="button" onclick="go('schedule')">Jadwal Produksi</button><button class="v3-quick" type="button" onclick="go('tasks')">Tugas Tim</button><button class="v3-quick" type="button" onclick="go('shippingSchedule')">Jadwal Kirim</button></div><div class="v3-quick-right"><button class="v3-iconbtn" type="button" onclick="v3OpenHelp()" title="Panduan penggunaan dan shortcut">? <span class="v3-help-label">Panduan</span></button></div></div>${renderSection(a,stats)}</div></main></div>`}
+function render(){syncSheetSchema();const a=active(); const stats=[['Order Aktif',a.length,'Referensi Accurate'],['Dalam Produksi',a.filter(o=>o.stage==='run').length,'Pekerjaan berjalan'],['Menunggu QC',a.filter(o=>o.stage==='qc').length,'Perlu keputusan'],['Siap Packing',a.filter(o=>o.stage==='packing').length,'Output tersedia']];$('root').innerHTML=`<div class="app section-${section}" id="v3-app"><div class="v3-nav-backdrop" onclick="v3ToggleNav(false)"></div><aside class="side" id="v41-primary-sidebar"><div class="logo"><div class="mark">E</div><div class="brand hide-shrink"><strong>ETERNAL</strong><small>PRODUCTION V3</small></div></div><nav aria-label="Navigasi utama"><div class="navgroup hide-shrink">OPERASIONAL</div>${nav('dashboard','◫  Overview')}${nav('inbox','▣  Inbox Accurate',a.length)}${nav('schedule','▤  Jadwal Produksi')}${nav('tasks','☑  Tugas Tim',allTasks().filter(x=>x.status==='Siap').length)}${nav('shippingSchedule','▦  Jadwal Pengiriman')}${nav('machineMaster','▧  Master Mesin')}<div class="navgroup hide-shrink">MONITORING</div>${nav('paymentMonitor','▣  Monitoring Penerimaan')}${nav('bufferMonitor','▤  Monitoring Buffer')}<div class="navgroup hide-shrink">LAPORAN</div>${nav('productionReport','▤  Laporan Produksi')}${nav('salarySlip','▣  Cetak Slip Gaji')}${nav('history','◷  Log History',activityLog.length)}${nav('settings','⚙  Pengaturan')}</nav><div class="sidefoot"><span class="dot"></span> <b id="save-indicator" class="hide-shrink">Memeriksa koneksi…</b></div><button id="v44-sidebar-handle" type="button" onclick="v3ToggleNav()" aria-label="Tutup sidebar" aria-controls="v41-primary-sidebar" aria-expanded="true" title="Tutup sidebar">‹</button></aside><main class="main"><div class="top"><div class="top-left"><div class="crumb">Eternal Packaging / <b id="v3-page-crumb">${escape((typeof pageTitle==='function'?pageTitle(section):null)||section)}</b></div><span class="v3-branch-chip" title="Cabang aktif">${escape(branch||'Semua Cabang')}</span></div><div class="top-right"><span class="v3-user-chip" id="v3-user-chip" title="Identitas sesi (jika tersedia)">Sesi · belum teridentifikasi</span><div class="sync" id="v3-conn" role="status" aria-live="polite"><span id="v3-conn-api">API: MEMERIKSA</span><span id="v3-conn-gw">Gateway Accurate: BELUM DIPERIKSA</span><span id="v3-conn-sync">Sinkronisasi PO: BELUM TERSEDIA</span></div></div></div><div class="content"><div class="v3-quickbar" role="region" aria-label="Akses cepat"><div class="v3-quick-left"><span class="v3-quick-title">Akses cepat</span><button class="v3-quick" type="button" onclick="go('dashboard')">Overview</button><button class="v3-quick" type="button" onclick="go('inbox')">PO Masuk</button><button class="v3-quick" type="button" onclick="go('schedule')">Jadwal Produksi</button><button class="v3-quick" type="button" onclick="go('tasks')">Tugas Tim</button><button class="v3-quick" type="button" onclick="go('shippingSchedule')">Jadwal Kirim</button></div><div class="v3-quick-right"><button class="v3-iconbtn" type="button" onclick="v3OpenHelp()" title="Panduan penggunaan dan shortcut">? <span class="v3-help-label">Panduan</span></button></div></div>${renderSection(a,stats)}</div></main></div>`}
 
 const COLW_KEYS={inbox:'epv3:colw:inbox',schedule:'epv3:colw:schedule',tasks:'epv3:colw:tasks',shipping:'epv3:colw:shipping',report:'epv3:colw:report',salary:'epv3:colw:salary',buffer:'epv3:colw:buffer',kontrak:'epv3:colw:kontrak',intake:'epv3:colw:intake',renea:'epv3:colw:renea',flow31:'epv3:colw:flow31',mapping:'epv3:colw:mapping'};
 const SCHEDULE_COL_DEFAULTS={id:168,name:210,assignmentDate:148,operator:148,item:240,scheduled:124,assignmentQty:124,progress:160,qty:112,orderPriority:120,bufferLabel:128,ship:128,branch:120,screen:110,inkSequence:150,designGate:128,paymentGate:128,holdStatus:120,prepStatus:120,packed:110,status:128,action:118};
@@ -2137,7 +2364,7 @@ function toggleSheetFilterAll(checked){const p=document.getElementById('sheet-fi
 function updateFilterSelectionCount(){const p=document.getElementById('sheet-filter-menu');if(!p)return;const checks=[...p.querySelectorAll('input[data-sheet-value]')],count=checks.filter(x=>x.checked).length;const t=p.querySelector('[data-filter-count]');if(t)t.textContent=`${count} dari ${checks.length} nilai dipilih`;const all=p.querySelector('[data-select-all]');if(all){all.checked=count===checks.length;all.indeterminate=count>0&&count<checks.length}}
 function openSheetFilter(key,button){closeSheetFilter();const col=COLUMN_MAP[key];if(!col||key==='action')return;sheetOpenFilter=key;const f=sheetColFilters[key]||{};const values=uniqueSheetOptions(key);const list=values.map((v,i)=>`<label data-filter-item="${escape(v)}" class="filter-option"><input data-sheet-value type="checkbox" value="${escape(v)}" ${(f.selected==null||f.selected.includes(v))?'checked':''} onchange="updateFilterSelectionCount()"><span title="${escape(v)}">${escape(v||'(kosong)')}</span></label>`).join('');const menu=document.createElement('div');menu.id='sheet-filter-menu';menu.className='sheet-filter-menu';menu.setAttribute('role','dialog');menu.setAttribute('aria-label',`Filter ${col.label}`);menu.innerHTML=`<div class="filter-title"><b>Filter · ${escape(col.label)}</b><button class="filter-close" onclick="closeSheetFilter()" aria-label="Tutup filter">×</button></div><div class="filter-sort"><button onclick="setSheetSort('${key}','asc')">↑ Urut A → Z / kecil</button><button onclick="setSheetSort('${key}','desc')">↓ Urut Z → A / besar</button></div><div class="filter-move"><button onclick="moveSheetColumn('${key}',-1)">← Geser kiri</button><button onclick="moveSheetColumn('${key}',1)">Geser kanan →</button></div><div class="filter-inputs"><label>Pencarian teks pada kolom<input data-sheet-text type="search" placeholder="Mengandung..." value="${escape(f.text||'')}"></label>${col.kind==='number'?`<div class="filter-range"><label>Min<input data-sheet-min type="number" placeholder="Min" value="${escape(f.min??'')}"></label><label>Maks<input data-sheet-max type="number" placeholder="Maks" value="${escape(f.max??'')}"></label></div>`:col.kind==='date'?`<div class="filter-range"><label>Dari<input data-sheet-date-from type="date" value="${escape(f.dateFrom??'')}"></label><label>Sampai<input data-sheet-date-to type="date" value="${escape(f.dateTo??'')}"></label></div>`:''}<label>Cari pilihan nilai<input type="search" placeholder="Cari dalam pilihan..." oninput="renderFilterOptions(this.value)"></label></div><div class="filter-select-all"><label><input data-select-all type="checkbox" onchange="toggleSheetFilterAll(this.checked)"> (Pilih semua)</label><small data-filter-count></small></div><div class="filter-values">${list||'<div class="mutedcell">Tidak ada nilai</div>'}</div><div class="filter-actions"><button class="btn sm" onclick="clearSheetColFilter('${key}')">Hapus filter</button><button class="btn sm primary" onclick="applySheetFilter('${key}')">Terapkan</button></div>`;
  document.body.appendChild(menu);const rect=button.getBoundingClientRect(),maxLeft=Math.max(8,innerWidth-310);menu.style.left=Math.min(rect.left,maxLeft)+'px';menu.style.top=(rect.bottom+5+menu.offsetHeight>innerHeight?Math.max(8,rect.top-menu.offsetHeight-5):rect.bottom+5)+'px';updateFilterSelectionCount();menu.querySelector('input[placeholder="Cari dalam pilihan..."]')?.focus();}
-function sheetPageHtml(rows,type){const all=sheetFiltered(rows),total=all.length,pages=Math.max(1,Math.ceil(total/sheetSize));sheetPage=Math.min(pages,Math.max(1,sheetPage));const shown=all.slice((sheetPage-1)*sheetSize,sheetPage*sheetSize),statuses=[...new Set(rows.map(o=>String(sheetValue(o,'status')??'')))].filter(Boolean);const cols=sheetColumnOrder.map(k=>COLUMN_MAP[k]);const vis=getSheetVisibleColumns();const visibleOrdered=sheetColumnOrder.filter(k=>vis.has(k));const groupRow=(type==='schedule'||sheetSchemaKind==='production')?`<tr class="sheet-group-row">${sheetGroupHeaderHtml(sheetColumnOrder,vis)}</tr>`:'';return `<div class="sheetbar"><input id="sheet-search" class="fieldcontrol" type="search" value="${escape(sheetSearch)}" placeholder="${type==='shippingSchedule'?'Cari SJ, PO, pelanggan...':'Cari SO, pelanggan...'}" oninput="setSheetSearch(this.value)">${sheetColumnVisibilityDropdown()}<select class="fieldcontrol" onchange="setSheetStatus(this.value)"><option ${sheetStatus==='Semua Status'?'selected':''}>Semua Status</option>${statuses.map(t=>`<option ${sheetStatus===t?'selected':''}>${escape(t)}</option>`).join('')}</select><select class="fieldcontrol" onchange="setSheetSize(this.value)">${[15,25,50].map(n=>`<option value="${n}" ${sheetSize===n?'selected':''}>${n} baris / halaman</option>`).join('')}</select><button class="btn sm" onclick="resetSheetFilters()">⟲ Bersihkan</button><button class="btn sm" onclick="resetSheetColumns()">${sheetSchemaKind==='production'?'↺ Reset Default V1':'↔ Reset Kolom'}</button>${v162ResetLebarBtn(type==='schedule'||section==='schedule'?COLW_KEYS.schedule:(section==='shippingSchedule'?COLW_KEYS.shipping:(section==='tasks'?COLW_KEYS.tasks:'epv3:colw:sheet:'+(sheetSchemaKind||'production'))))}<button class="btn sm" onclick="exportSheet()">↓ CSV</button></div><div class="sheet-guidance sheet-guidance-compact">▾ filter · ▤ kolom · ⠿ urut · resize tepi kanan · Panduan</div>${type==='schedule'?scheduleOverview(active().filter(o=>hasPrintLine(o)||hasUnknownLine(o))): ''}<div class="sheetwrap ${shown.length<8?'sheetwrap-adaptive':''}" role="region" aria-label="${type==='shippingSchedule'||type==='delivery'?'Sheet pengiriman':'Sheet produksi'}" tabindex="0"><table class="sheet excel-sheet v3-schedule-sheet" data-v3-colw="${type==='schedule'||section==='schedule'?COLW_KEYS.schedule:(section==='shippingSchedule'?COLW_KEYS.shipping:'epv3:colw:sheet:'+(sheetSchemaKind||'production'))}" data-v3-sticky="id,name"><colgroup>${sheetColumnOrder.map(k=>`<col data-column="${k}" class="${vis.has(k)?'':'v40-col-hidden'}">`).join('')}</colgroup><thead>${groupRow}<tr>${cols.map(c=>`<th data-column="${c.key}" class="${vis.has(c.key)?'':'v40-col-hidden'}" draggable="${c.key!=='action'}" ondragstart="sheetDragStart(event,'${c.key}')" ondragover="sheetDragOver(event,'${c.key}')" ondrop="sheetDrop(event,'${c.key}')" ondragend="sheetDragEnd()" title="${c.key==='action'?'Detail produksi':'Seret untuk menggeser urutan kolom'}"><div class="sheet-th"><span class="sheet-drag" aria-hidden="true">${c.key==='action'?'':'⠿'}</span><span class="sheet-th-label">${escape(c.label)}</span>${c.key!=='action'?`<button type="button" class="sheet-filter-trigger ${sheetColFilters[c.key]?'filtered':''}" title="Filter / sort ${escape(c.label)}" aria-label="Filter kolom ${escape(c.label)}" onclick="event.stopPropagation();openSheetFilter('${c.key}',this)">${sheetSort.key===c.key?(sheetSort.dir==='asc'?'↑':'↓'):sheetColFilters[c.key]?'●':'▾'}</button>`:''}</div></th>`).join('')}</tr></thead><tbody>${shown.map(o=>`<tr class="${drawerId===o.id?'focused':''} ${o.colorWorkItem?'color-work-row':''}" data-color-row="${o.colorWorkItem?o.colorIndex:0}">${cols.map(c=>`<td data-column="${c.key}" class="${c.kind==='number'?'right':''} ${vis.has(c.key)?'':'v40-col-hidden'}">${c.cell(o)}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${Math.max(1,visibleOrdered.length)}" class="sheetempty">Tidak ada PO sesuai filter kolom · gunakan Bersihkan Filter</td></tr>`}</tbody></table></div><div class="sheetfoot"><div>Menampilkan ${total?(sheetPage-1)*sheetSize+1:0}–${Math.min(total,sheetPage*sheetSize)} dari ${total} pekerjaan · ${(window.__V3_PREVIEW_FIXTURE__||(window.__V3_INBOX__&&window.__V3_INBOX__.previewFixture))?'PREVIEW SIMULASI/FIXTURE — bukan Accurate Live':(window.__V3_INBOX__&&window.__V3_INBOX__.mode==='live')?'Accurate Live (halaman ini)':(window.__V3_INBOX__&&window.__V3_INBOX__.mode==='error')?'Sumber Accurate error — bukan data demo':'Data demo, bukan Accurate nyata'}</div><div class="pager"><button class="btn sm" ${sheetPage<=1?'disabled':''} onclick="changeSheetPage(${sheetPage-1})">‹ Sebelumnya</button><span style="padding:7px 10px">${sheetPage} / ${pages}</span><button class="btn sm" ${sheetPage>=pages?'disabled':''} onclick="changeSheetPage(${sheetPage+1})">Berikutnya ›</button></div></div>`}
+function sheetPageHtml(rows,type){const all=sheetFiltered(rows),total=all.length,pages=Math.max(1,Math.ceil(total/sheetSize));sheetPage=Math.min(pages,Math.max(1,sheetPage));const shown=all.slice((sheetPage-1)*sheetSize,sheetPage*sheetSize),statuses=[...new Set(rows.map(o=>String(sheetValue(o,'status')??'')))].filter(Boolean);const cols=sheetColumnOrder.map(k=>COLUMN_MAP[k]);const vis=getSheetVisibleColumns();const visibleOrdered=sheetColumnOrder.filter(k=>vis.has(k));const groupRow=(type==='schedule'||sheetSchemaKind==='production')?`<tr class="sheet-group-row">${sheetGroupHeaderHtml(sheetColumnOrder,vis)}</tr>`:'';const scheduleChrome=type==='schedule'?scheduleOverview(active().filter(o=>hasPrintLine(o)||hasUnknownLine(o))):'';return `${scheduleChrome}<div class="sheetbar" aria-label="${type==='schedule'?'Alat sheet jadwal':'Alat sheet'}"><input id="sheet-search" class="fieldcontrol" type="search" value="${escape(sheetSearch)}" placeholder="${type==='shippingSchedule'?'Cari SJ, PO, pelanggan...':'Cari SO, pelanggan...'}" oninput="setSheetSearch(this.value)">${sheetColumnVisibilityDropdown()}<select class="fieldcontrol" onchange="setSheetStatus(this.value)"><option ${sheetStatus==='Semua Status'?'selected':''}>Semua Status</option>${statuses.map(t=>`<option ${sheetStatus===t?'selected':''}>${escape(t)}</option>`).join('')}</select><select class="fieldcontrol" onchange="setSheetSize(this.value)">${[15,25,50].map(n=>`<option value="${n}" ${sheetSize===n?'selected':''}>${n} baris / halaman</option>`).join('')}</select><button class="btn sm" onclick="resetSheetFilters()">⟲ Bersihkan</button><button class="btn sm" onclick="resetSheetColumns()">${sheetSchemaKind==='production'?'↺ Reset Default V1':'↔ Reset Kolom'}</button>${v162ResetLebarBtn(type==='schedule'||section==='schedule'?COLW_KEYS.schedule:(section==='shippingSchedule'?COLW_KEYS.shipping:(section==='tasks'?COLW_KEYS.tasks:'epv3:colw:sheet:'+(sheetSchemaKind||'production'))))}<button class="btn sm" onclick="exportSheet()">↓ CSV</button></div><div class="sheet-guidance sheet-guidance-compact">▾ filter · ▤ kolom · ⠿ urut · resize tepi kanan · Panduan</div><div class="sheetwrap ${shown.length<8?'sheetwrap-adaptive':''}" role="region" aria-label="${type==='shippingSchedule'||type==='delivery'?'Sheet pengiriman':'Sheet produksi'}" tabindex="0"><table class="sheet excel-sheet v3-schedule-sheet" data-v3-colw="${type==='schedule'||section==='schedule'?COLW_KEYS.schedule:(section==='shippingSchedule'?COLW_KEYS.shipping:'epv3:colw:sheet:'+(sheetSchemaKind||'production'))}" data-v3-sticky="id,name"><colgroup>${sheetColumnOrder.map(k=>`<col data-column="${k}" class="${vis.has(k)?'':'v40-col-hidden'}">`).join('')}</colgroup><thead>${groupRow}<tr>${cols.map(c=>`<th data-column="${c.key}" class="${vis.has(c.key)?'':'v40-col-hidden'}" draggable="${c.key!=='action'}" ondragstart="sheetDragStart(event,'${c.key}')" ondragover="sheetDragOver(event,'${c.key}')" ondrop="sheetDrop(event,'${c.key}')" ondragend="sheetDragEnd()" title="${c.key==='action'?'Detail produksi':'Seret untuk menggeser urutan kolom'}"><div class="sheet-th"><span class="sheet-drag" aria-hidden="true">${c.key==='action'?'':'⠿'}</span><span class="sheet-th-label">${escape(c.label)}</span>${c.key!=='action'?`<button type="button" class="sheet-filter-trigger ${sheetColFilters[c.key]?'filtered':''}" title="Filter / sort ${escape(c.label)}" aria-label="Filter kolom ${escape(c.label)}" onclick="event.stopPropagation();openSheetFilter('${c.key}',this)">${sheetSort.key===c.key?(sheetSort.dir==='asc'?'↑':'↓'):sheetColFilters[c.key]?'●':'▾'}</button>`:''}</div></th>`).join('')}</tr></thead><tbody>${shown.map(o=>`<tr class="${drawerId===o.id?'focused':''} ${o.colorWorkItem?'color-work-row':''}" data-color-row="${o.colorWorkItem?o.colorIndex:0}">${cols.map(c=>`<td data-column="${c.key}" class="${c.kind==='number'?'right':''} ${vis.has(c.key)?'':'v40-col-hidden'}">${c.cell(o)}</td>`).join('')}</tr>`).join('')||`<tr><td colspan="${Math.max(1,visibleOrdered.length)}" class="sheetempty">Tidak ada PO sesuai filter kolom · gunakan Bersihkan Filter</td></tr>`}</tbody></table></div><div class="sheetfoot"><div>Menampilkan ${total?(sheetPage-1)*sheetSize+1:0}–${Math.min(total,sheetPage*sheetSize)} dari ${total} pekerjaan · ${(window.__V3_PREVIEW_FIXTURE__||(window.__V3_INBOX__&&window.__V3_INBOX__.previewFixture))?'PREVIEW SIMULASI/FIXTURE — bukan Accurate Live':(window.__V3_INBOX__&&window.__V3_INBOX__.mode==='live')?'Accurate Live (halaman ini)':(window.__V3_INBOX__&&window.__V3_INBOX__.mode==='error')?'Sumber Accurate error — bukan data demo':'Data demo, bukan Accurate nyata'}</div><div class="pager"><button class="btn sm" ${sheetPage<=1?'disabled':''} onclick="changeSheetPage(${sheetPage-1})">‹ Sebelumnya</button><span style="padding:7px 10px">${sheetPage} / ${pages}</span><button class="btn sm" ${sheetPage>=pages?'disabled':''} onclick="changeSheetPage(${sheetPage+1})">Berikutnya ›</button></div></div>`}
 function showShippingDetail(id){
  const o=orders.find(x=>x.id===id&&!x.deleted);if(!o)return;
  const d=o.delivery;drawerId=id;
@@ -3880,7 +4107,197 @@ window.v49Close=function(){const modal=document.getElementById('modal');const ba
  window.render();
 })();
 </script>
+<style id="v3-final-shell-overrides">
+/* Iter2 polish — kalahkan V165/base: span:last-child abu pada label, hover putih, topbar padat */
+#v3-app .side{
+  background:var(--final-sidebar,#102d27)!important;
+  color:var(--final-sidebar-text,#bfd6cd)!important;
+  border-right:1px solid var(--final-sidebar-line,#315248)!important;
+}
+#v3-app .side .navgroup{
+  color:var(--final-sidebar-muted,#a6c5b9)!important;
+  padding:14px 14px 4px!important;
+  font-size:10px!important;
+  letter-spacing:1.2px;
+}
+#v3-app .side .navbtn,
+#v3-app .side button.navbtn{
+  display:flex!important;
+  align-items:center!important;
+  justify-content:flex-start!important;
+  gap:10px!important;
+  width:calc(100% - 16px)!important;
+  margin:3px 8px!important;
+  padding:10px 12px!important;
+  min-height:40px!important;
+  border-radius:9px!important;
+  border:0!important;
+  border-color:transparent!important;
+  background:transparent!important;
+  background-color:transparent!important;
+  color:var(--final-sidebar-text,#bfd6cd)!important;
+  box-shadow:none!important;
+  font-weight:650!important;
+}
+#v3-app .side .navbtn:hover,
+#v3-app .side .navbtn:focus,
+#v3-app .side button.navbtn:hover{
+  background:var(--final-nav-hover,#214c3c)!important;
+  background-color:var(--final-nav-hover,#214c3c)!important;
+  color:#fff!important;
+}
+#v3-app .side .navbtn.active,
+#v3-app .side button.navbtn.active{
+  background:var(--final-nav-hover,#214c3c)!important;
+  background-color:var(--final-nav-hover,#214c3c)!important;
+  color:#fff!important;
+  box-shadow:inset 3px 0 0 var(--final-nav-accent,#32ca8b)!important;
+}
+/* Base `.navbtn span:last-child` semula mewarnai label seperti badge abu — reset */
+#v3-app .side .navbtn > span{
+  background:transparent!important;
+  background-color:transparent!important;
+  color:inherit!important;
+  border-radius:0!important;
+  padding:0!important;
+  font-size:inherit!important;
+}
+#v3-app .side .navbtn .nav-ico{
+  flex:none;
+  width:1.25em;
+  text-align:center;
+  font-size:16px!important;
+  line-height:1;
+  opacity:.95;
+}
+#v3-app .side .navbtn .nav-label{
+  flex:1;
+  min-width:0;
+  text-align:left;
+  line-height:1.25;
+  font-size:13px!important;
+}
+#v3-app .side .navbtn .nav-count{
+  margin-left:auto!important;
+  flex:none;
+  background:#1a4036!important;
+  background-color:#1a4036!important;
+  color:#cfe6db!important;
+  border-radius:5px!important;
+  padding:1px 7px!important;
+  font-size:10px!important;
+  font-weight:800!important;
+  line-height:1.4;
+}
+#v3-app .side .brand strong{color:#fff!important}
+#v3-app .side .brand small{color:var(--final-sidebar-muted,#a6c5b9)!important}
+#v3-app .side .sidefoot{
+  border-top:1px solid var(--final-sidebar-line,#315248)!important;
+  color:var(--final-sidebar-muted,#a6c5b9)!important;
+}
+/* Header 68px — cegah overlap/overflow di 1366 & 1440 */
+#v3-app .main{min-width:0!important;overflow-x:hidden}
+#v3-app .main .top{
+  height:var(--final-topbar-h,68px)!important;
+  min-height:var(--final-topbar-h,68px)!important;
+  max-height:var(--final-topbar-h,68px)!important;
+  padding:0 18px 0 22px!important;
+  gap:10px!important;
+  flex-wrap:nowrap!important;
+  overflow:hidden;
+}
+#v3-app .top-left{
+  display:flex;align-items:center;gap:10px;min-width:0;flex:1 1 auto;overflow:hidden;
+}
+#v3-app .top-right{
+  display:flex;align-items:center;gap:8px;flex:0 1 auto;min-width:0;justify-content:flex-end;overflow:hidden;
+}
+#v3-app .top .crumb{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:280px}
+#v3-app .top .v3-branch-chip,
+#v3-app .top .v3-user-chip{
+  flex:none;max-width:200px;overflow:hidden;text-overflow:ellipsis;
+  padding:5px 9px!important;font-size:11px!important;
+}
+#v3-app .top .sync{
+  display:flex;flex-wrap:nowrap;gap:8px;align-items:center;
+  font-size:10px!important;color:#738995;min-width:0;overflow:hidden;
+}
+#v3-app .top .sync span{white-space:nowrap}
+@media(max-width:1440px){
+  #v3-app .top .sync span:last-child{display:none} /* Sinkronisasi panjang — API/Gateway tetap */
+}
+@media(max-width:1366px){
+  #v3-app .top .crumb{max-width:200px}
+  #v3-app .top .v3-user-chip{max-width:160px}
+}
+@media(min-width:901px){
+  #v3-app.app{grid-template-columns:var(--final-shell-width,226px) minmax(0,1fr)!important}
+  body.v41-nav-collapsed #v3-app.app{grid-template-columns:var(--final-shell-rail,65px) minmax(0,1fr)!important}
+  body.v41-nav-collapsed #v3-app .side{
+    width:var(--final-shell-rail,65px)!important;min-width:var(--final-shell-rail,65px)!important;
+    overflow-x:visible!important;overflow-y:auto!important;
+    visibility:visible!important;pointer-events:auto!important;
+    border-right:1px solid var(--final-sidebar-line,#315248)!important;
+  }
+  body.v41-nav-collapsed #v3-app .side .hide-shrink,
+  body.v41-nav-collapsed #v3-app .side .navgroup,
+  body.v41-nav-collapsed #v3-app .side .brand,
+  body.v41-nav-collapsed #v3-app .side .nav-count,
+  body.v41-nav-collapsed #v3-app .side .sidefoot b{display:none!important}
+  body.v41-nav-collapsed #v3-app .side .logo{padding:14px 0!important;justify-content:center}
+  body.v41-nav-collapsed #v3-app .side .navbtn,
+  body.v41-nav-collapsed #v3-app .side button.navbtn{
+    width:calc(100% - 8px)!important;
+    margin:4px 4px!important;
+    padding:11px 0!important;
+    justify-content:center!important;
+    gap:0!important;
+  }
+  body.v41-nav-collapsed #v3-app .side .nav-ico{
+    width:auto!important;
+    font-size:17px!important;
+    margin:0!important;
+  }
+  body.v41-nav-collapsed #v3-app .side .sidefoot{padding:10px 0;text-align:center}
+  #v3-app #v44-sidebar-handle{
+    position:absolute!important;left:auto!important;right:-13px!important;top:172px!important;
+    width:26px!important;height:44px!important;z-index:45!important;
+  }
+  body.v41-nav-collapsed #v3-app #v44-sidebar-handle{left:auto!important;right:-13px!important}
+}
+html,body{overflow-x:hidden}
+</style>
 <script src="/live-loading-ledger.js"></script>
 <script src="/live-runtime.js"></script>
 <script src="/workflow-documents.js"></script>
+<script id="v3-final-shell-sync">
+(function(){
+  function syncShellMeta(){
+    const chip=document.getElementById('v3-user-chip');
+    const auth=window.__V3_AUTH__;
+    if(chip){
+      if(auth&&auth.status==='ok'&&(auth.username||auth.role)){
+        chip.textContent=(auth.username||'user')+(auth.role?' · '+auth.role:'');
+        chip.title='Sesi terautentikasi';
+      }else if(auth&&auth.status==='failed'){
+        chip.textContent='Sesi · tidak valid';
+      }else{
+        chip.textContent='Sesi · belum teridentifikasi';
+      }
+    }
+    const crumb=document.getElementById('v3-page-crumb');
+    if(crumb&&typeof pageTitle==='function'&&typeof section!=='undefined'){
+      crumb.textContent=pageTitle(section);
+    }
+  }
+  const wrap=function(fn){
+    if(typeof fn!=='function'||fn.__finalShellWrapped)return fn;
+    const out=function(){const r=fn.apply(this,arguments);try{syncShellMeta();if(typeof v41UpdateSidebarButton==='function')v41UpdateSidebarButton();}catch(e){}return r;};
+    out.__finalShellWrapped=true;return out;
+  };
+  window.render=wrap(window.render);
+  document.addEventListener('DOMContentLoaded',syncShellMeta);
+  setTimeout(syncShellMeta,0);
+})();
+</script>
 </body></html>
