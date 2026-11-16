@@ -2,9 +2,9 @@
 
 **Diperbarui:** 2026-11-16 (Asia/Jakarta)
 **HEAD committed:** `5528bb291e573ce426ab89bd02e394cab9a1f72f`
-**WIP lokal (NO COMMIT):** sticky Jadwal/Tugas/Inbox; payment sheet empty-state sticky; Tugas Tim tidak dihapus saat Inbox Accurate 403; smoke empty/populated six-role; sticky geometry; manifest HTML Final
+**WIP lokal (NO COMMIT):** Reskin Iter1 Jadwal+Kontrol (token Handoff Final); sticky/smoke checkpoint sebelumnya sudah di-push `ac6be39`
 **PR #15:** OPEN · **PR #14:** HOLD · Production authz: **legacy**
-**Checkpoint smoke:** empty `ok=true` · populated six-role `ok=true` · sticky geometry 5/5 `ok=true` (Inbox/Pengiriman empty-body: header sticky saja)
+**Checkpoint smoke (committed):** empty/populated/sticky PASS · **Reskin Iter1 browser:** Jadwal KPI Final cards PASS (1440 + 1366) — F3-039 tetap BLOCKED
 
 ## Cara baca
 
@@ -40,7 +40,7 @@
 | F3-010 | Jadwal cetak-only API | Jadwal | Kontrak | schedule | list print lines | `…/ops/schedule` | schedule read | SELESAI* | SELESAI* | schedule API | pytest + smoke 200 | — | PG | P1 |
 | F3-011 | Multi-operator / HOLD / filter header | Jadwal | Handoff+V22 | sheet + buckets | HOLD filter | schedule + FE | — | PARSIAL | PARSIAL | buckets HOLD + holdStatus | smoke buckets | parity kolom Final penuh | F3-010 | P1 |
 | F3-012 | Sticky / resize / visibility / pagination Jadwal | Jadwal | Handoff | v3-schedule-sheet | spreadsheet | FE | — | PARSIAL | SELESAI* | `data-v3-sticky=id,name` + CSS | vitest + geometry smoke (scroll hold + align) | — | — | P1 |
-| F3-013 | KPI Kontrol qty + Status Kerja | Kontrol | Sandbox/Handoff | `#v3-kontrol-qty` | ringkasan | schedule summary | read | SELESAI* | SELESAI* | scheduleOverview live | smoke labels | — | F3-010 | P1 |
+| F3-013 | KPI Kontrol qty + Status Kerja | Kontrol | Sandbox/Handoff | `#v3-kontrol-qty` | ringkasan | schedule summary | read | SELESAI* | SELESAI* | scheduleOverview live + kartu Final Iter1 | smoke + reskin browser 1440/1366 | visual shell sidebar Final belum | F3-010 | P1 |
 | F3-014 | Tugas Kepala Produksi | Tugas | Kontrak | role filter | Atur jadwal | `/tasks` | schedule | SELESAI* | SELESAI* | teamTasks + workflow | E2E + gap populated smoke | enforced Live HOLD; Inbox Accurate tetap PARSIAL | PR14 | P1 |
 | F3-015 | Tugas Designer | Tugas | Kontrak | Kerjakan | upload/approve | tasks API | design | SELESAI* | SELESAI* | sama | E2E + gap populated | sama | PR14 | P1 |
 | F3-016 | Tugas Screener | Tugas | Kontrak | Kerjakan | prep screen | prep API | prep | SELESAI* | SELESAI* | sama | E2E + gap populated | sama | — | P1 |

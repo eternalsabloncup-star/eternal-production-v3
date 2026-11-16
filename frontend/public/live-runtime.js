@@ -4569,11 +4569,14 @@
             return '<section id="scheduleOverview" class="flat-notice" role="status">Memuat Jadwal Produksi dari PostgreSQL…</section>';
           }
           const s = sched.summary || {};
-          const cells = [
+          // Primary KPI row mirrors Handoff Final card density; values tetap dari summary PG (anti double-count).
+          const primary = [
             ["Total Qty SO (Cetak)", scheduleNum(s.qty_print_po)],
             ["Qty Terjadwal", scheduleNum(s.qty_allocated)],
             ["Qty Sudah Dicetak", scheduleNum(s.qty_printed_done)],
             ["Qty Belum Selesai", scheduleNum(s.qty_unprinted)],
+          ];
+          const secondary = [
             ["Belum Dijadwalkan", scheduleNum(s.qty_unallocated)],
             ["Baris Cetak", scheduleNum(s.print_line_count)],
           ];
@@ -4609,6 +4612,12 @@
             ["all", "Semua (histori)"],
             ["month", "Bulan berjalan"],
           ];
+          function kpiCard(label, value, extraClass) {
+            const num = typeof value === "number";
+            return '<div class="final-kpi' + (extraClass ? " " + extraClass : "") + '"><small>' + escapeHtml(label) +
+              "</small><strong>" + (num && typeof window.fmt === "function" ? window.fmt(value) : escapeHtml(String(value))) +
+              (num ? " <small>pcs</small>" : "") + "</strong></div>";
+          }
           return '<section id="scheduleOverview" class="v44-production-strip v160-kpi-row" role="region" aria-label="Kontrol kuantitas produksi">' +
             '<div class="v36-toolbar">' +
             buckets.map(function (b) {
@@ -4630,15 +4639,18 @@
                 (sched.has_more ? "" : " disabled") + ">›</button>"
               : "") +
             "</div>" +
-            '<div class="v44-production-strip-items" id="v3-kontrol-qty">' +
-            cells.map(function (c) {
-              return '<div class="v44-production-metric"><span>' + escapeHtml(c[0]) +
-                "</span><strong>" + (typeof window.fmt === "function" ? window.fmt(c[1]) : c[1]) +
-                " <small>pcs</small></strong></div>";
+            '<div class="final-kpis" id="v3-kontrol-qty">' +
+            primary.map(function (c) { return kpiCard(c[0], c[1]); }).join("") +
+            kpiCard("Status Kerja", statusKerja, "final-kpi--status") +
+            "</div>" +
+            '<div class="final-kpis-secondary">' +
+            secondary.map(function (c) {
+              return '<span class="final-kpi-chip">' + escapeHtml(c[0]) + "<b>" +
+                (typeof window.fmt === "function" ? window.fmt(c[1]) : c[1]) + "</b></span>";
             }).join("") +
-            '<div class="v44-production-metric" id="v3-status-kerja"><span>Status Kerja</span><strong>' +
-            escapeHtml(statusKerja) + "</strong></div>" +
-            "</div>" + banner +
+            "</div>" +
+            '<div id="v3-status-kerja" class="hidden" aria-hidden="true">' + escapeHtml(statusKerja) + "</div>" +
+            banner +
             '<small>Sumber: PostgreSQL JobLineQty print (summary server, anti double-count multi-operator) · total ' +
             (sched.total || 0) +
             " baris · tidak bergantung halaman Inbox</small></section>";
