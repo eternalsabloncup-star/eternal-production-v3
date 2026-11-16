@@ -33,6 +33,13 @@ from app.services.production.engine import (
 from app.services.production.lifecycle import require_job_active
 
 SCREEN_SIZES = frozenset({"kecil", "besar"})
+# Contract: role=helper on a print line IS Prepare Cup (no parallel physical event type).
+PREP_ROLE_SCREEN = "screener"
+PREP_ROLE_CUP = "helper"
+PREP_KIND_BY_ROLE = {
+    PREP_ROLE_SCREEN: "prepare_screen",
+    PREP_ROLE_CUP: "prepare_cup",
+}
 
 
 def _normalize_production_process(value: str | None) -> str:
@@ -305,10 +312,24 @@ async def set_preparation(
             JobLineQty.job_id == job.id, JobLineQty.so_line_id == so_line_id
         )
     )
-    if existing_line is not None and (existing_line.production_process or "").strip() == "non_print":
+    # Classification is canonical (Accurate sync / explicit JobLineQty). Never invent PRINT.
+    if existing_line is None:
         raise HTTPException(
             409,
-            "Line non-print tidak masuk alur cetak. Packing langsung setelah payment dan bukti fisik.",
+            "Klasifikasi line belum tersedia (JobLineQty hilang). "
+            "Sinkronkan line dari sumber canonical sebelum Prepare Screen/Cup.",
+        )
+    proc_existing = _normalize_production_process(existing_line.production_process)
+    if proc_existing == "non_print":
+        raise HTTPException(
+            409,
+            "Line non-print tidak mendapat Prepare Screen/Cup. Packing langsung setelah payment dan bukti fisik.",
+        )
+    if proc_existing != "print":
+        raise HTTPException(
+            409,
+            "Klasifikasi line masih UNKNOWN — Prepare Screen/Cup ditolak sampai "
+            "production_process=print dari sumber canonical (bukan dari aksi prep).",
         )
     await gates_open_for_schedule(job, session)
     if qty < 0:
@@ -341,6 +362,7 @@ async def set_preparation(
         if asg is None or asg.job_id != job.id:
             raise HTTPException(404, "Assignment tidak valid untuk persiapan")
 
+    # Qty ceiling update only — never rewrite production_process from prep payload.
     if po_qty is not None:
         await upsert_job_line_qty(session, job, so_line_id=so_line_id, po_qty=po_qty)
 
@@ -349,11 +371,14 @@ async def set_preparation(
             JobLineQty.job_id == job.id, JobLineQty.so_line_id == so_line_id
         )
     )
-    if role == "helper":
-        if line is None:
-            raise HTTPException(422, "PO line qty wajib sebelum helper prepare")
+    if line is None or _normalize_production_process(line.production_process) != "print":
+        raise HTTPException(
+            409,
+            "Prepare Screen/Cup hanya untuk line cetak terklasifikasi (production_process=print).",
+        )
+    if role == PREP_ROLE_CUP:
         if qty > line.po_qty:
-            raise HTTPException(409, "Helper qty melebihi PO line")
+            raise HTTPException(409, "Prepare Cup qty melebihi PO line")
         confirmed = await _confirmed_pass1(session, job.id, so_line_id)
         if qty < confirmed:
             raise HTTPException(
@@ -444,7 +469,20 @@ async def helper_prepared_qty(
         select(PrepState).where(
             PrepState.job_id == job_id,
             PrepState.so_line_id == so_line_id,
-            PrepState.role == "helper",
+            PrepState.role == PREP_ROLE_CUP,
+        )
+    )
+    return Decimal(state.qty) if state else Decimal("0")
+
+
+async def screener_prepared_qty(
+    session: AsyncSession, job_id: int, so_line_id: str
+) -> Decimal:
+    state = await session.scalar(
+        select(PrepState).where(
+            PrepState.job_id == job_id,
+            PrepState.so_line_id == so_line_id,
+            PrepState.role == PREP_ROLE_SCREEN,
         )
     )
     return Decimal(state.qty) if state else Decimal("0")
@@ -462,3 +500,106 @@ async def remaining_helper_qty(
     if line is None:
         return Decimal("0")
     return Decimal(line.po_qty) - prepared
+
+
+async def require_print_preps_ready_for_sample(
+    session: AsyncSession,
+    job: ProductionJob,
+    *,
+    so_line_id: str | None = None,
+) -> None:
+    """Sample upload/approve only after Prepare Screen AND Prepare Cup READY per print line.
+
+    Parallel: screen and cup do not wait on each other; both must be READY before sample.
+    Multi-line: one READY line never authorizes another PENDING line.
+    UNKNOWN / missing classification never counts as print and never opens the gate.
+    """
+    line_map = {
+        str(ln.so_line_id): ln
+        for ln in (
+            await session.scalars(select(JobLineQty).where(JobLineQty.job_id == job.id))
+        ).all()
+        if str(getattr(ln, "so_line_id", "") or "").strip()
+    }
+
+    if so_line_id:
+        candidate_ids = [str(so_line_id).strip()]
+    else:
+        scheduled = (
+            await session.scalars(
+                select(ScheduleAssignment.so_line_id).where(
+                    ScheduleAssignment.job_id == job.id,
+                    ScheduleAssignment.status.in_(["active", "completed"]),
+                )
+            )
+        ).all()
+        candidate_ids = sorted(
+            {
+                str(lid).strip()
+                for lid in scheduled
+                if str(lid or "").strip()
+            }
+        )
+        if not candidate_ids:
+            candidate_ids = [
+                lid
+                for lid, ln in line_map.items()
+                if str(getattr(ln, "line_status", LINE_STATUS_ACTIVE) or LINE_STATUS_ACTIVE)
+                == LINE_STATUS_ACTIVE
+                and _normalize_production_process(getattr(ln, "production_process", None))
+                == "print"
+            ]
+
+    unresolved: list[str] = []
+    pending_prep: list[str] = []
+    checked_print = 0
+    for lid in candidate_ids:
+        ln = line_map.get(lid)
+        if ln is None:
+            unresolved.append(lid)
+            continue
+        status = str(getattr(ln, "line_status", LINE_STATUS_ACTIVE) or LINE_STATUS_ACTIVE)
+        if status != LINE_STATUS_ACTIVE:
+            continue
+        proc = _normalize_production_process(getattr(ln, "production_process", None))
+        if proc == "non_print":
+            continue
+        if proc != "print":
+            unresolved.append(lid)
+            continue
+        checked_print += 1
+        screen = await screener_prepared_qty(session, job.id, lid)
+        cup = await helper_prepared_qty(session, job.id, lid)
+        if screen <= 0 or cup <= 0:
+            pending_prep.append(lid)
+
+    if unresolved:
+        raise HTTPException(
+            409,
+            "Sample ditolak — klasifikasi line belum resolved (bukan print canonical): "
+            + ", ".join(unresolved),
+        )
+    if pending_prep:
+        raise HTTPException(
+            409,
+            "Sample menunggu Prepare Screen + Prepare Cup READY pada line: "
+            + ", ".join(pending_prep),
+        )
+
+    if checked_print == 0:
+        # Legacy job without scheduled/classified print lines: job-level evidence.
+        screen = await session.scalar(
+            select(func.coalesce(func.sum(PrepState.qty), 0)).where(
+                PrepState.job_id == job.id, PrepState.role == PREP_ROLE_SCREEN
+            )
+        )
+        cup = await session.scalar(
+            select(func.coalesce(func.sum(PrepState.qty), 0)).where(
+                PrepState.job_id == job.id, PrepState.role == PREP_ROLE_CUP
+            )
+        )
+        if Decimal(screen or 0) <= 0 or Decimal(cup or 0) <= 0:
+            raise HTTPException(
+                409,
+                "Sample membutuhkan Prepare Screen READY dan Prepare Cup READY",
+            )

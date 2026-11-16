@@ -312,6 +312,19 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
     )
     assert bad.status_code == 409
 
+    from app.models.production.prep import JobLineQty
+
+    async with get_session_factory()() as session:
+        session.add(
+            JobLineQty(
+                job_id=jid,
+                so_line_id="line-1",
+                po_qty=Decimal("100"),
+                production_process="print",
+            )
+        )
+        await session.commit()
+
     # Two operators, two color passes, partial qty
     asg1 = (
         await client.post(

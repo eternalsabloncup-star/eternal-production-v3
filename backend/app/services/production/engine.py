@@ -1335,10 +1335,12 @@ async def upload_sample(
 ) -> SampleVersion:
     _require(user, P.SAMPLE_UPLOAD)
     _branch(user, job.branch_id)
+    sample_line_id: str | None = None
     if assignment_id is not None:
         sample_asg = await session.get(ScheduleAssignment, assignment_id)
         if sample_asg is not None and sample_asg.job_id == job.id:
             await _reject_non_print_print_chain(session, job.id, sample_asg.so_line_id)
+            sample_line_id = str(sample_asg.so_line_id or "").strip() or None
     else:
         from app.models.production.prep import JobLineQty
 
@@ -1349,6 +1351,11 @@ async def upload_sample(
             (ln.production_process or "").strip() == "non_print" for ln in sample_lines
         ):
             raise HTTPException(409, _NON_PRINT_NOT_PRINT_CHAIN)
+    from app.services.production.prep import require_print_preps_ready_for_sample
+
+    await require_print_preps_ready_for_sample(
+        session, job, so_line_id=sample_line_id
+    )
     max_v = await session.scalar(
         select(func.coalesce(func.max(SampleVersion.version_no), 0)).where(
             SampleVersion.job_id == job.id
@@ -1388,22 +1395,16 @@ async def decide_sample(
     if decision not in {"approved", "rejected", "revised"}:
         raise HTTPException(422, "Keputusan sample tidak valid")
     if decision == "approved":
-        from app.models.production.prep import PrepState
+        from app.services.production.prep import require_print_preps_ready_for_sample
 
-        screen = await session.scalar(
-            select(func.coalesce(func.sum(PrepState.qty), 0)).where(
-                PrepState.job_id == job.id, PrepState.role == "screener"
-            )
+        sample_line_id = None
+        if ver.assignment_id is not None:
+            asg = await session.get(ScheduleAssignment, ver.assignment_id)
+            if asg is not None and asg.job_id == job.id:
+                sample_line_id = str(asg.so_line_id or "").strip() or None
+        await require_print_preps_ready_for_sample(
+            session, job, so_line_id=sample_line_id
         )
-        prepared = await session.scalar(
-            select(func.coalesce(func.sum(PrepState.qty), 0)).where(
-                PrepState.job_id == job.id, PrepState.role == "helper"
-            )
-        )
-        if Decimal(screen or 0) <= 0 or Decimal(prepared or 0) <= 0:
-            raise HTTPException(
-                409, "Sample approval membutuhkan screener & helper prep > 0"
-            )
     ver.status = decision
     ver.decision_by = user.id
     ver.decision_reason = reason
@@ -4224,13 +4225,62 @@ def derive_team_tasks_for_job(
         not in {"cancelled", "canceled", "void"}
     ]
     has_schedule = len(active_assignments) > 0
-    screener_done = any(
-        getattr(p, "role", None) == "screener" and Decimal(getattr(p, "qty", 0) or 0) > 0
-        for p in prep_states
-    )
-    helper_done = any(
-        getattr(p, "role", None) == "helper" and Decimal(getattr(p, "qty", 0) or 0) > 0
-        for p in prep_states
+    scheduled_line_ids = {
+        str(getattr(a, "so_line_id", "") or "").strip()
+        for a in active_assignments
+        if str(getattr(a, "so_line_id", "") or "").strip()
+    }
+    line_by_id = {
+        str(getattr(ln, "so_line_id", "") or "").strip(): ln
+        for ln in lines
+        if str(getattr(ln, "so_line_id", "") or "").strip()
+    }
+    # Prep READY scope = scheduled lines with canonical production_process=print only.
+    # UNKNOWN / missing classification never becomes print and blocks prep tasks.
+    print_scheduled_ids: set[str] = set()
+    unclassified_scheduled_ids: set[str] = set()
+    for lid in scheduled_line_ids:
+        ln = line_by_id.get(lid)
+        if ln is None:
+            unclassified_scheduled_ids.add(lid)
+            continue
+        if str(getattr(ln, "line_status", "active") or "active") != "active":
+            continue
+        proc = (getattr(ln, "production_process", None) or "").strip().lower()
+        if proc == "print":
+            print_scheduled_ids.add(lid)
+        elif proc == "non_print":
+            continue
+        else:
+            unclassified_scheduled_ids.add(lid)
+
+    def _prep_role_ready(role: str) -> bool:
+        """READY only when every scheduled print line has qty>0 for the role."""
+        if unclassified_scheduled_ids:
+            return False
+        if print_scheduled_ids:
+            return all(
+                any(
+                    getattr(p, "role", None) == role
+                    and str(getattr(p, "so_line_id", "") or "").strip() == lid
+                    and Decimal(getattr(p, "qty", 0) or 0) > 0
+                    for p in prep_states
+                )
+                for lid in print_scheduled_ids
+            )
+        # Legacy / no scheduled print lines: any evidence keeps prior behaviour.
+        return any(
+            getattr(p, "role", None) == role and Decimal(getattr(p, "qty", 0) or 0) > 0
+            for p in prep_states
+        )
+
+    screener_done = _prep_role_ready("screener")
+    helper_done = _prep_role_ready("helper")
+    classification_block_reason = (
+        "Klasifikasi line belum resolved (UNKNOWN/hilang): "
+        + ", ".join(sorted(unclassified_scheduled_ids))
+        if unclassified_scheduled_ids
+        else None
     )
     pending_sample = [s for s in samples if getattr(s, "status", None) == "pending"]
     approved_sample = [
@@ -4314,17 +4364,35 @@ def derive_team_tasks_for_job(
                 )
         # else: not visible
 
-        # Screen + Prepare Cup — only after valid schedule; parallel.
+        # Screen + Prepare Cup — only after valid schedule; parallel; print-classified only.
         if has_schedule:
-            tasks.append(
-                _task_row(job, "screen", "done" if screener_done else "actionable")
-            )
-            tasks.append(
-                _task_row(job, "prepare", "done" if helper_done else "actionable")
-            )
+            if classification_block_reason:
+                tasks.append(
+                    _task_row(
+                        job,
+                        "screen",
+                        "blocked",
+                        reason=classification_block_reason,
+                    )
+                )
+                tasks.append(
+                    _task_row(
+                        job,
+                        "prepare",
+                        "blocked",
+                        reason=classification_block_reason,
+                    )
+                )
+            else:
+                tasks.append(
+                    _task_row(job, "screen", "done" if screener_done else "actionable")
+                )
+                tasks.append(
+                    _task_row(job, "prepare", "done" if helper_done else "actionable")
+                )
 
-        # Downstream print chain — only after prep evidence.
-        if has_schedule and screener_done and helper_done:
+        # Downstream print chain — only after prep evidence on classified print lines.
+        if has_schedule and screener_done and helper_done and not unclassified_scheduled_ids:
             if approved_sample:
                 tasks.append(_task_row(job, "sample", "done"))
                 tasks.append(_task_row(job, "sample_approve", "done"))

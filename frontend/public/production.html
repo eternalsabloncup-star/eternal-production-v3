@@ -2096,7 +2096,7 @@ let SHEET_COLUMNS=[
  {key:'holdStatus',label:'HOLD',kind:'text',value:o=>holdStatusValue(o),cell:o=>{const v=holdStatusValue(o);return v==='HOLD'?`<span class="flagtag">HOLD</span>`:escape(v)}},
  {key:'prepStatus',label:'Persiapan',kind:'text',value:o=>prepStatusValue(o),cell:o=>escape(prepStatusValue(o))},
  {key:'progress',label:'Progress',kind:'number',value:o=>{const base=o.colorWorkItem&&o.lineQty!=null?o.lineQty:(section==='schedule'&&typeof printPhysicalQty==='function'?printPhysicalQty(o):o.qty);return base?Math.round((o.done||0)/base*100):0},cell:o=>{const base=o.colorWorkItem&&o.lineQty!=null?o.lineQty:(section==='schedule'&&typeof printPhysicalQty==='function'?printPhysicalQty(o):o.qty);const p=base?Math.round((o.done||0)/base*100):0;return `<span class="mini-prog"><i style="width:${Math.min(100,p)}%"></i></span><span class="mutedcell">${p}%</span>`}},
- {key:'status',label:'Status Akhir',kind:'text',value:o=>{
+ {key:'status',label:'Status Jadwal',kind:'text',value:o=>{
   if(section==='schedule'&&(o.scheduleMonitorStatus||o.colorWorkItem||isLiveInbox())){
    const process=o.scheduleProcess||(o.processVerify==='unknown'?'UNKNOWN':'PRINT');
    const hasAsg=!!(o.assignmentId||(Array.isArray(o.productionAssignments)&&o.productionAssignments.length));
@@ -2104,12 +2104,14 @@ let SHEET_COLUMNS=[
   }
   return o.status;
  },cell:o=>{
+  /* Design/Payment tetap di kolom designGate & paymentGate — jangan digabung di Status Jadwal. */
   if(section==='schedule'&&(o.scheduleMonitorStatus||o.colorWorkItem||isLiveInbox())){
    const process=o.scheduleProcess||(o.processVerify==='unknown'?'UNKNOWN':'PRINT');
    const hasAsg=!!(o.assignmentId||(Array.isArray(o.productionAssignments)&&o.productionAssignments.length));
    const st=o.scheduleMonitorStatus||scheduleMonitorStatus(o,process,hasAsg);
-   const d=designGateLabel(o),p=paymentGateLabel(o);
-   return `<div class="po-multiline"><b>${escape(st)}</b><span class="mutedcell">Design: ${escape(d)} · Payment: ${escape(p)}</span>${o.processVerifyReason?`<span class="mutedcell">${escape(o.processVerifyReason)}</span>`:''}</div>`;
+   return o.processVerifyReason
+     ? `<div class="po-multiline"><b>${escape(st)}</b><span class="mutedcell">${escape(o.processVerifyReason)}</span></div>`
+     : tag(st);
   }
   return tag(o.status);
  }},

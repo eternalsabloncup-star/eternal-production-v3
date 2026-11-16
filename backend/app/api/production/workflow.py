@@ -756,6 +756,8 @@ async def prep_screener(
     return {
         "id": state.id,
         "role": state.role,
+        "prep_kind": prep_svc.PREP_KIND_BY_ROLE.get(state.role, "prepare_screen"),
+        "label": "Prepare Screen",
         "qty": str(state.qty),
         "screen_size": state.screen_size,
         "helper_remaining_vs_po": str(remaining),
@@ -769,6 +771,7 @@ async def prep_helper(
     session: AsyncSession = Depends(get_db_session),
     user: User = Depends(get_current_user),
 ):
+    """Prepare Cup — same physical event as role=helper (no duplicate event type)."""
     job = await engine.get_job(session, job_id)
     state = await prep_svc.set_preparation(
         session,
@@ -788,6 +791,8 @@ async def prep_helper(
     return {
         "id": state.id,
         "role": state.role,
+        "prep_kind": "prepare_cup",
+        "label": "Prepare Cup",
         "qty": str(state.qty),
         "remaining_vs_po": str(remaining),
     }

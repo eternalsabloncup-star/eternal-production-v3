@@ -133,8 +133,8 @@ def test_derive_blocks_packing_until_all_passes_done():
         SimpleNamespace(status="active", so_line_id="L1", color_pass=2),
     ]
     prep = [
-        SimpleNamespace(role="screener", qty=Decimal("1")),
-        SimpleNamespace(role="helper", qty=Decimal("5000")),
+        SimpleNamespace(role="screener", qty=Decimal("1"), so_line_id="L1"),
+        SimpleNamespace(role="helper", qty=Decimal("5000"), so_line_id="L1"),
     ]
     samples = [SimpleNamespace(status="approved")]
     events = [

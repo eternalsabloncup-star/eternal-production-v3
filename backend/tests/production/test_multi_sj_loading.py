@@ -1106,7 +1106,17 @@ async def test_multicolor_packing_still_min_pass(client: AsyncClient):
     job = await client.post(
         "/api/v1/production/jobs",
         headers=h,
-        json={"accurate_so_number": "SO-MSJ-MC", "branch_id": "branch-a"},
+        json={
+            "accurate_so_number": "SO-MSJ-MC",
+            "branch_id": "branch-a",
+            "line_items": [
+                {
+                    "accurate_line_id": "L1",
+                    "quantity": "100",
+                    "production_process": "print",
+                }
+            ],
+        },
     )
     jid = job.json()["id"]
     d = await client.post(

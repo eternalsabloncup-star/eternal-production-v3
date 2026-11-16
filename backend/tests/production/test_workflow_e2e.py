@@ -192,6 +192,21 @@ async def test_full_happy_path_and_guards(
     )
     assert pay.status_code == 200
 
+    # Canonical print classification (Accurate sync) — prep must never invent PRINT.
+    from app.models.production.prep import JobLineQty
+
+    factory = get_session_factory()
+    async with factory() as session:
+        session.add(
+            JobLineQty(
+                job_id=job_id,
+                so_line_id="line-1",
+                po_qty=Decimal("100"),
+                production_process="print",
+            )
+        )
+        await session.commit()
+
     asg = await client.post(
         f"/api/v1/production/jobs/{job_id}/schedule/assignments",
         headers=h,
