@@ -4333,6 +4333,37 @@
       return isPreviewFixture() ? original.apply(this, arguments) : build.apply(this, arguments);
     };
   }
+  // Live must never mutate local demo buffer/urgent flags (no qty/task/event side effects).
+  (function guardDemoBufferMutations() {
+    const block = function () {
+      if (typeof window.toast === "function") {
+        window.toast("Aksi Buffer/Urgent simulasi diblokir di Live — tidak mengubah job, qty, task, atau event.", "error");
+      }
+    };
+    if (typeof window.setOrderFlag === "function") {
+      const origFlag = window.setOrderFlag;
+      window.setOrderFlag = function () {
+        if (!isPreviewFixture()) return block();
+        return origFlag.apply(this, arguments);
+      };
+    }
+    if (typeof window.changeGlobalSetting === "function") {
+      const origCfg = window.changeGlobalSetting;
+      window.changeGlobalSetting = function (type) {
+        if (!isPreviewFixture() && (type === "buffer" || type === "percent" || type === "urgent")) return block();
+        return origCfg.apply(this, arguments);
+      };
+    }
+    if (typeof window.monitorBufferRows === "function") {
+      const origRows = window.monitorBufferRows;
+      window.monitorBufferRows = function () {
+        if (!isPreviewFixture()) {
+          return "<div class=\"flat-notice\" role=\"status\" data-testid=\"buffer-demo-rows-blocked\">Simulasi Buffer tidak dirender di Live.</div>";
+        }
+        return origRows.apply(this, arguments);
+      };
+    }
+  })();
   const ops = { ts: {}, plan: null, payroll: null, couriers: {}, del: null, rep: null, slip: null, unsynced: null, err: {}, busy: {}, slipId: "", status: "", from: "", to: "", schedBucket: "semua", schedPage: 1, schedQ: "", schedFrom: "", schedTo: "", schedMonth: "all" };
   const OPS_TTL_MS = 4000;
   function opsLoad(key, url, assign) {
@@ -5311,7 +5342,7 @@
       }).join("") + "</tbody></table></div>" +
       "<small>" + d.items.length + " baris dari " + d.total + " item buffer · halaman " + d.page + (d.page > 1 ? " <button type=\"button\" class=\"btn sm\" data-ops=\"buf-prev\">Sebelumnya</button>" : "") + (d.has_more ? " <button type=\"button\" class=\"btn sm\" data-ops=\"buf-next\">Berikutnya</button>" : "") + "</small>";
     return h("Monitoring Buffer Stock", "Penanda buffer resmi dari job V3 / detail Accurate") +
-      "<div class=\"flat-notice\">Hanya PO dengan flag Buffer Stock aktif. Qty dihitung dari event produksi V3 (gesut, packing, loading, POD); data tanpa sumber resmi tampil Belum terverifikasi. Buffer tidak menambah qty SO atau stok Accurate.</div>" + body;
+      "<div class=\"flat-notice\" data-testid=\"buffer-live-monitor\">Hanya PO dengan flag Buffer Stock aktif (PostgreSQL). Qty dihitung dari event produksi V3 (gesut, packing, loading, POD); data tanpa sumber resmi tampil Belum terverifikasi. Buffer tidak menambah qty SO atau stok Accurate. Bukan data preview/fixture.</div>" + body;
   });
 
   // Monitoring Penerimaan (operasional): daftar resmi lintas PO dari

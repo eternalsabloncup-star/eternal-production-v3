@@ -1,77 +1,57 @@
-# Production Live Readiness Audit — Function First Iterasi 5 (Full Acceptance)
+# Production Live Readiness Audit — Tahap C2
 
 **Tanggal (WIB / Asia/Jakarta):** 2026-11-16
 **Repository:** `eternalsabloncup-star/eternal-production-v3`
 **Branch:** `cursor/epv3-production-schedule-83bf`
-**HEAD:** `9d52ef7ed296131604f25e98539e85c5f51139d4`
-**Worktree:** `/tmp/epv3-fase1b-wt`
-**Authz Production:** `legacy` (enforced **tidak** diaktifkan)
-**PR #15:** OPEN · **PR #14:** HOLD
-**Git putaran ini:** NO COMMIT (dokumen acceptance lokal saja)
+**HEAD baseline:** `e49186ae748905e002083b150bbe8b963c4b1d60`
+**WIP:** Buffer isolation FE terverifikasi browser (uncommitted)
+**Authz Production:** `legacy` · **PR #15 OPEN** · **PR #14 HOLD**
+**Git putaran ini:** NO COMMIT
 
-Detail acceptance: [`production-full-acceptance-report.md`](./production-full-acceptance-report.md), [`production-full-acceptance-matrix.md`](./production-full-acceptance-matrix.md).
-Authz/migration (Iterasi 4): [`production-authz-migration-readiness-audit.md`](./production-authz-migration-readiness-audit.md).
-Accurate (Iterasi 3): [`production-accurate-integration-audit.md`](./production-accurate-integration-audit.md).
+Acuan: [`production-final-audit-report.md`](./production-final-audit-report.md).
 
-> Jangan memakai matriks visual sebagai klaim Production siap Live.
-> Unit test hijau ≠ workflow operasional Live terbukti.
+> Browser PASS isolasi Buffer ≠ Production Live Accurate siap.
 
 ---
 
-## A. Ringkas status Live
+## A. Ringkas
 
 | Lapisan | Status |
 |---|---|
-| Full workflow disposable (UI→API→DB) | **PASS** 11/11 browser mutation |
-| Enam role operasional | **PASS** (browser + packs) |
-| Enforced disposable | **PASS** 14/14 |
-| Multi-branch isolation | **PASS** (API + WrongBranch) |
-| Quantity / idempotency gates | **PASS** (API + browser event tunggal) |
-| Accurate fixture | **PASS** 159 |
-| Accurate real / staging / SJ list-all | **BLOCKED** (SJ list-all = **COVERAGE TERBATAS**) |
+| Buffer Live vs Preview isolation | **PASS browser 15/15** (disposable PG) |
+| Buffer API kontrak | **PASS** pytest 7/7 (tidak diubah) |
+| Demo mutasi → event/qty | **PASS** dicegah (events tetap 1) |
+| Accurate real / SJ list-all | **BLOCKED** |
 | Enforced Live | **BLOCKED** |
-| Migrasi Live | **BLOCKED** (rehearsal restore saja) |
+| HTML Final APPROVED | **CANDIDATE / terbuka** |
 
 ---
 
-## B. Regresi Iterasi 5 (lokal)
+## B. Regresi C2
 
 | Suite | Hasil |
 |---|---|
-| Authorization | **222 PASS** |
-| Production | **300 PASS** |
-| Accurate Gateway fixture | **159 PASS** |
-| Frontend Vitest | **225 PASS** |
-| Frontend build | **PASS** |
-| Browser mutation full | **11/11 PASS_MUTATION** |
-| Enforced browser | **14/14 PASS_MUTATION** |
-| Migration/restore disposable | **PASS** |
-| `git diff --check` | **PASS** |
+| Browser Buffer isolation | **15 PASS** |
+| Vitest buffer + connection | **13 PASS** |
+| Backend buffer monitor | **7 PASS** |
+| Frontend build + security/routing | **PASS** |
+
+Evidence: `/tmp/epv3-c2-buffer-evidence.json` · DB `epv3_c2_buf_2a5eeed2ee_test`
 
 ---
 
-## C. P0 / P1 / BLOCKED
+## C. P0 residual (bukan Buffer isolation)
 
-| ID | Item | Prioritas |
-|---|---|---|
-| ACC-05 | Real/sandbox Accurate di VM | **BLOCKED P0** |
-| F3-029 / ACC-04 | Accurate SJ list-all (**COVERAGE TERBATAS**) | **BLOCKED P0** |
-| F3-037 | Enforced Live + grant manual | **BLOCKED P0** |
-| AUTH-FLAT-01 | OR-bundle legacy sensitif | **P1** |
-| AUTH-E2E-01 | Cold-start six-role login race | **P2** |
-
----
-
-## D. Keputusan Direktur
-
-1. Staging Accurate Gateway Owner sebelum klaim integrasi nyata.
-2. Approval ref + grant matrix sebelum enforced non-test.
-3. Maintenance window backup/restore (bukan Alembic downgrade).
-4. Urutan merge/deploy PR #15 vs HOLD #14.
+| Item | Prioritas |
+|---|---|
+| Accurate real | P0 BLOCKED |
+| SJ list-all | P0 BLOCKED |
+| Enforced Live | P0 BLOCKED |
+| HTML APPROVED stamp | P0 proses |
 
 ---
 
-## E. Verdict
+## D. Verdict
 
-**READY FOR STAGING** (workflow disposable + fixture + Owner staging).
-**NOT READY FOR LIVE** / **NOT READY FOR LIVE APPROVAL**.
+**Buffer isolation: SIAP GIT** (menunggu izin commit Owner).
+**Production Live keseluruhan: NOT READY FOR LIVE.**
