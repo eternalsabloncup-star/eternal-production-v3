@@ -3912,8 +3912,9 @@
       connDispatch({ t: "inbox_fail", kind: (err && err.kind) || "other" });
       publishOrders([]);
       window.taskEntries = {};
-      window.__V3_OFFICIAL_TASKS__ = [];
-      window.__V3_OFFICIAL_TASK_SOURCE__ = null;
+      // Inbox Accurate failure must NOT erase PG-derived Tugas Tim.
+      // Keep prior official rows if any; refresh read-only from V3 jobs.
+      refreshOfficialTasks(undefined, true).catch(function () {});
       lastSync = null;
       if (String(fetchError).indexOf("Sesi V3 tidak valid") >= 0) {
         redirectToLogin();
@@ -5455,9 +5456,13 @@
     let body;
     if (rm.loading && !d) body = "<div class=\"flat-notice\" role=\"status\">Memuat monitoring pembayaran…</div>";
     else if (rm.error) body = "<div class=\"flat-notice\" role=\"alert\"><b>Gagal memuat:</b> " + escapeHtml(rm.error) + " <button type=\"button\" class=\"btn sm\" data-rm=\"reload\">Coba lagi</button></div>";
-    else if (!d || !d.items.length) body = "<div class=\"flat-notice v165-state v165-state--empty\" role=\"status\"><b>Tidak ada data</b> Tidak ada PO sesuai filter. PO muncul setelah job V3 dibuat dari Inbox/Tugas Tim.</div>";
     else {
-      const rows = rmSortedItems(d.items);
+      // Always keep sticky sheet chrome (so,customer) — empty filter still needs header geometry.
+      const rows = d && d.items && d.items.length ? rmSortedItems(d.items) : [];
+      const colCount = 6 + (showEv ? 1 : 0);
+      const tbody = rows.length
+        ? rows.map(rmRowHtml).join("")
+        : '<tr><td colspan="' + colCount + '" class="sheetempty v165-state v165-state--empty" role="status"><b>Tidak ada data</b> Tidak ada PO sesuai filter. PO muncul setelah job V3 dibuat dari Inbox/Tugas Tim.</td></tr>';
       body =
         '<div class="row" id="v3-rm-col-toggles" style="gap:6px;flex-wrap:wrap;margin:8px 0">' +
         '<label class="btn sm"><input type="checkbox" data-rm="col" data-col="evidence"' + (showEv ? " checked" : "") + "> Evidence</label>" +
@@ -5472,9 +5477,9 @@
         (showEv ? "<th data-column=\"evidence\">Evidence</th>" : "") +
         '<th data-column="status">' + rmSortBtn("status", "Status pembayaran") + "</th>" +
         "<th data-column=\"action\">Aksi</th></tr></thead><tbody>" +
-        rows.map(rmRowHtml).join("") +
+        tbody +
         "</tbody></table></div>" +
-        '<div class="row"><button type="button" class="btn sm" data-rm="prev"' + (rm.page <= 1 ? " disabled" : "") + ">‹ Sebelumnya</button><span>Halaman " + d.page + " · " + d.total + " PO · " + rows.length + " baris halaman</span><button type=\"button\" class=\"btn sm\" data-rm=\"next\"" + (d.has_more ? "" : " disabled") + ">Berikutnya ›</button></div>";
+        '<div class="row"><button type="button" class="btn sm" data-rm="prev"' + (rm.page <= 1 ? " disabled" : "") + ">‹ Sebelumnya</button><span>Halaman " + (d && d.page != null ? d.page : rm.page) + " · " + (d && d.total != null ? d.total : 0) + " PO · " + rows.length + " baris halaman</span><button type=\"button\" class=\"btn sm\" data-rm=\"next\"" + (d && d.has_more ? "" : " disabled") + ">Berikutnya ›</button></div>";
     }
     let detail = "";
     if (rm.detail && d) {

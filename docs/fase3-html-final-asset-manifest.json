@@ -1,0 +1,735 @@
+{
+  "generated_at_utc": "2026-11-16T06:21:23.135744Z",
+  "sources": {
+    "handoff": {
+      "root": "/tmp/epv3-fase3-handoff",
+      "file_count": 10,
+      "files": [
+        {
+          "path": "/tmp/epv3-fase3-handoff/CURSOR_IMPLEMENTATION_PROMPT.md",
+          "rel": "CURSOR_IMPLEMENTATION_PROMPT.md",
+          "source": "handoff",
+          "size": 4878,
+          "sha256": "7bfb4ef71efe5ed95c5797bb04f70c94a8aa75e38d1bdf21dd3ea481d9ed47c4",
+          "role": "dokumentasi/audit referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": true
+        },
+        {
+          "path": "/tmp/epv3-fase3-handoff/INTEGRATION_CONTRACT.md",
+          "rel": "INTEGRATION_CONTRACT.md",
+          "source": "handoff",
+          "size": 11099,
+          "sha256": "337c54a691b1ce129f1c87d17a92edc6038c9e3e0f6bf599f7d5f6c3e5f1cbff",
+          "role": "dokumentasi/audit referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": true
+        },
+        {
+          "path": "/tmp/epv3-fase3-handoff/README.md",
+          "rel": "README.md",
+          "source": "handoff",
+          "size": 1776,
+          "sha256": "cbf1d4d48faec181b7db1c90f870cac00ba4af996a9d3cb63e185e796d28f35f",
+          "role": "dokumentasi/audit referensi",
+          "risk_flags": [
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-handoff/REFERENSI_SURAT_JALAN_ACCURATE.pdf",
+          "rel": "REFERENSI_SURAT_JALAN_ACCURATE.pdf",
+          "source": "handoff",
+          "size": 582558,
+          "sha256": "603856af901bdfd39c8b145962d0e53c999fc2db4e60e9995f660ef6fbf2e0f0",
+          "role": "dokumen referensi SJ (jangan commit; besar/binari)",
+          "risk_flags": [
+            "binary_or_large"
+          ],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-handoff/index.html",
+          "rel": "index.html",
+          "source": "handoff",
+          "size": 40407,
+          "sha256": "d612eaa0f5b75037a80f20d92861916d30e10b8fc8b8ef600b02d8738d5bb0ba",
+          "role": "UI HTML Final referensi (bukan runtime V3)",
+          "risk_flags": [],
+          "recommend_copy_to_repo": true
+        },
+        {
+          "path": "/tmp/epv3-fase3-handoff/payment_policy.py",
+          "rel": "payment_policy.py",
+          "source": "handoff",
+          "size": 4190,
+          "sha256": "3fde433e802ecac964dbdf3815f6821286f128b50b2d9294927d0ef664d970ac",
+          "role": "backend/sandbox script referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-handoff/server.py",
+          "rel": "server.py",
+          "source": "handoff",
+          "size": 2243,
+          "sha256": "10b87e64255d4058327c0ddc4ac199457821cf5aaac0fb67e9342e31d7d2b5b2",
+          "role": "backend/sandbox script referensi",
+          "risk_flags": [
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-handoff/test_final.py",
+          "rel": "test_final.py",
+          "source": "handoff",
+          "size": 2585,
+          "sha256": "094eca4b0107386894325c981ce39b79fd244ec003fdf49b491fd4aac4a950d1",
+          "role": "tes/fixture referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-handoff/test_frontend.cjs",
+          "rel": "test_frontend.cjs",
+          "source": "handoff",
+          "size": 1896,
+          "sha256": "4208a1283e178df904326a2dd96a9bcf3f2f49aa098f655cc0ee38131702fc26",
+          "role": "tes/fixture referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-handoff/v3_frontend.js",
+          "rel": "v3_frontend.js",
+          "source": "handoff",
+          "size": 27736,
+          "sha256": "4a917a40ac211cc90ce98d2195dc73ea13301dee71e9487d74e10b0c69c4ce7b",
+          "role": "frontend/sandbox script referensi",
+          "risk_flags": [
+            "credential_or_token_pattern"
+          ],
+          "recommend_copy_to_repo": false,
+          "sensitive_hits": [
+            "token",
+            "Token"
+          ]
+        }
+      ]
+    },
+    "sandbox": {
+      "root": "/tmp/epv3-fase3-sandbox",
+      "file_count": 26,
+      "files": [
+        {
+          "path": "/tmp/epv3-fase3-sandbox/AUDIT_FIX_V17.md",
+          "rel": "AUDIT_FIX_V17.md",
+          "source": "sandbox",
+          "size": 3808,
+          "sha256": "396e9bc91232e71426068c88a7a0e79c70bd98a76347116daf6ecf701b564f60",
+          "role": "dokumentasi/audit referensi",
+          "risk_flags": [
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/AUDIT_INPUT_V1_V18.md",
+          "rel": "AUDIT_INPUT_V1_V18.md",
+          "source": "sandbox",
+          "size": 3860,
+          "sha256": "cd6fb753da0e0c326388f7ff6a252b931a3ad0b9a1158289df3f29ce1399d383",
+          "role": "dokumentasi/audit referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": true
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/AUDIT_TUGAS_TIM_V1.md",
+          "rel": "AUDIT_TUGAS_TIM_V1.md",
+          "source": "sandbox",
+          "size": 5439,
+          "sha256": "ca78f77f19dbeb801028c91a5aad883ab563b936f166764ff709f4ce00d06ace",
+          "role": "dokumentasi/audit referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": true
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/AUDIT_TUGAS_TIM_V21.md",
+          "rel": "AUDIT_TUGAS_TIM_V21.md",
+          "source": "sandbox",
+          "size": 1683,
+          "sha256": "581ed47a406a03cddd032141c386e7f3133097f092855cf777e0ad444b3a8f46",
+          "role": "dokumentasi/audit referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": true
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/AUDIT_UI_TOMBOL_V1_V19.md",
+          "rel": "AUDIT_UI_TOMBOL_V1_V19.md",
+          "source": "sandbox",
+          "size": 6038,
+          "sha256": "822329e375d76007722f8a90a361e919e4625390cee54e88e95113d8f50313bb",
+          "role": "dokumentasi/audit referensi",
+          "risk_flags": [
+            "credential_or_token_pattern",
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false,
+          "sensitive_hits": [
+            "token"
+          ]
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/AUDIT_V1_JADWAL_V20.md",
+          "rel": "AUDIT_V1_JADWAL_V20.md",
+          "source": "sandbox",
+          "size": 2355,
+          "sha256": "9468b55f1c8a1527a5b3e6597fafcca1eccb5b6892a6d7dd8f8274893708441c",
+          "role": "dokumentasi/audit referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": true
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/AUDIT_WORKFLOW_V1_V16.md",
+          "rel": "AUDIT_WORKFLOW_V1_V16.md",
+          "source": "sandbox",
+          "size": 5459,
+          "sha256": "1c0a75d6e7e6b394415874fd3fd1f010fa03952e8fcfb578787faa2a9c07b1c2",
+          "role": "dokumentasi/audit referensi",
+          "risk_flags": [
+            "credential_or_token_pattern",
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false,
+          "sensitive_hits": [
+            "token"
+          ]
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/README.md",
+          "rel": "README.md",
+          "source": "sandbox",
+          "size": 19475,
+          "sha256": "ca90e03ea02648c516c85892bf9cec4c996d6166e4b82aff07dee23f621d9b03",
+          "role": "dokumentasi/audit referensi",
+          "risk_flags": [
+            "credential_or_token_pattern",
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false,
+          "sensitive_hits": [
+            "password",
+            "token",
+            "Password",
+            "PASSWORD"
+          ]
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/README_V22.md",
+          "rel": "README_V22.md",
+          "source": "sandbox",
+          "size": 1634,
+          "sha256": "cf8cd644e17b783633d2087648822802cef66cdbb5648af4aa5d2a288fee9660",
+          "role": "dokumentasi/audit referensi",
+          "risk_flags": [
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/_check_inline.js",
+          "rel": "_check_inline.js",
+          "source": "sandbox",
+          "size": 61233,
+          "sha256": "936f6e59810fce3aeba9cd7044b8b02d67ba31107878b83c5d0a80c9425f9735",
+          "role": "frontend/sandbox script referensi",
+          "risk_flags": [
+            "credential_or_token_pattern",
+            "possible_pii",
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false,
+          "sensitive_hits": [
+            "password",
+            "token"
+          ]
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/_fixture.json",
+          "rel": "_fixture.json",
+          "source": "sandbox",
+          "size": 1018,
+          "sha256": "7b5d0f6bdf7ae6f2ac3e246a26b47b5a6aec4ba295cff4602e68c39c907990f0",
+          "role": "fixture/data referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/assets/login-production.png",
+          "rel": "assets/login-production.png",
+          "source": "sandbox",
+          "size": 1904469,
+          "sha256": "97f4760dbda9c1eb59485bc0af0add0fcc31785c9046b430bf049865d0272129",
+          "role": "aset visual sandbox",
+          "risk_flags": [
+            "binary_or_large"
+          ],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/index.html",
+          "rel": "index.html",
+          "source": "sandbox",
+          "size": 97950,
+          "sha256": "b25e601e872442f332ced1c45eddb29f86f012d75fa5e6981991f9031d2dd25a",
+          "role": "UI HTML Final referensi (bukan runtime V3)",
+          "risk_flags": [
+            "credential_or_token_pattern",
+            "possible_pii",
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false,
+          "sensitive_hits": [
+            "password",
+            "token",
+            "Password"
+          ]
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/server.py",
+          "rel": "server.py",
+          "source": "sandbox",
+          "size": 29585,
+          "sha256": "cb87bac835449a3b170532f40b468c5d8e618368cb9963e37cb54c42ba7d19ab",
+          "role": "backend/sandbox script referensi",
+          "risk_flags": [
+            "credential_or_token_pattern",
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false,
+          "sensitive_hits": [
+            "PASSWORD",
+            "password",
+            "token",
+            "secret"
+          ]
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/settings.js",
+          "rel": "settings.js",
+          "source": "sandbox",
+          "size": 9607,
+          "sha256": "3a480bfa61560c845ee8a6f9559abe4161cf6a8ba14b9dfce81fbe4ff3142be6",
+          "role": "frontend/sandbox script referensi",
+          "risk_flags": [
+            "credential_or_token_pattern"
+          ],
+          "recommend_copy_to_repo": false,
+          "sensitive_hits": [
+            "token",
+            "secret"
+          ]
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/settings_data.py",
+          "rel": "settings_data.py",
+          "source": "sandbox",
+          "size": 15049,
+          "sha256": "54a9646c6123e476cfe0f736208f556f5fec568a1a3197cdc950c1640bada5fa",
+          "role": "backend/sandbox script referensi",
+          "risk_flags": [
+            "credential_or_token_pattern"
+          ],
+          "recommend_copy_to_repo": false,
+          "sensitive_hits": [
+            "token"
+          ]
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/test_flow_e2e.py",
+          "rel": "test_flow_e2e.py",
+          "source": "sandbox",
+          "size": 5404,
+          "sha256": "0e0352ad33b1335b17336a93f37f65d1c3574127260d8d44c945346d2ab13d0b",
+          "role": "tes/fixture referensi",
+          "risk_flags": [
+            "credential_or_token_pattern",
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false,
+          "sensitive_hits": [
+            "password",
+            "token"
+          ]
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/test_input_parity.py",
+          "rel": "test_input_parity.py",
+          "source": "sandbox",
+          "size": 1513,
+          "sha256": "a6185b95f1b3dae2536aff64cb6a903d4d980a8e24d0b85a81c67943c72b9de3",
+          "role": "tes/fixture referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/test_po_reference.py",
+          "rel": "test_po_reference.py",
+          "source": "sandbox",
+          "size": 3402,
+          "sha256": "6e524051d2f2f580bbdcfcd071f36dc14c126b3e882d957718d916b93fedf7ba",
+          "role": "tes/fixture referensi",
+          "risk_flags": [
+            "credential_or_token_pattern",
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false,
+          "sensitive_hits": [
+            "password"
+          ]
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/test_sandbox.py",
+          "rel": "test_sandbox.py",
+          "source": "sandbox",
+          "size": 7226,
+          "sha256": "aec86b0ab41a2c4d5e4d23c4ad6634c4836d47eaf6bea3f4d504fd25f57c58f3",
+          "role": "tes/fixture referensi",
+          "risk_flags": [
+            "credential_or_token_pattern",
+            "local_url"
+          ],
+          "recommend_copy_to_repo": false,
+          "sensitive_hits": [
+            "password"
+          ]
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/test_team_roles.cjs",
+          "rel": "test_team_roles.cjs",
+          "source": "sandbox",
+          "size": 2252,
+          "sha256": "9f07cf130eee0a32b990d8347d17a2336e872eb7e08e3926b21fc5f67d8c3a0b",
+          "role": "tes/fixture referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/test_team_spreadsheet.cjs",
+          "rel": "test_team_spreadsheet.cjs",
+          "source": "sandbox",
+          "size": 2311,
+          "sha256": "24a929dc386269f0df33e026ddd90bb99cbac268fa1936b7c685562bcde79051",
+          "role": "tes/fixture referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/test_v19_policy.js",
+          "rel": "test_v19_policy.js",
+          "source": "sandbox",
+          "size": 1819,
+          "sha256": "26c3cdb31c9e51c5942ceec9dfcd23d71bd29ac2b3e2306de32ee442b61fddcb",
+          "role": "tes/fixture referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/test_v20_ui.cjs",
+          "rel": "test_v20_ui.cjs",
+          "source": "sandbox",
+          "size": 2075,
+          "sha256": "3331db3e3541954e6ce263a8eb43622fc1ec8bbb6acb93263c15f3c3b3d9b96a",
+          "role": "tes/fixture referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/workflow.js",
+          "rel": "workflow.js",
+          "source": "sandbox",
+          "size": 36742,
+          "sha256": "1d57ee2f541db54376bfdc72007250fc21909540d898735e3e784cc2747fe178",
+          "role": "frontend/sandbox script referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": false
+        },
+        {
+          "path": "/tmp/epv3-fase3-sandbox/workflow_e2e.py",
+          "rel": "workflow_e2e.py",
+          "source": "sandbox",
+          "size": 16183,
+          "sha256": "ee76532aff4b549caabe639952e458cf413c1f81e88a26e1c46d3f57676b1963",
+          "role": "backend/sandbox script referensi",
+          "risk_flags": [],
+          "recommend_copy_to_repo": false
+        }
+      ]
+    }
+  },
+  "conflicts": [
+    {
+      "rel": "README.md",
+      "handoff_sha256": "cbf1d4d48faec181b7db1c90f870cac00ba4af996a9d3cb63e185e796d28f35f",
+      "sandbox_sha256": "ca90e03ea02648c516c85892bf9cec4c996d6166e4b82aff07dee23f621d9b03",
+      "handoff_size": 1776,
+      "sandbox_size": 19475,
+      "decision": "Handoff utama untuk UI Final; Sandbox V22 pelengkap audit/workflow \u2014 jangan merge buta"
+    },
+    {
+      "rel": "index.html",
+      "handoff_sha256": "d612eaa0f5b75037a80f20d92861916d30e10b8fc8b8ef600b02d8738d5bb0ba",
+      "sandbox_sha256": "b25e601e872442f332ced1c45eddb29f86f012d75fa5e6981991f9031d2dd25a",
+      "handoff_size": 40407,
+      "sandbox_size": 97950,
+      "decision": "Handoff utama untuk UI Final; Sandbox V22 pelengkap audit/workflow \u2014 jangan merge buta"
+    },
+    {
+      "rel": "server.py",
+      "handoff_sha256": "10b87e64255d4058327c0ddc4ac199457821cf5aaac0fb67e9342e31d7d2b5b2",
+      "sandbox_sha256": "cb87bac835449a3b170532f40b468c5d8e618368cb9963e37cb54c42ba7d19ab",
+      "handoff_size": 2243,
+      "sandbox_size": 29585,
+      "decision": "Handoff utama untuk UI Final; Sandbox V22 pelengkap audit/workflow \u2014 jangan merge buta"
+    }
+  ],
+  "risks": [
+    {
+      "source": "handoff",
+      "rel": "README.md",
+      "flags": [
+        "local_url"
+      ],
+      "hits": null
+    },
+    {
+      "source": "handoff",
+      "rel": "REFERENSI_SURAT_JALAN_ACCURATE.pdf",
+      "flags": [
+        "binary_or_large"
+      ],
+      "hits": null
+    },
+    {
+      "source": "handoff",
+      "rel": "server.py",
+      "flags": [
+        "local_url"
+      ],
+      "hits": null
+    },
+    {
+      "source": "handoff",
+      "rel": "v3_frontend.js",
+      "flags": [
+        "credential_or_token_pattern"
+      ],
+      "hits": [
+        "token",
+        "Token"
+      ]
+    },
+    {
+      "source": "sandbox",
+      "rel": "AUDIT_FIX_V17.md",
+      "flags": [
+        "local_url"
+      ],
+      "hits": null
+    },
+    {
+      "source": "sandbox",
+      "rel": "AUDIT_UI_TOMBOL_V1_V19.md",
+      "flags": [
+        "credential_or_token_pattern",
+        "local_url"
+      ],
+      "hits": [
+        "token"
+      ]
+    },
+    {
+      "source": "sandbox",
+      "rel": "AUDIT_WORKFLOW_V1_V16.md",
+      "flags": [
+        "credential_or_token_pattern",
+        "local_url"
+      ],
+      "hits": [
+        "token"
+      ]
+    },
+    {
+      "source": "sandbox",
+      "rel": "README.md",
+      "flags": [
+        "credential_or_token_pattern",
+        "local_url"
+      ],
+      "hits": [
+        "password",
+        "token",
+        "Password",
+        "PASSWORD"
+      ]
+    },
+    {
+      "source": "sandbox",
+      "rel": "README_V22.md",
+      "flags": [
+        "local_url"
+      ],
+      "hits": null
+    },
+    {
+      "source": "sandbox",
+      "rel": "_check_inline.js",
+      "flags": [
+        "credential_or_token_pattern",
+        "possible_pii",
+        "local_url"
+      ],
+      "hits": [
+        "password",
+        "token"
+      ]
+    },
+    {
+      "source": "sandbox",
+      "rel": "assets/login-production.png",
+      "flags": [
+        "binary_or_large"
+      ],
+      "hits": null
+    },
+    {
+      "source": "sandbox",
+      "rel": "index.html",
+      "flags": [
+        "credential_or_token_pattern",
+        "possible_pii",
+        "local_url"
+      ],
+      "hits": [
+        "password",
+        "token",
+        "Password"
+      ]
+    },
+    {
+      "source": "sandbox",
+      "rel": "server.py",
+      "flags": [
+        "credential_or_token_pattern",
+        "local_url"
+      ],
+      "hits": [
+        "PASSWORD",
+        "password",
+        "token",
+        "secret"
+      ]
+    },
+    {
+      "source": "sandbox",
+      "rel": "settings.js",
+      "flags": [
+        "credential_or_token_pattern"
+      ],
+      "hits": [
+        "token",
+        "secret"
+      ]
+    },
+    {
+      "source": "sandbox",
+      "rel": "settings_data.py",
+      "flags": [
+        "credential_or_token_pattern"
+      ],
+      "hits": [
+        "token"
+      ]
+    },
+    {
+      "source": "sandbox",
+      "rel": "test_flow_e2e.py",
+      "flags": [
+        "credential_or_token_pattern",
+        "local_url"
+      ],
+      "hits": [
+        "password",
+        "token"
+      ]
+    },
+    {
+      "source": "sandbox",
+      "rel": "test_po_reference.py",
+      "flags": [
+        "credential_or_token_pattern",
+        "local_url"
+      ],
+      "hits": [
+        "password"
+      ]
+    },
+    {
+      "source": "sandbox",
+      "rel": "test_sandbox.py",
+      "flags": [
+        "credential_or_token_pattern",
+        "local_url"
+      ],
+      "hits": [
+        "password"
+      ]
+    }
+  ],
+  "copy_recommendation": [
+    {
+      "source": "handoff",
+      "rel": "CURSOR_IMPLEMENTATION_PROMPT.md",
+      "sha256": "7bfb4ef71efe5ed95c5797bb04f70c94a8aa75e38d1bdf21dd3ea481d9ed47c4",
+      "note": "docs/reference only; not wired to runtime"
+    },
+    {
+      "source": "handoff",
+      "rel": "INTEGRATION_CONTRACT.md",
+      "sha256": "337c54a691b1ce129f1c87d17a92edc6038c9e3e0f6bf599f7d5f6c3e5f1cbff",
+      "note": "docs/reference only; not wired to runtime"
+    },
+    {
+      "source": "handoff",
+      "rel": "index.html",
+      "sha256": "d612eaa0f5b75037a80f20d92861916d30e10b8fc8b8ef600b02d8738d5bb0ba",
+      "note": "docs/reference only; not wired to runtime"
+    },
+    {
+      "source": "sandbox",
+      "rel": "AUDIT_INPUT_V1_V18.md",
+      "sha256": "cd6fb753da0e0c326388f7ff6a252b931a3ad0b9a1158289df3f29ce1399d383",
+      "note": "docs/reference only; not wired to runtime"
+    },
+    {
+      "source": "sandbox",
+      "rel": "AUDIT_TUGAS_TIM_V1.md",
+      "sha256": "ca78f77f19dbeb801028c91a5aad883ab563b936f166764ff709f4ce00d06ace",
+      "note": "docs/reference only; not wired to runtime"
+    },
+    {
+      "source": "sandbox",
+      "rel": "AUDIT_TUGAS_TIM_V21.md",
+      "sha256": "581ed47a406a03cddd032141c386e7f3133097f092855cf777e0ad444b3a8f46",
+      "note": "docs/reference only; not wired to runtime"
+    },
+    {
+      "source": "sandbox",
+      "rel": "AUDIT_V1_JADWAL_V20.md",
+      "sha256": "9468b55f1c8a1527a5b3e6597fafcca1eccb5b6892a6d7dd8f8274893708441c",
+      "note": "docs/reference only; not wired to runtime"
+    }
+  ]
+}

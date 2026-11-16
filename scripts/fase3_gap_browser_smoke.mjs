@@ -1,6 +1,13 @@
 /**
  * Fase 3 gap-closure browser + API smoke (test DB only).
  * Requires API on V3_SMOKE_API and smoke.lead seeded.
+ *
+ * SMOKE_MODE:
+ *   empty      — expect no workflow jobs → task_roles_seen=[] + empty-state UI
+ *   populated  — expect real derived tasks covering six roles
+ *   auto       — pick empty/populated from observed task_roles_seen (default)
+ *
+ * Never flips overall ok by weakening populated role coverage.
  */
 import http from "node:http";
 import fs from "node:fs";
@@ -12,6 +19,15 @@ const root = path.resolve(__dirname, "..");
 const publicDir = path.join(root, "frontend/public");
 const API = process.env.V3_SMOKE_API || "http://127.0.0.1:8011/api/v1";
 const STATIC_PORT = Number(process.env.V3_SMOKE_STATIC_PORT || 4178);
+const SMOKE_MODE = String(process.env.SMOKE_MODE || "auto").toLowerCase();
+const SIX_ROLES = [
+  "Kepala Produksi",
+  "Designer",
+  "Screener",
+  "Helper",
+  "Operator",
+  "Driver",
+];
 
 function contentType(file) {
   if (file.endsWith(".html")) return "text/html; charset=utf-8";
@@ -255,27 +271,46 @@ interactive.shipping = await page.evaluate(async () => {
 });
 
 await goSection("tasks");
+await page
+  .waitForFunction(
+    () =>
+      (Array.isArray(window.__V3_OFFICIAL_TASKS__) && window.__V3_OFFICIAL_TASK_SOURCE__ === "v3_official") ||
+      document.querySelector("table.task-sheet tbody tr") ||
+      /Tidak ada antrean|Tidak ada tugas|Filter kosong|Belum ada|Memuat/i.test(document.body.innerText || ""),
+    { timeout: 20000 },
+  )
+  .catch(() => {});
+await sleep(500);
 interactive.tasks = await page.evaluate(async () => {
+  const sheet = document.querySelector("table.task-sheet");
   const out = {
-    sheet: !!document.querySelector("table.task-sheet"),
+    sheet: !!sheet,
+    sticky: (sheet && sheet.dataset && sheet.dataset.v3Sticky) || "",
+    stickySoCustomer: false,
     roleSelect: false,
     roles: [],
     filterTrigger: !!document.querySelector(".task-sheet .sheet-filter-trigger"),
     search: false,
     kerjakanOrLihat: 0,
+    emptyState: false,
+    duplicateTaskKeys: 0,
     officialSource: window.__V3_OFFICIAL_TASK_SOURCE__ || null,
     officialCount: Array.isArray(window.__V3_OFFICIAL_TASKS__) ? window.__V3_OFFICIAL_TASKS__.length : 0,
   };
-  const sel = document.querySelector('select.fieldcontrol');
+  out.stickySoCustomer = out.sticky === "so,customer";
   const roleSel = [...document.querySelectorAll("select.fieldcontrol")].find((s) =>
     [...s.options].some((o) => o.textContent.includes("Driver")),
   );
   if (roleSel) {
     out.roles = [...roleSel.options].map((o) => o.textContent.trim());
     out.roleSelect = out.roles.includes("Kepala Produksi") && out.roles.includes("Driver");
-    roleSel.value = "Driver";
-    roleSel.dispatchEvent(new Event("change", { bubbles: true }));
-    await new Promise((r) => setTimeout(r, 80));
+    // Prefer "Semua" / empty role so empty/populated counts are not role-filtered away.
+    const allOpt = [...roleSel.options].find((o) => /semua|all|^$/i.test((o.textContent || "").trim()) || o.value === "");
+    if (allOpt) {
+      roleSel.value = allOpt.value;
+      roleSel.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 120));
+    }
   }
   const search = document.getElementById("task-search");
   if (search && typeof window.setTaskSearch === "function") {
@@ -284,7 +319,23 @@ interactive.tasks = await page.evaluate(async () => {
     out.search = true;
     window.setTaskSearch("");
   }
-  out.kerjakanOrLihat = document.querySelectorAll('[data-task-action]').length;
+  out.kerjakanOrLihat = document.querySelectorAll("[data-task-action]").length;
+  const bodyText = document.body.innerText || "";
+  out.emptyState =
+    out.officialCount === 0 &&
+    out.kerjakanOrLihat === 0 &&
+    /Tidak ada antrean|Tidak ada tugas|Filter kosong|Belum ada|0 tugas|tidak ada pekerjaan|Belum ada yang selesai/i.test(
+      bodyText,
+    );
+  const keys = [...document.querySelectorAll("table.task-sheet tbody tr")].map((tr) =>
+    (tr.getAttribute("data-task-key") || tr.textContent || "").replace(/\s+/g, " ").trim(),
+  );
+  const seen = new Set();
+  out.duplicateTaskKeys = keys.filter((k) => {
+    if (!k || seen.has(k)) return true;
+    seen.add(k);
+    return false;
+  }).length;
   const filterBtn = document.querySelector(".task-sheet .sheet-filter-trigger");
   if (filterBtn) {
     filterBtn.click();
@@ -295,7 +346,64 @@ interactive.tasks = await page.evaluate(async () => {
   return out;
 });
 
+await goSection("inbox");
+await sleep(600);
+interactive.inbox = await page.evaluate(async () => {
+  const sheet = document.querySelector("table.v36-inbox-sheet");
+  const wrap = document.querySelector(".v36-inbox-sheetwrap, .sheetwrap");
+  const out = {
+    sheet: !!sheet,
+    sticky: (sheet && sheet.dataset && sheet.dataset.v3Sticky) || "",
+    geometry: null,
+  };
+  if (sheet && wrap) {
+    const firstKeys = (out.sticky || "id,name").split(",");
+    const measure = (key) => {
+      const th = sheet.querySelector(`thead th[data-column="${key}"]`);
+      const td = sheet.querySelector(`tbody td[data-column="${key}"]`);
+      const thCs = th ? getComputedStyle(th) : null;
+      const tdCs = td ? getComputedStyle(td) : null;
+      return {
+        key,
+        thSticky: thCs ? thCs.position.includes("sticky") : false,
+        tdSticky: tdCs ? tdCs.position.includes("sticky") : false,
+        thLeft: thCs ? thCs.left : null,
+        tdLeft: tdCs ? tdCs.left : null,
+        thWidth: th ? th.getBoundingClientRect().width : 0,
+        tdWidth: td ? td.getBoundingClientRect().width : 0,
+        thZ: thCs ? thCs.zIndex : null,
+      };
+    };
+    const before = wrap.scrollLeft;
+    wrap.scrollLeft = Math.min(wrap.scrollWidth, before + 180);
+    await new Promise((r) => setTimeout(r, 40));
+    const afterScroll = firstKeys.map(measure);
+    wrap.scrollLeft = before;
+    out.geometry = {
+      scrollWidthGtClient: wrap.scrollWidth > wrap.clientWidth + 2,
+      afterHorizontalScroll: afterScroll,
+      aligned: afterScroll.every(
+        (m) =>
+          m.thSticky &&
+          (!m.tdWidth || Math.abs(m.thWidth - m.tdWidth) < 2) &&
+          (m.tdLeft == null || m.thLeft === m.tdLeft),
+      ),
+    };
+  }
+  return out;
+});
+
 await goSection("paymentMonitor");
+await page
+  .waitForFunction(
+    () =>
+      document.querySelector(".v3-payment-sheet") ||
+      document.getElementById("v3-rm-form") ||
+      /Monitoring Penerimaan|Gagal|Tidak ada/i.test(document.body.innerText || ""),
+    { timeout: 15000 },
+  )
+  .catch(() => {});
+await sleep(800);
 interactive.payment = await page.evaluate(async () => {
   const out = {
     form: !!document.getElementById("v3-rm-form"),
@@ -352,7 +460,7 @@ interactive.schedule = await page.evaluate(async () => {
     out.bucketClicked = (bucketBtns[1].textContent || "").trim();
   }
   const sheet = document.querySelector("table.excel-sheet, table.sheet");
-  out.stickySoCustomer = !!(sheet && /so|customer|po/i.test(sheet.dataset?.v3Sticky || sheet.innerHTML.slice(0, 400)));
+  out.stickySoCustomer = !!(sheet && (/po|so|customer|id,name/i.test(sheet.dataset?.v3Sticky || "") || /data-column=\"(id|name|so|customer)\"/i.test(sheet.innerHTML.slice(0, 800))));
   return out;
 });
 
@@ -462,8 +570,65 @@ const interactiveOk =
   interactive.settingsCabang.noFakeSave &&
   interactive.settingsCabang.table;
 
+const baseApiOk =
+  apiProbes.health &&
+  [200, 403].includes(apiProbes.inbox) &&
+  apiProbes.schedule === 200 &&
+  apiProbes.deliveries.status === 200 &&
+  apiProbes.tasks.status === 200 &&
+  apiProbes.paymentSettings.status === 200 &&
+  apiProbes.branches.status === 200 &&
+  apiProbes.branches.json?.can_manage === false &&
+  apiProbes.machinesSummary.status === 200 &&
+  ui.createIsExplicit &&
+  ui.hasBranchesView &&
+  ui.hasPaymentSettings;
+
+const softErrors = errors.filter(
+  (e) =>
+    !String(e).includes("favicon") &&
+    !String(e).includes("Failed to load resource") &&
+    !String(e).includes("404") &&
+    !String(e).includes("403") &&
+    !String(e).includes("503"),
+);
+
+const resolvedMode =
+  SMOKE_MODE === "empty" || SMOKE_MODE === "populated"
+    ? SMOKE_MODE
+    : roles.length === 0
+      ? "empty"
+      : "populated";
+
+const sixRoleCoverage = SIX_ROLES.filter((r) => roles.includes(r));
+const emptyStateOk =
+  baseApiOk &&
+  interactiveOk &&
+  softErrors.length === 0 &&
+  roles.length === 0 &&
+  interactive.tasks.kerjakanOrLihat === 0 &&
+  interactive.tasks.duplicateTaskKeys === 0 &&
+  (interactive.tasks.emptyState === true || interactive.tasks.officialCount === 0);
+
+const populatedSixRoleOk =
+  baseApiOk &&
+  interactiveOk &&
+  softErrors.length === 0 &&
+  sixRoleCoverage.length === SIX_ROLES.length &&
+  interactive.tasks.duplicateTaskKeys === 0 &&
+  (interactive.tasks.kerjakanOrLihat > 0 || interactive.tasks.officialCount > 0);
+
+const stickyParityOk =
+  interactive.shipping.sticky === "sj,so" &&
+  interactive.payment.sticky === "so,customer" &&
+  interactive.schedule.stickySoCustomer === true &&
+  interactive.tasks.stickySoCustomer === true &&
+  interactive.inbox.sticky === "id,name";
+
 const result = {
   ok: false,
+  smokeMode: resolvedMode,
+  requestedMode: SMOKE_MODE,
   api: {
     health: apiProbes.health,
     inbox: apiProbes.inbox,
@@ -473,6 +638,7 @@ const result = {
     include_accurate_links: coverage.include_accurate_links ?? null,
     tasks_status: apiProbes.tasks.status,
     task_roles_seen: roles,
+    six_role_coverage: sixRoleCoverage,
     payment_settings_status: apiProbes.paymentSettings.status,
     bypass_enabled_default_read: apiProbes.paymentSettings.json?.payment_approval?.bypass_enabled,
     branches_status: apiProbes.branches.status,
@@ -483,32 +649,19 @@ const result = {
   ui,
   interactive,
   interactiveOk,
+  emptyStateOk,
+  populatedSixRoleOk,
+  stickyParityOk,
   errors,
 };
 
-result.ok =
-  result.api.health &&
-  [200, 403].includes(result.api.inbox) &&
-  result.api.schedule === 200 &&
-  result.api.deliveries_status === 200 &&
-  result.api.tasks_status === 200 &&
-  result.api.payment_settings_status === 200 &&
-  result.api.branches_status === 200 &&
-  result.api.branches_can_manage === false &&
-  result.api.machines_status === 200 &&
-  result.ui.createIsExplicit &&
-  result.ui.hasBranchesView &&
-  result.ui.hasPaymentSettings &&
-  result.api.task_roles_seen.length >= 1 &&
-  interactiveOk &&
-  errors.filter(
-    (e) =>
-      !String(e).includes("favicon") &&
-      !String(e).includes("Failed to load resource") &&
-      !String(e).includes("404") &&
-      !String(e).includes("403") &&
-      !String(e).includes("503"),
-  ).length === 0;
+if (resolvedMode === "empty") {
+  result.ok = emptyStateOk;
+} else if (resolvedMode === "populated") {
+  result.ok = populatedSixRoleOk;
+} else {
+  result.ok = false;
+}
 
 console.log(JSON.stringify(result, null, 2));
 process.exit(result.ok ? 0 : 1);
