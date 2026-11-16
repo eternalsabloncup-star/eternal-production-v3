@@ -271,9 +271,40 @@ async def test_idempotent_output_concurrent(client: AsyncClient) -> None:
         )
 
     r1, r2 = await asyncio.gather(once(), once())
-    codes = sorted([r1.status_code, r2.status_code])
-    assert codes[0] == 200
-    assert codes[1] == 409
+    # Identical concurrent key: both may observe the single committed event as 200.
+    assert r1.status_code == 200, r1.text
+    assert r2.status_code == 200, r2.text
+    assert r1.json()["id"] == r2.json()["id"]
+    board = await client.get(f"/api/v1/production/jobs/{job_id}/board", headers=h)
+    outs = [
+        e
+        for e in board.json()["events"]
+        if e["event_type"] == "output_confirmed"
+        and e.get("idempotency_key") == "same-out-key"
+    ]
+    assert len(outs) == 1
+    assert outs[0]["qty_physical"] in ("5", "5.000", "5.0")
+
+    # Same key + different payload must still 409 without a second event.
+    mismatch = await client.post(
+        f"/api/v1/production/jobs/{job_id}/outputs",
+        headers=h,
+        json={
+            "assignment_id": asg["id"],
+            "qty_physical": "6",
+            "idempotency_key": "same-out-key",
+        },
+    )
+    assert mismatch.status_code == 409, mismatch.text
+    assert "payload tidak cocok" in mismatch.text
+    board2 = await client.get(f"/api/v1/production/jobs/{job_id}/board", headers=h)
+    outs2 = [
+        e
+        for e in board2.json()["events"]
+        if e["event_type"] == "output_confirmed"
+        and e.get("idempotency_key") == "same-out-key"
+    ]
+    assert len(outs2) == 1
 
 
 @pytest.mark.asyncio

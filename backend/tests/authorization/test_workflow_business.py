@@ -74,7 +74,31 @@ async def test_full_flow_under_enforced_mode_keeps_every_gate(ready, monkeypatch
     assert (await post(f"/samples/{s.json()['id']}/decision", {'decision': 'approved', 'bypass': True, 'reason': 'test setup bypass'})).status_code == 200
     out = await post(f'/{job}/outputs', out_body)
     assert out.status_code == 200, out.text
-    assert (await post(f'/{job}/outputs', out_body)).status_code == 409  # idempotency
+    # Same-key + identical payload → 200 replay of committed event (no double qty).
+    replay = await post(f'/{job}/outputs', out_body)
+    assert replay.status_code == 200, replay.text
+    assert replay.json()['id'] == out.json()['id']
+    outs = [
+        e
+        for e in (await c.get(f'{API}/{job}/tracking', headers=h)).json()['events']
+        if e['event_type'] == 'output_confirmed'
+    ]
+    assert len(outs) == 1
+    assert outs[0]['idempotency_key'] == 'out-biz-1'
+    assert outs[0]['qty_physical'] in ('40', '40.000', '40.0')
+    # Same key + different payload → 409, still one event.
+    mismatch = await post(
+        f'/{job}/outputs',
+        {**out_body, 'qty_physical': '11', 'lot_code': 'OTHER'},
+    )
+    assert mismatch.status_code == 409, mismatch.text
+    assert 'payload tidak cocok' in mismatch.text
+    outs2 = [
+        e
+        for e in (await c.get(f'{API}/{job}/tracking', headers=h)).json()['events']
+        if e['event_type'] == 'output_confirmed'
+    ]
+    assert len(outs2) == 1
     pack_body = {'so_line_id': 'line-1', 'qty_physical': '35', 'idempotency_key': 'pack-biz-1', 'lot_code': 'L1'}
     assert (await post(f'/{job}/packing', pack_body)).status_code == 409  # not helper-verified yet
     await helper_verify_output(c, job, out.json()['id'], '40', headers=h, idem='hv-biz-0001')
