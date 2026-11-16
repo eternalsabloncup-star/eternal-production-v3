@@ -1,103 +1,64 @@
-# Production Live Readiness Audit — Function First Iterasi 1B
+# Production Live Readiness Audit — Function First Iterasi 2 (Delivery Integrity)
 
-**Tanggal (WIB / Asia/Jakarta):** 2026-11-16  
-**Repository:** `eternalsabloncup-star/eternal-production-v3`  
-**Branch:** `cursor/epv3-production-schedule-83bf`  
-**Committed HEAD (expected):** `244a0c262b49f90fe172f58581acce4d8945fde3`  
-**Worktree:** `/tmp/epv3-fase1b-wt`  
-**Authz Production:** `legacy` (enforced **tidak** diaktifkan)  
-**PR #15:** OPEN · **PR #14:** HOLD  
-**Git putaran ini:** **NO COMMIT / NO PUSH** (WIP lokal)
+**Tanggal (WIB / Asia/Jakarta):** 2026-11-16
+**Repository:** `eternalsabloncup-star/eternal-production-v3`
+**Branch:** `cursor/epv3-production-schedule-83bf`
+**BASE HEAD (preflight / expected):** `0d98dca659bfbbcc7363b0336b7fa8111deb0f39`
+**Worktree:** `/tmp/epv3-fase1b-wt`
+**Authz Production:** `legacy` (enforced **tidak** diaktifkan)
+**PR #15:** OPEN · **PR #14:** HOLD
+**Git putaran ini:** checkpoint commit Function First Iterasi 2 (Delivery Integrity)
 
-> Jangan memakai matriks visual 29/39 sebagai klaim Production siap.
+Detail Delivery Integrity: [`production-delivery-integrity-audit.md`](./production-delivery-integrity-audit.md).
+
+> Jangan memakai matriks visual sebagai klaim Production siap Live.
 
 ---
 
-## A. Klasifikasi item (final)
+## A. Fokus Iterasi 2
 
-| Aturan | Status |
+| Tahap | Status kontrak |
 |---|---|
-| Prepare Cup/Screen hanya `production_process=print` dari sumber canonical (`JobLineQty` / Accurate sync) | **TEGAK** |
-| `UNKNOWN` **tidak** otomatis menjadi PRINT saat prep | **DIPERBAIKI 1B** |
-| Line tanpa `JobLineQty` → 409 + alasan sinkron canonical | **TEGAK** |
-| `non_print` → 409 (bukan print-chain) | **TEGAK** |
-| Mapping canonical | `sync_job_lines_from_so_detail` / seed `line_items.production_process` — **bukan** aksi prep |
+| Verification (helper) | Ceiling ≤ output; identical replay → prior; cancelled job ditolak |
+| Packing | Ceiling ≤ verified−reject; UNKNOWN **tidak** invent print |
+| Loading | ≤ packing ∩ SJ line PCS; multi-SJ; cancelled job ditolak |
+| Surat Jalan | Identitas Accurate stub/fixture; list-all **COVERAGE TERBATAS** |
+| POD | Wajib Loading + 4 attachment; qty ≤ sisa loading |
 
 ---
 
-## B. Prepare Cup kontrak
+## B. Lapisan bukti
 
-| Item | Keputusan |
-|---|---|
-| Event | Reuse `role=helper` (`PrepState`/`PrepEvent` + mirror `prep_helper`) |
-| API | `prep_kind=prepare_cup`, label `Prepare Cup` |
-| Paralel | Independen vs Prepare Screen setelah jadwal sah |
-| Sample gate | Kedua READY **per line print** terjadwal |
-| PIC | Helper + grant `production.prep.helper` + cabang sah — **bukan** auto-grant nama role |
-
----
-
-## C. Lapisan bukti (pisah)
-
-| Lapisan | Hasil putaran 1B | Bukti |
+| Lapisan | Hasil Iterasi 2 | Bukti |
 |---|---|---|
-| **Implementasi selesai (lokal WIP)** | YA | `prep.py`, `engine.py`, `workflow.py`, `production.html` |
-| **API tested** | PASS | Prepare Cup suite, workflow E2E, six-role API, authz 221 |
-| **Browser tested (full mutation)** | **11/11 PASS_MUTATION** | `scripts/fase3_e2e_browser_mutation.mjs` · DB `epv3_e2e_bm_*_test` · log `/tmp/epv3-ff1b-browser-mut2.log` |
-| **Browser six-role harness** | Login + Kerjakan + deny · `PASS_CLICK_NO_MUTATE` | `fase3_e2e_six_role_browser.mjs` — **bukan** klaim mutasi penuh per role |
-| **Accurate fixture** | Dipakai (SJ/receipt stub server) | mutation_server monkeypatch |
-| **Accurate sandbox/real** | **BELUM** | Inbox 403 tanpa gateway; SJ list-all BLOCKED |
-| **Production deployment readiness** | **TIDAK** | P0 Accurate + enforced HOLD |
-
-### Alur browser mutation (bukti HTTP + DB)
-
-Designer upload → Direktur design/pay bypass → Kepala schedule → Screener screen → Helper cup → Operator sample → Kepala approve → Operator output → Helper verify+pack → Driver loading+POD → Designer pay-bypass **403**.
-
-Event ledger: `prep_screener`, `prep_helper`, `output_confirmed`, `output_helper_verified`, `packing_batch`, `loading`, `pod`.
-
-API negatif (disposable :8013): designer/screener tanpa `prep.helper` → **403**; line tanpa JobLineQty → **409 UNKNOWN/hilang**.
+| Implementasi lokal WIP | YA | `engine.py` (require_job_active, packing fail-closed, idempotency verify/pack) |
+| API focused Delivery Integrity | **5 PASS** | `test_delivery_integrity_iter2.py` |
+| API production focused (delivery-related) | **79 PASS** | helper verify, mixed buffer, multi_sj, workflow e2e, lifecycle |
+| Authorization | **221 PASS** | `tests/authorization/` |
+| Frontend Vitest | **225 PASS** | |
+| Frontend build | **PASS** | |
+| `git diff --check` | **PASS** | |
+| Browser mutation | **11/11 PASS_MUTATION** | `/tmp/epv3-di-browser-mut3.log` · DB `epv3_e2e_bm_04ccee9116_test` |
+| Accurate fixture | Dipakai | mutation_server / pytest stubs |
+| Accurate sandbox/real | **BLOCKED** | Tidak ada write Live |
+| Production Live readiness | **TIDAK** | P0 Accurate + enforced HOLD |
 
 ---
 
-## D. Cancel / revisi SO
-
-| Kasus | Hasil |
-|---|---|
-| Cancel setelah Screen+Cup (`confirm_review`) | PASS — histori `PrepState`/`PrepEvent` tetap |
-| Mutasi pada job cancelled | Ditolak |
-| Job revisi line-id baru | Event lama **tidak** membuka sample; prep ulang wajib |
-| Revisi line-id sama versi berbeda | Model line belum punya version key terpisah → **P1** dokumentasi |
-
----
-
-## E. Regresi putaran 1B
-
-| Suite | Hasil |
-|---|---|
-| Prepare Cup + workflow + six-role API focused | **21 PASS** |
-| `tests/authorization/` | **221 PASS** |
-| `tests/production/` penuh | **292 PASS** (setelah seed klasifikasi print di fixture terkait) |
-| Frontend Vitest | **225 PASS** |
-| Frontend build | **PASS** |
-| `git diff --check` | **PASS** |
-| Browser mutation full | **11/11 PASS_MUTATION** |
-| Browser six-role click harness | **ok=true** (6 role; click/deny, bukan full mutate) |
-
----
-
-## F. P0 / P1 / BLOCKED
+## C. P0 / P1 / BLOCKED
 
 | ID | Item | Prioritas |
 |---|---|---|
-| F3-029 | Accurate SJ list-all | **BLOCKED P0** |
-| F3-037 | Enforced Live activation | **BLOCKED P0** (PR #14 HOLD) |
-| Accurate inbox tanpa gateway | 403 runtime | **P1** |
-| Line revision versioning model | Belum ada version key terpisah | **P1** |
+| DI-01..03 | Unknown invent-print; cancelled mutasi; (diperbaiki lokal) | **P0 fixed WIP** |
+| DI-04 | Idempotency identical replay verify/pack | **P1 fixed WIP** |
+| F3-029 / DI-06 | Accurate SJ list-all | **BLOCKED P0** |
+| F3-037 / DI-07 | Enforced Live activation | **BLOCKED P0** (PR #14 HOLD) |
+| DI-05 | Reversal stok/Accurate setelah packing/POD | **P1** — ditolak eksplisit, tidak auto-reversal |
 | Visual nonkritis | Ditunda | HOLD |
 
 ---
 
-## G. Verdict
+## D. Verdict
 
-**SIAP GIT** untuk checkpoint Function First 1B (setelah Owner izinkan commit).  
-**Bukan** READY FOR LIVE. Staging smoke Owner masih diperlukan setelah push.
+**READY FOR STAGING** (smoke Owner, legacy + fixture Accurate) untuk jalur Verification→POD.
+**NOT READY FOR LIVE** / **NOT READY FOR LIVE APPROVAL**.

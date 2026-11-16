@@ -1428,6 +1428,9 @@ async def confirm_output(
     lot_code: str | None = None,
     evidence_ref: str | None = None,
 ) -> ProductionEvent:
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.OUTPUT_CONFIRM)
     _branch(user, job.branch_id)
     assignment = await session.get(ScheduleAssignment, assignment_id)
@@ -1577,6 +1580,9 @@ async def record_reject(
     reason: str,
     idempotency_key: str,
 ) -> ProductionEvent:
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.REJECT_RECORD)
     _branch(user, job.branch_id)
     if qty_physical <= 0 or not reason.strip():
@@ -1615,11 +1621,14 @@ async def verify_reject(
     reason: str | None = None,
 ) -> ProductionEvent:
     """Authorized verification emits a compensating reject_verified event."""
+    from app.services.production.lifecycle import require_job_active
+
     _require(user, P.REJECT_VERIFY)
     src = await session.get(ProductionEvent, event_id)
     if src is None or src.event_type != "reject":
         raise HTTPException(404, "Reject event tidak ditemukan")
     job = await get_job(session, src.job_id)
+    require_job_active(job)
     _branch(user, job.branch_id)
     if approved_qty <= 0 or approved_qty > Decimal(src.qty_physical or 0):
         raise HTTPException(422, "Qty verifikasi reject tidak valid")
@@ -1657,6 +1666,9 @@ async def correct_output(
     idempotency_key: str,
 ) -> ProductionEvent:
     """Compensating event — never silently overwrite confirmed output."""
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.OUTPUT_CONFIRM)
     _branch(user, job.branch_id)
     if not reason.strip():
@@ -1754,20 +1766,61 @@ async def record_helper_output_verification(
     Never rewrites operator history. Cumulative verified per source event cannot
     exceed operator net for that event. Packing eligibility uses this pool.
     """
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.OUTPUT_HELPER_VERIFY)
     _branch(user, job.branch_id)
     if qty_physical <= 0:
         raise HTTPException(422, "Qty verifikasi helper harus > 0")
+    if not idempotency_key or not 8 <= len(idempotency_key.strip()) <= 120:
+        raise HTTPException(422, "idempotency_key wajib 8-120 karakter")
+    idempotency_key = idempotency_key.strip()
     src = await session.get(ProductionEvent, source_output_event_id)
     if src is None or src.job_id != job.id or src.event_type != "output_confirmed":
         raise HTTPException(404, "Output operator sumber tidak ditemukan")
     await _reject_non_print_print_chain(session, job.id, src.so_line_id)
+
+    job_id = job.id
+    src_id = src.id
+    reason_norm = (reason or "").strip() or None
+    evidence_norm = evidence_ref
+    actor_id = user.id
+    assignment_id = src.assignment_id
+    so_line_id = src.so_line_id
+    color_pass = src.color_pass or PHYSICAL_CUP_COLOR_PASS
+    lot_code = src.lot_code
+    operator_actor = src.actor_user_id
+
+    def _same_helper(row: ProductionEvent) -> bool:
+        if (
+            row.job_id != job_id
+            or row.event_type != HELPER_VERIFIED_EVENT
+            or Decimal(row.qty_physical or 0) != qty_physical
+            or (row.evidence_ref or None) != (evidence_norm or None)
+            or (row.reason or None) != reason_norm
+        ):
+            return False
+        try:
+            data = json.loads(row.payload_json or "{}")
+        except json.JSONDecodeError:
+            return False
+        return int(data.get("source_output_event_id") or 0) == src_id
+
+    prior = await session.scalar(
+        select(ProductionEvent).where(ProductionEvent.idempotency_key == idempotency_key)
+    )
+    if prior is not None:
+        if not _same_helper(prior):
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return prior
+
     # Operator net for this source = confirmed + corrections tied to it.
     corrections = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
+            ProductionEvent.job_id == job_id,
             ProductionEvent.event_type == "output_correction",
-            ProductionEvent.payload_json.contains(f'"source_output_id":{src.id}'),
+            ProductionEvent.payload_json.contains(f'"source_output_id":{src_id}'),
         )
     )
     operator_net = Decimal(src.qty_physical or 0) + Decimal(corrections or 0)
@@ -1775,10 +1828,10 @@ async def record_helper_output_verification(
         operator_net = Decimal("0")
     already = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
+            ProductionEvent.job_id == job_id,
             ProductionEvent.event_type == HELPER_VERIFIED_EVENT,
             ProductionEvent.payload_json.contains(
-                f'"source_output_event_id":{src.id}'
+                f'"source_output_event_id":{src_id}'
             ),
         )
     )
@@ -1793,16 +1846,16 @@ async def record_helper_output_verification(
     # Lock source row to serialize concurrent verifies.
     await session.execute(
         select(ProductionEvent)
-        .where(ProductionEvent.id == src.id)
+        .where(ProductionEvent.id == src_id)
         .with_for_update()
     )
     # Re-check after lock.
     already2 = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
+            ProductionEvent.job_id == job_id,
             ProductionEvent.event_type == HELPER_VERIFIED_EVENT,
             ProductionEvent.payload_json.contains(
-                f'"source_output_event_id":{src.id}'
+                f'"source_output_event_id":{src_id}'
             ),
         )
     )
@@ -1813,26 +1866,26 @@ async def record_helper_output_verification(
             f"Verifikasi melebihi sisa output operator (remaining={remaining2})",
         )
     payload = {
-        "source_output_event_id": src.id,
-        "assignment_id": src.assignment_id,
-        "color_pass": int(src.color_pass or PHYSICAL_CUP_COLOR_PASS),
-        "operator_actor_user_id": src.actor_user_id,
-        "helper_actor_user_id": user.id,
-        "reason": (reason or "").strip() or None,
+        "source_output_event_id": src_id,
+        "assignment_id": assignment_id,
+        "color_pass": int(color_pass or PHYSICAL_CUP_COLOR_PASS),
+        "operator_actor_user_id": operator_actor,
+        "helper_actor_user_id": actor_id,
+        "reason": reason_norm,
     }
     event = ProductionEvent(
-        job_id=job.id,
-        assignment_id=src.assignment_id,
+        job_id=job_id,
+        assignment_id=assignment_id,
         event_type=HELPER_VERIFIED_EVENT,
-        so_line_id=src.so_line_id,
-        color_pass=src.color_pass or PHYSICAL_CUP_COLOR_PASS,
-        lot_code=src.lot_code,
+        so_line_id=so_line_id,
+        color_pass=color_pass,
+        lot_code=lot_code,
         qty_physical=qty_physical,
         qty_pass_ops=qty_physical,
         idempotency_key=idempotency_key,
-        actor_user_id=user.id,
-        evidence_ref=evidence_ref,
-        reason=(reason or "").strip() or None,
+        actor_user_id=actor_id,
+        evidence_ref=evidence_norm,
+        reason=reason_norm,
         payload_json=json.dumps(payload, separators=(",", ":")),
     )
     session.add(event)
@@ -1840,7 +1893,19 @@ async def record_helper_output_verification(
         await session.flush()
     except IntegrityError as exc:
         await session.rollback()
-        raise HTTPException(409, "Idempotency key duplikat / concurrent verify") from exc
+        session.expunge_all()
+        raced = await session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.idempotency_key == idempotency_key
+            )
+        )
+        if raced is None:
+            raise HTTPException(
+                409, "Idempotency key duplikat / concurrent verify"
+            ) from exc
+        if not _same_helper(raced):
+            raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+        return raced
     await _mark_terproses(session, job)
     await session.commit()
     await session.refresh(event)
@@ -1861,6 +1926,9 @@ async def cancel_sj(
     Rejects when unreversed Loading (or POD) exists for the SJ. Capacity release
     requires a separate authorized durable reversal (out of scope here).
     """
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
     sj_id = (accurate_sj_id or "").strip()
@@ -1961,39 +2029,69 @@ async def record_packing(
     idempotency_key: str,
     evidence_ref: str | None = None,
 ) -> ProductionEvent:
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.PACKING_RECORD)
     _branch(user, job.branch_id)
     if qty_physical <= 0:
         raise HTTPException(422, "Qty packing harus > 0")
+    if not idempotency_key or not 8 <= len(idempotency_key.strip()) <= 120:
+        raise HTTPException(422, "idempotency_key wajib 8-120 karakter")
+    idempotency_key = idempotency_key.strip()
     from app.models.production.prep import JobLineQty
 
+    job_id = job.id
+    actor_id = user.id
+    so_line = (so_line_id or "").strip()
+    lot_norm = lot_code
+    evidence_norm = (evidence_ref or "").strip() or None
+
+    def _same_packing(row: ProductionEvent) -> bool:
+        return (
+            row.job_id == job_id
+            and row.event_type in PACKING_EVENT_TYPES
+            and (row.so_line_id or "") == so_line
+            and Decimal(row.qty_physical or 0) == qty_physical
+            and (row.lot_code or None) == (lot_norm or None)
+            and (row.evidence_ref or None) == evidence_norm
+        )
+
+    prior = await session.scalar(
+        select(ProductionEvent).where(ProductionEvent.idempotency_key == idempotency_key)
+    )
+    if prior is not None:
+        if not _same_packing(prior):
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return prior
+
     locked = await session.scalar(
-        select(ProductionJob).where(ProductionJob.id == job.id).with_for_update()
+        select(ProductionJob).where(ProductionJob.id == job_id).with_for_update()
     )
     if locked is None:
         raise HTTPException(404, "Production job tidak ditemukan")
     line_row = await session.scalar(
         select(JobLineQty).where(
-            JobLineQty.job_id == job.id, JobLineQty.so_line_id == so_line_id
+            JobLineQty.job_id == job_id, JobLineQty.so_line_id == so_line
         )
     )
     process = ((line_row.production_process or "") if line_row is not None else "").strip()
+    # Never invent print for unclassified lines — fail closed regardless of
+    # legacy fixture flags that disable REQUIRE_SYNCED_LINE_QTY.
     if process not in {"print", "non_print"}:
-        if _classification_enforced():
-            raise HTTPException(409, _UNCLASSIFIED_PACKING)
-        process = "print"
+        raise HTTPException(409, _UNCLASSIFIED_PACKING)
     if process == "non_print":
         await _require_payment_released(session, job)
         if line_row is None or line_row.po_qty is None:
             raise HTTPException(422, "Line non-print belum tersinkron")
-        if not (evidence_ref and evidence_ref.strip()):
+        if not evidence_norm:
             raise HTTPException(422, "Bukti konfirmasi gudang wajib")
         packed = Decimal(
             await session.scalar(
                 select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-                    ProductionEvent.job_id == job.id,
+                    ProductionEvent.job_id == job_id,
                     ProductionEvent.event_type.in_(list(PACKING_EVENT_TYPES)),
-                    ProductionEvent.so_line_id == so_line_id,
+                    ProductionEvent.so_line_id == so_line,
                 )
             )
             or 0
@@ -2004,19 +2102,19 @@ async def record_packing(
                 f"Konfirmasi gudang melebihi sisa PO (po={line_row.po_qty}, sudah={packed})",
             )
         event = ProductionEvent(
-            job_id=job.id,
+            job_id=job_id,
             event_type=CANONICAL_PACKING_EVENT,
-            so_line_id=so_line_id,
-            lot_code=lot_code,
+            so_line_id=so_line,
+            lot_code=lot_norm,
             qty_physical=qty_physical,
             idempotency_key=idempotency_key,
-            actor_user_id=user.id,
-            evidence_ref=evidence_ref.strip(),
+            actor_user_id=actor_id,
+            evidence_ref=evidence_norm,
             payload_json=json.dumps(
                 {
                     "authority": "warehouse_confirmation",
-                    "so_line_id": so_line_id,
-                    "evidence_ref": evidence_ref.strip(),
+                    "so_line_id": so_line,
+                    "evidence_ref": evidence_norm,
                 },
                 separators=(",", ":"),
                 sort_keys=True,
@@ -2027,19 +2125,27 @@ async def record_packing(
             await session.commit()
         except IntegrityError as exc:
             await session.rollback()
-            raise HTTPException(409, "Idempotency key duplikat") from exc
+            session.expunge_all()
+            raced = await session.scalar(
+                select(ProductionEvent).where(
+                    ProductionEvent.idempotency_key == idempotency_key
+                )
+            )
+            if raced is None or not _same_packing(raced):
+                raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+            return raced
         await session.refresh(event)
         return event
     # Required passes from schedule for this SO line (default pass 1 if none).
     asg_rows = (
         await session.scalars(
             select(ScheduleAssignment).where(
-                ScheduleAssignment.job_id == job.id,
-                ScheduleAssignment.so_line_id == so_line_id,
+                ScheduleAssignment.job_id == job_id,
+                ScheduleAssignment.so_line_id == so_line,
             )
         )
     ).all()
-    required = required_color_passes_from_assignments(asg_rows, so_line_id=so_line_id)
+    required = required_color_passes_from_assignments(asg_rows, so_line_id=so_line)
     # Packing authority = helper-verified pool (min across required passes).
     # Operator output alone is never packable stock. Never sum multi-color passes.
     # Owner decision: Loading is capped by this packing-verified quantity per SO line.
@@ -2047,18 +2153,18 @@ async def record_packing(
     for pass_no in sorted(required):
         verified = await session.scalar(
             select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-                ProductionEvent.job_id == job.id,
+                ProductionEvent.job_id == job_id,
                 ProductionEvent.event_type.in_(list(HELPER_VERIFIED_EVENT_TYPES)),
-                ProductionEvent.so_line_id == so_line_id,
+                ProductionEvent.so_line_id == so_line,
                 func.coalesce(ProductionEvent.color_pass, PHYSICAL_CUP_COLOR_PASS)
                 == pass_no,
             )
         )
         rejected = await session.scalar(
             select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-                ProductionEvent.job_id == job.id,
+                ProductionEvent.job_id == job_id,
                 ProductionEvent.event_type.in_(list(REJECT_EVENT_TYPES)),
-                ProductionEvent.so_line_id == so_line_id,
+                ProductionEvent.so_line_id == so_line,
                 func.coalesce(ProductionEvent.color_pass, PHYSICAL_CUP_COLOR_PASS)
                 == pass_no,
             )
@@ -2067,9 +2173,9 @@ async def record_packing(
     eligible = min(pass_nets) if pass_nets else Decimal("0")
     packed = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
+            ProductionEvent.job_id == job_id,
             ProductionEvent.event_type.in_(list(PACKING_EVENT_TYPES)),
-            ProductionEvent.so_line_id == so_line_id,
+            ProductionEvent.so_line_id == so_line,
         )
     )
     available = eligible - Decimal(packed or 0)
@@ -2082,21 +2188,29 @@ async def record_packing(
             f"(eligible={available})",
         )
     event = ProductionEvent(
-        job_id=job.id,
+        job_id=job_id,
         event_type=CANONICAL_PACKING_EVENT,
-        so_line_id=so_line_id,
-        lot_code=lot_code,
+        so_line_id=so_line,
+        lot_code=lot_norm,
         qty_physical=qty_physical,
         idempotency_key=idempotency_key,
-        actor_user_id=user.id,
-        evidence_ref=evidence_ref,
+        actor_user_id=actor_id,
+        evidence_ref=evidence_norm,
     )
     session.add(event)
     try:
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        raise HTTPException(409, "Idempotency key duplikat") from exc
+        session.expunge_all()
+        raced = await session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.idempotency_key == idempotency_key
+            )
+        )
+        if raced is None or not _same_packing(raced):
+            raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+        return raced
     await session.refresh(event)
     return event
 
@@ -2432,9 +2546,9 @@ async def _physical_readiness_qty(
         return packed, None, ""
     po_qty = Decimal(line.po_qty) if line.po_qty is not None else None
     process = (line.production_process or "").strip()
+    # Unknown process always fail-closed for Loading readiness (never invent print).
     if process not in {"print", "non_print"}:
-        if _classification_enforced():
-            return None, po_qty, "unknown_process"
+        return None, po_qty, "unknown_process"
     evidence, packed = await _confirmed_packing_qty(session, job_id, so_line_id)
     if evidence <= 0:
         return None, po_qty, "no_evidence"
@@ -2455,6 +2569,9 @@ async def record_loading(
     evidence_ref: str | None = None,
 ) -> ProductionEvent:
     """Confirm Loading within SJ line capacity and valid packed qty."""
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
     sj_id = (accurate_sj_id or "").strip()
@@ -2765,6 +2882,9 @@ async def cancel_loading(
     evidence_ref: str | None = None,
 ) -> ProductionEvent:
     """confirmation_cancel only — physical_return uses request/approve APIs."""
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
     kind = (cancel_kind or "").strip() or LOADING_CANCEL_CONFIRMATION
@@ -3360,6 +3480,9 @@ async def record_pod(
     it never substitutes for the four attachment requirements.
     Historical POD rows without attachments remain readable and are not relabeled.
     """
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
     receiver_name = (receiver_name or "").strip()

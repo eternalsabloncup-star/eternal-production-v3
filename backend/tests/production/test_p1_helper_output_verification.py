@@ -287,8 +287,22 @@ async def test_packing_requires_helper_verify_partial_and_duplicate(client):
         },
     )
     assert v2.status_code == 200
+    v2_id = v2.json()["id"]
 
-    # Idempotent replay
+    # Identical replay → return prior (no double count)
+    v_same = await ac.post(
+        f"/api/v1/production/jobs/{jid}/outputs/{oid}/helper-verifications",
+        headers=hh,
+        json={
+            "source_output_event_id": oid,
+            "qty_physical": "15",
+            "idempotency_key": "hv-rest-001",
+        },
+    )
+    assert v_same.status_code == 200, v_same.text
+    assert v_same.json()["id"] == v2_id
+
+    # Mismatched payload with same key → 409
     v_dup = await ac.post(
         f"/api/v1/production/jobs/{jid}/outputs/{oid}/helper-verifications",
         headers=hh,
