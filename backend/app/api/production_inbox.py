@@ -70,6 +70,12 @@ async def _scoped_inbox(gateway, session, user, page, limit, keyword) -> dict:
     upstream = 0
     seen = 0
     exhausted = False
+    last_provenance = {
+        "source": "accurate_gateway",
+        "mode": "unverified",
+        "live_verified": None,
+        "filter_incomplete": False,
+    }
     while len(rows) < needed:
         if upstream >= max_pages:
             break
@@ -77,11 +83,35 @@ async def _scoped_inbox(gateway, session, user, page, limit, keyword) -> dict:
         data = await list_sales_orders(
             gateway, page=upstream, limit=SCOPED_SCAN_PAGE_SIZE, keyword=keyword
         )
-        seen += len(data["rows"])
+        last_provenance = {
+            "source": data.get("source") or "accurate_gateway",
+            "mode": data.get("mode") or "unverified",
+            "live_verified": data.get("live_verified"),
+            "filter_incomplete": bool(data.get("filter_incomplete")),
+        }
+        page_rows = data["rows"]
+        seen += len(page_rows)
         rows.extend(
-            r for r in data["rows"] if user_can_access_branch(user, r.get("branch_id"))
+            r for r in page_rows if user_can_access_branch(user, r.get("branch_id"))
         )
-        if not data["rows"] or seen >= int(data.get("total") or 0):
+        try:
+            reported_total = (
+                int(data["total"]) if data.get("total") is not None else None
+            )
+        except (TypeError, ValueError):
+            reported_total = None
+        if last_provenance["filter_incomplete"]:
+            # Upstream total is not a trustworthy end-of-list signal under
+            # incomplete filters — stop this page fetch without claiming exhaustion.
+            if not page_rows:
+                break
+            continue
+        if not page_rows:
+            # Empty page with remaining reported total is NOT a complete inventory.
+            if reported_total is None or seen >= reported_total:
+                exhausted = True
+            break
+        if reported_total is not None and seen >= reported_total:
             exhausted = True
             break
     start = (page - 1) * limit
@@ -100,9 +130,26 @@ async def _scoped_inbox(gateway, session, user, page, limit, keyword) -> dict:
         "has_more": len(rows) > start + limit,
         "scan_incomplete": not exhausted and len(rows) < needed,
         "filtered_by_branch": True,
-        "source": "accurate_gateway",
-        "mode": "live",
+        "source": last_provenance["source"],
+        "mode": last_provenance["mode"],
+        "live_verified": last_provenance["live_verified"],
+        "filter_incomplete": last_provenance["filter_incomplete"],
     }
+
+
+def _inbox_requires_scoped_scan(user: User) -> bool:
+    """Non-Direktur must not see cross-branch Accurate totals.
+
+    Enforced path uses workflow context.director. Legacy (no context) falls back
+    to role id — never treat missing context as Direktur.
+    """
+    from app.authorization.workflow import context
+
+    ctx = context(user)
+    if ctx is not None:
+        return not bool(getattr(ctx.access, "director", False))
+    role = str(getattr(user, "role", "") or "").strip().lower()
+    return role not in {"direktur", "director"}
 
 
 @router.get("/inbox")
@@ -114,9 +161,7 @@ async def inbox(
     session: AsyncSession = Depends(get_db_session),
     user: User = Depends(require_permissions(PERM_INBOX_READ)),
 ):
-    from app.authorization.workflow import context
-    ctx = context(user)
-    if ctx and not ctx.access.director:
+    if _inbox_requires_scoped_scan(user):
         return await _scoped_inbox(gateway, session, user, page, limit, keyword)
     data = await list_sales_orders(
         gateway, page=page, limit=limit, keyword=keyword
