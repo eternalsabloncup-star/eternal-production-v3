@@ -303,6 +303,13 @@ async def list_deliveries(
         # Accurate gateway exposes GET /delivery-notes/{id} only — no list-all.
         # Address/zone/expedition/remarks/printed_at are not in the verified V3 SJ contract.
         unavailable = "BELUM TERSEDIA"
+        # Owner sprint: eight Final Delivery columns without a verified Accurate/V3
+        # source must display this exact placeholder — never invent values.
+        unlinked = "Belum terhubung"
+        item_outlets = None
+        if items:
+            outs = [str(i.get("outlet")).strip() for i in items if i.get("outlet")]
+            item_outlets = ", ".join(outs) if outs else None
         rows.append(
             {
                 "job_id": job_id,
@@ -332,6 +339,7 @@ async def list_deliveries(
                 "item_names": ", ".join(
                     str(i.get("item_name") or unavailable) for i in items
                 ) if items else unavailable,
+                "item_outlets": item_outlets,
                 "qty_sj": str(sj_qty),
                 "qty_loaded": str(loaded),
                 "qty_delivered": str(delivered),
@@ -351,6 +359,10 @@ async def list_deliveries(
                 "address": None,
                 "customer_address": None,
                 "customer_phone": None,
+                "warehouse_signer": None,
+                "goods_checker": None,
+                "courier_signer": None,
+                "recipient_signer": None,
                 "sales_name": None,
                 "created_by": None,
                 "po_qty_total": str(Decimal(po_totals.get(job_id) or 0)),
@@ -365,12 +377,19 @@ async def list_deliveries(
                     "zone": unavailable,
                     "expedition": unavailable,
                     "remarks": unavailable,
-                    "sj_printed_at": unavailable,
-                    "customer_phone": unavailable,
                     "sales_name": unavailable,
                     "created_by": unavailable,
+                    "customer_phone": unlinked,
+                    "outlet": unlinked,
+                    "sj_printed_at": unlinked,
+                    "item_outlets": unlinked,
+                    "warehouse_signer": unlinked,
+                    "goods_checker": unlinked,
+                    "courier_signer": unlinked,
+                    "recipient_signer": unlinked,
                     "note": (
                         "Gateway Accurate hanya GET /delivery-notes/{id} (tidak ada list-all). "
+                        "Delapan kolom Final tanpa data sah = 'Belum terhubung'. "
                         "Baris Loading = inventaris V3 terverifikasi. "
                         "Opsional: tautan SO Accurate (include_accurate_links). "
                         "Melihat jadwal tidak menulis Accurate."
@@ -412,18 +431,44 @@ async def list_deliveries(
 
 
 def _coverage(*, include_accurate_links: bool = False, link_meta: dict | None = None) -> dict:
+    """G4/H — SJ coverage contract (fail-closed; atomic universe not claimed).
+
+    Discovery paths that are proven:
+      1) Accurate delivery-order/list.do → internal id → detail.do (Director Live).
+      2) v3_loading — SJ dengan event Loading di PostgreSQL.
+      3) so_links — SO detail links.delivery_note_ids → GET /delivery-notes/{id}.
+
+    Ops deliveries view remains Loading-centric until Live wires list ingest;
+    census_scan_pass ≠ atomic snapshot guarantee.
+    """
     return {
         "scope": "Satu baris per Surat Jalan Accurate (canonical accurate_sj_id)",
         "source": (
-            "v3_loading (+ optional accurate_so_links). "
-            "BLOCKER: Accurate Gateway tidak mengekspos GET /delivery-notes list-all — "
-            "hanya GET /delivery-notes/{id} dan hint links.delivery_note_ids pada SO detail."
+            "v3_loading (+ optional accurate_so_links); "
+            "Accurate discovery: delivery-order/list.do → detail.do by internal id. "
+            "full_accurate_sj_universe=false (atomic snapshot tidak dijamin)."
         ),
         "include_accurate_links": bool(include_accurate_links),
         "accurate_link_meta": link_meta or {},
         "address": "Pass-through bila Accurate mengirim; selain itu BELUM TERSEDIA",
         "accurate_write_on_view": False,
-        "accurate_sj_list_endpoint": None,
+        "accurate_sj_list_endpoint": "GET /delivery-notes → delivery-order/list.do",
+        "sj_detail_endpoint": "GET /delivery-notes/{internal_id}",
+        "sj_detail_lookup_prefers_internal_id": True,
+        "sj_discovery_strategy": [
+            "accurate_delivery_order_list_do",
+            "detail_do_by_internal_id",
+            "v3_loading_events",
+            "so_links_delivery_note_ids",
+        ],
+        "sj_without_so_relation": "delivery_order_list_or_v3_loading_by_internal_id",
+        # Director Live census: scan_pass with unique=rowCount; atomic snapshot NOT guaranteed.
+        "full_accurate_sj_universe": False,
+        "live_sj_list_verified": True,
+        "census_scan_pass_director": True,
+        "atomic_snapshot_guaranteed": False,
+        "fail_closed": True,
+        "coverage_label": "LIST_PROVEN_ATOMIC_NOT_GUARANTEED",
     }
 
 
@@ -485,6 +530,9 @@ async def _append_sj_from_accurate_so_links(
             items: list[dict] = []
             sj_qty = Decimal(0)
             address = zone = expedition = remarks = printed = None
+            customer_phone = outlet = None
+            warehouse_signer = goods_checker = courier_signer = recipient_signer = None
+            print_user_name = accurate_status = None
             cancelled = False
             if isinstance(note, dict):
                 number = note.get("number") or sj_id
@@ -495,7 +543,16 @@ async def _append_sj_from_accurate_so_links(
                 expedition = note.get("expedition")
                 remarks = note.get("remarks")
                 printed = note.get("sj_printed_at")
+                customer_phone = note.get("customer_phone")
+                outlet = note.get("outlet")
+                warehouse_signer = note.get("warehouse_signer")
+                goods_checker = note.get("goods_checker")
+                courier_signer = note.get("courier_signer")
+                recipient_signer = note.get("recipient_signer")
+                # Accurate status (e.g. DIFAKTUR) is not POD / terkirim evidence.
                 cancelled = bool(note.get("cancelled"))
+                print_user_name = note.get("print_user_name")
+                accurate_status = note.get("status")
                 for ln in note.get("line_items") or []:
                     if not isinstance(ln, dict):
                         continue
@@ -513,7 +570,7 @@ async def _append_sj_from_accurate_so_links(
                             "item_name": ln.get("item_name") or ln.get("name"),
                             "qty": str(qv) if qty is not None else None,
                             "unit": ln.get("uom") or "PCS",
-                            "outlet": None,
+                            "outlet": ln.get("outlet"),
                         }
                     )
             else:
@@ -528,6 +585,15 @@ async def _append_sj_from_accurate_so_links(
             ).lower():
                 continue
             unavailable = "BELUM TERSEDIA"
+            unlinked = "Belum terhubung"
+            item_outlets = None
+            if items:
+                outs = [str(i.get("outlet")).strip() for i in items if i.get("outlet")]
+                item_outlets = ", ".join(outs) if outs else None
+
+            def _avail(value):
+                return value if value not in (None, "") else unlinked
+
             seen_sj.add(sj_id)
             rows.append(
                 {
@@ -543,11 +609,13 @@ async def _append_sj_from_accurate_so_links(
                     "planned_date": None,
                     "delivery_date": None,
                     "sj_printed_at": printed,
+                    "print_user_name": print_user_name,
+                    "accurate_status": accurate_status,
                     "courier_user_id": None,
                     "courier_name": None,
                     "expedition": expedition,
                     "zone": zone,
-                    "outlet": None,
+                    "outlet": outlet,
                     "remarks": remarks,
                     "item_count": len(items),
                     "total_qty": str(sj_qty),
@@ -558,6 +626,7 @@ async def _append_sj_from_accurate_so_links(
                     "item_names": ", ".join(str(i.get("item_name") or unavailable) for i in items)
                     if items
                     else unavailable,
+                    "item_outlets": item_outlets,
                     "qty_sj": str(sj_qty),
                     "qty_loaded": "0",
                     "qty_delivered": "0",
@@ -573,7 +642,11 @@ async def _append_sj_from_accurate_so_links(
                     "recipient_name": None,
                     "address": address,
                     "customer_address": address,
-                    "customer_phone": None,
+                    "customer_phone": customer_phone,
+                    "warehouse_signer": warehouse_signer,
+                    "goods_checker": goods_checker,
+                    "courier_signer": courier_signer,
+                    "recipient_signer": recipient_signer,
                     "sales_name": None,
                     "created_by": None,
                     "po_qty_total": None,
@@ -585,7 +658,14 @@ async def _append_sj_from_accurate_so_links(
                         "zone": zone or unavailable,
                         "expedition": expedition or unavailable,
                         "remarks": remarks or unavailable,
-                        "sj_printed_at": printed or unavailable,
+                        "sj_printed_at": _avail(printed),
+                        "customer_phone": _avail(customer_phone),
+                        "outlet": _avail(outlet),
+                        "item_outlets": _avail(item_outlets),
+                        "warehouse_signer": _avail(warehouse_signer),
+                        "goods_checker": _avail(goods_checker),
+                        "courier_signer": _avail(courier_signer),
+                        "recipient_signer": _avail(recipient_signer),
                         "note": "Ditemukan via SO links.delivery_note_ids — bukan list-all Accurate.",
                     },
                 }

@@ -206,9 +206,81 @@ FIXTURE_RECEIPTS: dict[str, dict[str, Any]] = {
     },
 }
 
+FIXTURE_SALES_INVOICES: dict[str, dict[str, Any]] = {
+    "INV-OPEN-1": {
+        "id": "51001",
+        "accurate_id": "51001",
+        "number": "INV-OPEN-1",
+        "status": "OPEN",
+        "customer": {"id": "C-100", "name": "PT Contoh"},
+        "branch": {"id": "BR-JKT", "name": "Jakarta"},
+        "invoice_total": "1000.00",
+        "invoice_amount": "1000.00",
+        "outstanding_amount": "1000.00",
+        "remaining_amount": "1000.00",
+        "paid_amount": "0.00",
+        "financial_payment_status": "Belum Bayar",
+        "owing_field_present": True,
+        "verified": False,
+        "source": "accurate_sales_invoice",
+    },
+    "INV-PARTIAL-1": {
+        "id": "51002",
+        "accurate_id": "51002",
+        "number": "INV-PARTIAL-1",
+        "status": "OPEN",
+        "customer": {"id": "C-100", "name": "PT Contoh"},
+        "branch": {"id": "BR-JKT", "name": "Jakarta"},
+        "invoice_total": "1000.00",
+        "invoice_amount": "1000.00",
+        "outstanding_amount": "400.00",
+        "remaining_amount": "400.00",
+        "paid_amount": "600.00",
+        "financial_payment_status": "Sebagian",
+        "owing_field_present": True,
+        "verified": False,
+        "source": "accurate_sales_invoice",
+    },
+    "INV-PAID-1": {
+        "id": "51003",
+        "accurate_id": "51003",
+        "number": "INV-PAID-1",
+        "status": "CLOSED",
+        "customer": {"id": "C-100", "name": "PT Contoh"},
+        "branch": {"id": "BR-JKT", "name": "Jakarta"},
+        "invoice_total": "1000.00",
+        "invoice_amount": "1000.00",
+        "outstanding_amount": "0.00",
+        "remaining_amount": "0.00",
+        "paid_amount": "1000.00",
+        "financial_payment_status": "Lunas",
+        "owing_field_present": True,
+        "verified": False,
+        "source": "accurate_sales_invoice",
+    },
+    "INV-UNKNOWN-1": {
+        "id": "51004",
+        "accurate_id": "51004",
+        "number": "INV-UNKNOWN-1",
+        "status": "OPEN",
+        "customer": {"id": "C-100", "name": "PT Contoh"},
+        "branch": {"id": "BR-JKT", "name": "Jakarta"},
+        "invoice_total": "1000.00",
+        "invoice_amount": "1000.00",
+        "outstanding_amount": None,
+        "remaining_amount": None,
+        "paid_amount": None,
+        "financial_payment_status": None,
+        "owing_field_present": False,
+        "verified": False,
+        "source": "accurate_sales_invoice",
+    },
+}
+
 FIXTURE_DELIVERY_NOTES: dict[str, dict[str, Any]] = {
     "SJ-OK-1": {
-        "id": "SJ-OK-1",
+        "id": "120001",
+        "accurate_id": "120001",
         "number": "SJ-OK-1",
         "status": "DELIVERED",
         "sales_order_number": "SO-LIVE-001",
@@ -245,7 +317,8 @@ FIXTURE_DELIVERY_NOTES: dict[str, dict[str, Any]] = {
         "so_line_cross_verified": False,
     },
     "SJ-CANCELLED": {
-        "id": "SJ-CANCELLED",
+        "id": "120002",
+        "accurate_id": "120002",
         "number": "SJ-CANCELLED",
         "status": "CANCELLED",
         "sales_order_number": "SO-LIVE-001",
@@ -261,7 +334,8 @@ FIXTURE_DELIVERY_NOTES: dict[str, dict[str, Any]] = {
         "so_line_cross_verified": False,
     },
     "SJ-MISMATCH": {
-        "id": "SJ-MISMATCH",
+        "id": "120003",
+        "accurate_id": "120003",
         "number": "SJ-MISMATCH",
         "status": "DELIVERED",
         "sales_order_number": "SO-OTHER",
@@ -380,5 +454,100 @@ def get_receipt(receipt_id: str) -> dict[str, Any] | None:
 
 
 def get_delivery_note(dn_id: str) -> dict[str, Any] | None:
-    row = FIXTURE_DELIVERY_NOTES.get(dn_id)
+    key = (dn_id or "").strip()
+    row = FIXTURE_DELIVERY_NOTES.get(key)
+    if row is None:
+        for candidate in FIXTURE_DELIVERY_NOTES.values():
+            if str(candidate.get("accurate_id") or candidate.get("id") or "") == key:
+                row = candidate
+                break
+            if str(candidate.get("number") or "") == key:
+                row = candidate
+                break
     return deepcopy(row) if row else None
+
+
+def list_delivery_notes(
+    *,
+    keywords: str | None = None,
+    branch: str | None = None,
+    limit: int = 50,
+    page: int = 1,
+) -> tuple[list[dict[str, Any]], int]:
+    rows = [deepcopy(v) for v in FIXTURE_DELIVERY_NOTES.values()]
+    if keywords:
+        needle = keywords.lower()
+        rows = [
+            r
+            for r in rows
+            if needle in str(r.get("number", "")).lower()
+            or needle in str((r.get("customer") or {}).get("name", "")).lower()
+        ]
+    if branch:
+        needle = branch.lower()
+        rows = [
+            r
+            for r in rows
+            if needle in str((r.get("branch") or {}).get("name", "")).lower()
+            or needle == str((r.get("branch") or {}).get("id", "")).lower()
+        ]
+    rows.sort(key=lambda r: str(r.get("number") or ""))
+    total = len(rows)
+    page_n = max(1, page)
+    size = max(1, min(limit, 200))
+    start = (page_n - 1) * size
+    return rows[start : start + size], total
+
+
+def get_sales_invoice(invoice_id: str) -> dict[str, Any] | None:
+    key = (invoice_id or "").strip()
+    row = FIXTURE_SALES_INVOICES.get(key)
+    if row is None:
+        for candidate in FIXTURE_SALES_INVOICES.values():
+            if str(candidate.get("accurate_id") or candidate.get("id") or "") == key:
+                row = candidate
+                break
+            if str(candidate.get("number") or "") == key:
+                row = candidate
+                break
+    return deepcopy(row) if row else None
+
+
+def list_sales_invoices(
+    *,
+    keywords: str | None = None,
+    outstanding_only: bool | None = None,
+    limit: int = 50,
+    page: int = 1,
+) -> tuple[list[dict[str, Any]], int]:
+    rows = [deepcopy(v) for v in FIXTURE_SALES_INVOICES.values()]
+    if keywords:
+        needle = keywords.lower()
+        rows = [
+            r
+            for r in rows
+            if needle in str(r.get("number", "")).lower()
+            or needle in str((r.get("customer") or {}).get("name", "")).lower()
+        ]
+    if outstanding_only is True:
+        rows = [
+            r
+            for r in rows
+            if r.get("owing_field_present")
+            and r.get("outstanding_amount") is not None
+            and float(r["outstanding_amount"]) > 0
+        ]
+    elif outstanding_only is False:
+        rows = [
+            r
+            for r in rows
+            if r.get("owing_field_present")
+            and r.get("outstanding_amount") is not None
+            and float(r["outstanding_amount"]) <= 0
+        ]
+    rows.sort(key=lambda r: str(r.get("number") or ""))
+    total = len(rows)
+    page_n = max(1, page)
+    size = max(1, min(limit, 200))
+    start = (page_n - 1) * size
+    return rows[start : start + size], total

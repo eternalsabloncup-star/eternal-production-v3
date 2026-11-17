@@ -18,12 +18,21 @@ O = "/api/v1/production/ops"
 
 
 @pytest.mark.asyncio
-async def test_coverage_documents_missing_sj_list_endpoint(client: AsyncClient):
+async def test_coverage_documents_sj_list_endpoint_without_atomic_universe(
+    client: AsyncClient,
+):
     h = await _login(client)
     body = (await client.get(f"{O}/deliveries", headers=h)).json()
-    assert body["coverage"]["accurate_sj_list_endpoint"] is None
-    assert body["coverage"]["accurate_write_on_view"] is False
-    assert "list-all" in body["coverage"]["source"]
+    cov = body["coverage"]
+    # Director G4B: list.do proven; atomic full universe still not claimed.
+    assert cov["accurate_sj_list_endpoint"] == (
+        "GET /delivery-notes → delivery-order/list.do"
+    )
+    assert cov["full_accurate_sj_universe"] is False
+    assert cov["atomic_snapshot_guaranteed"] is False
+    assert cov["accurate_write_on_view"] is False
+    assert "delivery-order/list.do" in cov["source"]
+    assert "full_accurate_sj_universe=false" in cov["source"]
 
 
 @pytest.mark.asyncio
@@ -100,4 +109,7 @@ async def test_include_accurate_links_adds_linked_sj_without_duplicate(client: A
     assert link_row["expedition"] == "OUTLET"
     assert link_row["address"] == "Jl. Uji 1"
     assert listed["coverage"]["include_accurate_links"] is True
-    assert listed["coverage"]["accurate_sj_list_endpoint"] is None
+    assert listed["coverage"]["accurate_sj_list_endpoint"] == (
+        "GET /delivery-notes → delivery-order/list.do"
+    )
+    assert listed["coverage"]["full_accurate_sj_universe"] is False

@@ -722,25 +722,32 @@ def normalize_sales_order(raw: dict[str, Any]) -> dict[str, Any]:
             rid = block.get("number") or block.get("id")
             if rid:
                 receipt_ids.append(str(rid))
+    delivery_numbers: list[str] = []
     for key in ("deliveryOrder", "deliveryOrders", "doList"):
         block = raw.get(key)
-        if isinstance(block, list):
-            for r in block:
-                if isinstance(r, dict):
-                    did = r.get("number") or r.get("id")
-                    if did:
-                        delivery_ids.append(str(did))
-        elif isinstance(block, dict):
-            did = block.get("number") or block.get("id")
-            if did:
-                delivery_ids.append(str(did))
+        entries = block if isinstance(block, list) else ([block] if isinstance(block, dict) else [])
+        for r in entries:
+            if not isinstance(r, dict):
+                continue
+            # Prefer Accurate internal id for detail.do?id= (Live: /delivery-notes/120055).
+            # Do not assume SJ number always works as detail.do parameter.
+            did = r.get("id")
+            dnum = r.get("number") or r.get("no")
+            if did is not None and str(did).strip():
+                delivery_ids.append(str(did).strip())
+            elif dnum is not None and str(dnum).strip():
+                delivery_ids.append(str(dnum).strip())
+            if dnum is not None and str(dnum).strip():
+                delivery_numbers.append(str(dnum).strip())
     base["links"] = {
         "receipt_ids": receipt_ids,
         "delivery_note_ids": delivery_ids,
+        "delivery_note_numbers": delivery_numbers,
         "receipts_present": bool(receipt_ids),
         "delivery_notes_present": bool(delivery_ids),
         # Explicit: discovery hints only — never authority for gates.
         "evidence_authority": False,
+        "sj_lookup_prefers_internal_id": True,
     }
     return base
 
@@ -899,6 +906,14 @@ def normalize_delivery_note_line(row: dict[str, Any]) -> dict[str, Any]:
         and not identity_conflicts
     )
 
+    # Outlet per item (kolom tabel cetakan Accurate) — bukan header Outlet,
+    # bukan Ekspedisi, bukan branch.
+    line_outlet = _first_str(
+        row.get("outlet"),
+        row.get("outletName"),
+        item.get("outlet") if isinstance(item, dict) else None,
+        item.get("outletName") if isinstance(item, dict) else None,
+    )
     return {
         # Legacy fields (preserved).
         "sku": str(
@@ -906,6 +921,12 @@ def normalize_delivery_note_line(row: dict[str, Any]) -> dict[str, Any]:
         ),
         "qty": qty if qty is not None else 0,
         "uom": uom,
+        "item_name": _first_str(
+            row.get("itemName"),
+            item.get("name") if isinstance(item, dict) else None,
+            row.get("detailName"),
+        ),
+        "outlet": line_outlet,
         # Canonical SJ↔SO line contract.
         "accurate_sj_line_id": accurate_sj_line_id,
         "so_line_id": so_line_id,
@@ -970,12 +991,17 @@ def normalize_delivery_note(raw: dict[str, Any]) -> dict[str, Any]:
         raw.get("zone"),
         raw.get("zona"),
     )
+    # Ekspedisi (print label) — shipment.name proven on SO; same on DN.
+    # Screenshot DO/2026/11/17/000019: Ekspedisi = OUTLET (bukan kolom Outlet).
     expedition = _first_str(
         raw.get("expedition"),
+        raw.get("expeditionName"),
         raw.get("shipping"),
         raw.get("courier"),
         raw.get("deliveryMethod"),
         raw.get("carrier"),
+        _expedition_from_shipment(raw),
+        _custom_field_by_label(raw, _EXPEDITION_LABELS),
     )
     remarks = _first_str(
         raw.get("description"),
@@ -984,27 +1010,266 @@ def normalize_delivery_note(raw: dict[str, Any]) -> dict[str, Any]:
         raw.get("remark"),
         raw.get("remarks"),
     )
-    printed_at = raw.get("printDate") or raw.get("printedAt") or raw.get("lastPrintDate")
+    # Tanggal SJ Dicetak (print) ≠ Tanggal Kirim (shipDate/shipped_at).
+    # Live detail.do may expose printedTime / deliveryPrintedTime.
+    printed_at = _first_str(
+        raw.get("printedTime"),
+        raw.get("deliveryPrintedTime"),
+        raw.get("printDate"),
+        raw.get("printedAt"),
+        raw.get("lastPrintDate"),
+        raw.get("lastPrintTime"),
+    )
+    print_user_name = _first_str(
+        raw.get("printUserName"),
+        raw.get("printedBy"),
+        raw.get("printBy"),
+        raw.get("lastPrintUserName"),
+    )
+    # Telepon: hanya field kontak terbukti pada objek customer / DN.
+    customer_phone = None
+    if isinstance(customer, dict):
+        customer_phone = _first_str(
+            customer.get("mobilePhone"),
+            customer.get("mobile"),
+            customer.get("phone"),
+            customer.get("phoneNo"),
+            customer.get("workPhone"),
+            customer.get("customerPhone"),
+            customer.get("bbPhoneNumber"),
+            customer.get("wpPhoneNumber"),
+        )
+    if customer_phone is None:
+        customer_phone = _first_str(
+            raw.get("customerPhone"),
+            raw.get("mobilePhone"),
+            raw.get("phone"),
+            raw.get("phoneNo"),
+        )
+    # Outlet (header) ≠ Ekspedisi (shipment.name) ≠ branch.name.
+    outlet = _first_str(raw.get("outlet"), raw.get("outletName"))
+    # Paraf: ruang tanda tangan kosong ≠ bukti. Hanya kunci signer non-kosong.
+    warehouse_signer = _first_str(
+        raw.get("warehouseSigner"),
+        raw.get("warehousePic"),
+        raw.get("gudangParaf"),
+        raw.get("signedByWarehouse"),
+    )
+    goods_checker = _first_str(
+        raw.get("goodsChecker"),
+        raw.get("checker"),
+        raw.get("pemeriksaBarang"),
+        raw.get("checkedBy"),
+    )
+    courier_signer = _first_str(
+        raw.get("courierSigner"),
+        raw.get("driverSigner"),
+        raw.get("kurirParaf"),
+        raw.get("signedByCourier"),
+    )
+    recipient_signer = _first_str(
+        raw.get("recipientSigner"),
+        raw.get("receiverSigner"),
+        raw.get("penerimaParaf"),
+        raw.get("signedByRecipient"),
+    )
+    # accurate_id = internal id for detail.do; number = business SJ identity.
+    accurate_id = raw.get("id")
+    business_number = raw.get("number") or raw.get("no")
+    # DIFAKTUR / other Accurate statuses are document state — NOT POD / terkirim.
     return {
-        "id": str(raw.get("id") or raw.get("number") or raw.get("no") or ""),
-        "number": str(raw.get("number") or raw.get("no") or raw.get("id") or ""),
+        "id": str(accurate_id if accurate_id is not None else business_number or ""),
+        "accurate_id": str(accurate_id).strip() if accurate_id is not None and str(accurate_id).strip() else None,
+        "number": str(business_number or accurate_id or ""),
         "status": status,
         "sales_order_number": str(so_number or ""),
         "customer": _party(customer),
+        "customer_phone": customer_phone,
         "branch": branch,
         "shipped_at": raw.get("shipDate") or raw.get("transDate") or raw.get("shippedAt"),
         "address": address or None,
         "zone": zone or None,
+        "outlet": outlet,
         "expedition": expedition or None,
         "remarks": remarks or None,
-        "sj_printed_at": printed_at if printed_at else None,
+        "sj_printed_at": printed_at,
+        "print_user_name": print_user_name,
+        "warehouse_signer": warehouse_signer,
+        "goods_checker": goods_checker,
+        "courier_signer": courier_signer,
+        "recipient_signer": recipient_signer,
         "cancelled": cancelled,
+        # Document may be opened for loading evidence; never means POD complete.
         "verifiable": verifiable,
+        "pod_evidence": False,
         "line_items": line_items,
+        "line_count": len(line_items),
         "line_identity_complete": bool(line_items)
         and all(bool(li.get("line_identity_complete")) for li in line_items),
         "loading_eligible": bool(line_items)
         and all(bool(li.get("loading_eligible")) for li in line_items),
         "so_line_field_semantics_verified": True,
         "so_line_cross_verified": False,
+    }
+
+
+def normalize_delivery_note_list_item(raw: dict[str, Any]) -> dict[str, Any]:
+    """Summary row from delivery-order/list.do — prefer internal id for detail.do."""
+    accurate_id = _stable_int_id(raw.get("id"))
+    number = str(raw.get("number") or raw.get("no") or accurate_id or "").strip()
+    customer = raw.get("customer")
+    if not isinstance(customer, dict):
+        customer = {"id": raw.get("customerId"), "name": raw.get("customerName")}
+    return {
+        "id": accurate_id or number,
+        "accurate_id": accurate_id,
+        "number": number,
+        "status": _status(raw),
+        "customer": _party(customer),
+        "branch": _branch_party(raw),
+        "shipped_at": raw.get("shipDate") or raw.get("transDate") or raw.get("shippedAt"),
+        "trans_date": raw.get("transDate"),
+        # List never proves POD / print / signers — detail required.
+        "detail_lookup": (
+            f"delivery-order/detail.do?id={accurate_id}"
+            if accurate_id
+            else "delivery-order/detail.do?number="
+        ),
+    }
+
+
+def _to_decimal_str(value: Any) -> str | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(num):
+        return None
+    return f"{num:.2f}"
+
+
+def extract_prime_owing(raw: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return (owing_decimal_str, owing_source_key).
+
+    Director Live evidence: ``primeOwing`` is the authoritative remaining AR.
+    Aliases are fallbacks only when primeOwing key is absent — never invent from
+    ``totalAmount`` alone.
+    """
+    if "primeOwing" in raw:
+        return _to_decimal_str(raw.get("primeOwing")), "primeOwing"
+    for key in ("owingAmount", "owing"):
+        if key in raw and raw.get(key) is not None:
+            return _to_decimal_str(raw.get(key)), key
+    return None, None
+
+
+def map_prime_owing_status(
+    *,
+    owing: str | None,
+    invoice_total: str | None,
+) -> tuple[str | None, str | None]:
+    """Map primeOwing → V3 label (Lunas / Belum Bayar / Sebagian) or None.
+
+    Director probe classes: ZERO→Lunas, FULL→Belum Bayar, PARTIAL→Sebagian.
+    Invalid / missing owing → (None, None) so callers keep UNKNOWN.
+    """
+    if owing is None:
+        return None, None
+    try:
+        owing_f = float(owing)
+    except (TypeError, ValueError):
+        return None, None
+    if not math.isfinite(owing_f):
+        return None, None
+    if owing_f < 0:
+        # Negative owing is not a proven settlement signal — fail closed.
+        return None, None
+    if owing_f == 0:
+        return "Lunas", "ZERO"
+    total_f: float | None = None
+    if invoice_total is not None:
+        try:
+            total_f = float(invoice_total)
+            if not math.isfinite(total_f) or total_f < 0:
+                total_f = None
+        except (TypeError, ValueError):
+            total_f = None
+    if total_f is not None and owing_f + 1e-9 >= total_f:
+        return "Belum Bayar", "FULL"
+    if total_f is None:
+        # Owing > 0 without a valid total → unpaid bucket, not Sebagian (unknown paid).
+        return "Belum Bayar", "OWING_POSITIVE_TOTAL_UNKNOWN"
+    return "Sebagian", "PARTIAL"
+
+
+def normalize_sales_invoice(raw: dict[str, Any]) -> dict[str, Any]:
+    """Sales invoice → outstanding contract.
+
+    Official path: sales-invoice/list.do + detail.do (scope sales_invoice_view).
+    Remaining (piutang) = primeOwing (Director Live) — never totalAmount as sisa.
+    """
+    accurate_id = _stable_int_id(raw.get("id"))
+    number = str(raw.get("number") or raw.get("no") or accurate_id or "").strip()
+    customer = raw.get("customer")
+    if not isinstance(customer, dict):
+        customer = {"id": raw.get("customerId"), "name": raw.get("customerName")}
+    invoice_total = _to_decimal_str(
+        next(
+            (
+                raw[k]
+                for k in ("totalAmount", "amount", "invoiceAmount", "total")
+                if raw.get(k) is not None
+            ),
+            None,
+        )
+    )
+    owing, owing_source = extract_prime_owing(raw)
+    paid = _to_decimal_str(
+        next(
+            (
+                raw[k]
+                for k in ("paidAmount", "paymentAmount", "amountPaid")
+                if raw.get(k) is not None
+            ),
+            None,
+        )
+    )
+    if paid is None and invoice_total is not None and owing is not None:
+        try:
+            paid = f"{float(invoice_total) - float(owing):.2f}"
+        except (TypeError, ValueError):
+            paid = None
+    status_label, owing_class = map_prime_owing_status(
+        owing=owing, invoice_total=invoice_total
+    )
+    owing_known = owing is not None and owing_source is not None and status_label is not None
+    return {
+        "id": accurate_id or number,
+        "accurate_id": accurate_id,
+        "number": number,
+        "invoice_reference": number,
+        "status": _status(raw),
+        "customer": _party(customer),
+        "branch": _branch_party(raw),
+        "invoice_total": invoice_total,
+        "invoice_amount": invoice_total,
+        # outstanding_amount is primeOwing (or alias) — never totalAmount copy.
+        "outstanding_amount": owing if status_label is not None else None,
+        "remaining_amount": owing if status_label is not None else None,
+        "paid_amount": paid if status_label is not None else None,
+        "financial_payment_status": status_label,
+        "owing_field_present": owing is not None and owing_source is not None,
+        "owing_source_key": owing_source,
+        "owing_class": owing_class,
+        # Fail-closed until live gateway marks live_verified on the response.
+        "verified": False,
+        "source": "accurate_sales_invoice",
+        "detail_lookup": (
+            f"sales-invoice/detail.do?id={accurate_id}"
+            if accurate_id
+            else "sales-invoice/detail.do?number="
+        ),
+        "owing_known": owing_known,
     }

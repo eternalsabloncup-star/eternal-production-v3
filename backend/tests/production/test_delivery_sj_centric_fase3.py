@@ -41,6 +41,19 @@ async def test_deliveries_one_row_per_sj_with_items_and_detail(client: AsyncClie
     assert row["items"][0]["accurate_sj_line_id"] == "SL1"
     assert row["field_availability"]["address"] == "BELUM TERSEDIA"
     assert row["zone"] is None and row["expedition"] is None
+    # Owner sprint: eight Final columns without verified Accurate data.
+    for key in (
+        "customer_phone",
+        "outlet",
+        "sj_printed_at",
+        "item_outlets",
+        "warehouse_signer",
+        "goods_checker",
+        "courier_signer",
+        "recipient_signer",
+    ):
+        assert row.get(key) in (None, ""), key
+        assert row["field_availability"][key] == "Belum terhubung", key
     # No duplicate when listing again
     again = (await client.get(f"{O}/deliveries", headers=h)).json()["items"]
     assert len(again) == 1

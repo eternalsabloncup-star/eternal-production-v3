@@ -48,6 +48,23 @@ describe("Final Ringkas/Lengkap column view (Tahap E1)", () => {
   });
 });
 
+describe("Final Audit F2 — Owner menu decisions", () => {
+  it("sidebar Live omits Master Mesin but keeps machineMaster page + API path", () => {
+    // Owner F2: hide Master Mesin from primary nav; do not delete backend/page/API.
+    expect(html).not.toMatch(/nav\('machineMaster'/);
+    expect(html).toContain("go('machineMaster')");
+    expect(html).toContain("Master Mesin");
+    expect(runtime).toContain('window.section === "machineMaster"');
+    expect(runtime).toContain("/production/ops/machines");
+  });
+
+  it("does not treat filter 'pilihan' copy as a separate sidebar menu", () => {
+    // "Pilihan" appears only in filter/column UI copy — not a nav('...') item.
+    expect(html).not.toMatch(/nav\('[^']*','[^']*[Pp]ilihan/);
+    expect(html).toMatch(/Cari dalam pilihan|Kolom Tampil|sesuai pilihan Kolom Tampil/);
+  });
+});
+
 describe("Final Audit E3 — four confirmed frontend gaps", () => {
   it("payment monitor maps approval_at and gated bypass_by (FULL_ONLY in Ringkas)", () => {
     expect(runtime).toContain("approval_at");

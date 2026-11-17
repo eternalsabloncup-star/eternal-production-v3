@@ -4863,15 +4863,21 @@
     const d = ops.del;
     const cov = d && d.coverage ? d.coverage : null;
     const coverageBanner = cov
-      ? '<div class="flat-notice" id="v3-del-coverage" role="status"><b>COVERAGE TERBATAS.</b> Sumber: ' +
+      ? '<div class="flat-notice" id="v3-del-coverage" role="status"><b>' +
+        escapeHtml(String(cov.coverage_label || "COVERAGE TERBATAS")) +
+        ".</b> Sumber: " +
         escapeHtml(String(cov.source || "V3 Loading + SO-link opsional")) +
-        ". Accurate list-all SJ: " +
+        ". Accurate SJ list: " +
         (cov.accurate_sj_list_endpoint ? escapeHtml(String(cov.accurate_sj_list_endpoint)) : "<b>tidak tersedia</b>") +
         ". include_accurate_links=" +
         (cov.include_accurate_links ? "true" : "false") +
         ". accurate_write_on_view=" +
         (cov.accurate_write_on_view ? "true" : "false") +
-        ". Bukan inventaris lengkap seluruh SJ Accurate.</div>"
+        ". full_accurate_sj_universe=" +
+        (cov.full_accurate_sj_universe ? "true" : "false") +
+        ". atomic_snapshot_guaranteed=" +
+        (cov.atomic_snapshot_guaranteed ? "true" : "false") +
+        ". Snapshot atomik tidak dijamin; bukan klaim universe absolut.</div>"
       : "";
     let body;
     if (ops.err.del) body = '<div class="flat-notice" role="alert">' + escapeHtml(ops.err.del) + ' <button type="button" class="btn sm" data-ops="del-reload">Coba lagi</button></div>';
@@ -4879,28 +4885,58 @@
     else {
       const ringkas = ops.delView === "ringkas";
       // Final FULL_ONLY: customer_address/remarks (+ item detail) — hide address/remarks in Ringkas.
+      // Owner: eight Final Delivery columns without verified data show "Belum terhubung" (Lengkap only).
       const cols = Object.assign({}, ops.delCols || {});
       if (ringkas) {
         cols.address = false;
         cols.remarks = false;
+        cols.customer_phone = false;
+        cols.outlet = false;
+        cols.sj_printed_at = false;
+        cols.item_outlets = false;
+        cols.warehouse_signer = false;
+        cols.goods_checker = false;
+        cols.courier_signer = false;
+        cols.recipient_signer = false;
       }
+      const delUnlinked = function (v) {
+        return v != null && String(v).trim() !== ""
+          ? escapeHtml(String(v))
+          : '<span class="muted" data-del-unlinked="1">Belum terhubung</span>';
+      };
       const items = delSortedItems(d.items || []);
       const head =
         '<th data-column="sj">' + delSortBtn("sj", "No. SJ") + "</th>" +
         '<th data-column="so">' + delSortBtn("so", "PO/SO") + "</th>" +
         '<th data-column="customer">' + delSortBtn("customer", "Pelanggan") + "</th>" +
+        (cols.customer_phone !== false ? '<th data-column="customer_phone">Telepon</th>' : "") +
+        (cols.outlet !== false ? '<th data-column="outlet">Outlet</th>' : "") +
         '<th data-column="date">' + delSortBtn("date", "Tgl rencana") + "</th>" +
+        (cols.sj_printed_at !== false ? '<th data-column="sj_printed_at">Tgl SJ Dicetak</th>' : "") +
         (cols.address !== false ? '<th data-column="address">Alamat</th>' : "") +
         (cols.zone !== false ? '<th data-column="zone">Zona</th>' : "") +
         (cols.expedition !== false ? '<th data-column="expedition">Ekspedisi/Kurir</th>' : "") +
         '<th data-column="items">Item</th>' +
+        (cols.item_outlets !== false ? '<th data-column="item_outlets">Outlet Per Item</th>' : "") +
         '<th data-column="qty">' + delSortBtn("qty", "Qty SJ") + "</th>" +
         (cols.remarks !== false ? '<th data-column="remarks">Catatan</th>' : "") +
+        (cols.warehouse_signer !== false ? '<th data-column="warehouse_signer">Paraf Gudang</th>' : "") +
+        (cols.goods_checker !== false ? '<th data-column="goods_checker">Pemeriksa Barang</th>' : "") +
+        (cols.courier_signer !== false ? '<th data-column="courier_signer">Paraf Kurir</th>' : "") +
+        (cols.recipient_signer !== false ? '<th data-column="recipient_signer">Paraf Penerima</th>' : "") +
         '<th data-column="status">' + delSortBtn("status", "Status") + "</th>" +
         '<th data-column="proof">Bukti</th>' +
         '<th data-column="action">Aksi</th>';
       const colSpan =
         9 +
+        (cols.customer_phone !== false ? 1 : 0) +
+        (cols.outlet !== false ? 1 : 0) +
+        (cols.sj_printed_at !== false ? 1 : 0) +
+        (cols.item_outlets !== false ? 1 : 0) +
+        (cols.warehouse_signer !== false ? 1 : 0) +
+        (cols.goods_checker !== false ? 1 : 0) +
+        (cols.courier_signer !== false ? 1 : 0) +
+        (cols.recipient_signer !== false ? 1 : 0) +
         (cols.address !== false ? 1 : 0) +
         (cols.zone !== false ? 1 : 0) +
         (cols.expedition !== false ? 1 : 0) +
@@ -4964,9 +5000,19 @@
             escapeHtml(r.po_number || r.accurate_so_number) +
             '</td><td data-column="customer">' +
             opsDash(r.customer_name) +
-            '</td><td data-column="date">' +
+            "</td>" +
+            (cols.customer_phone !== false
+              ? '<td data-column="customer_phone">' + delUnlinked(r.customer_phone) + "</td>"
+              : "") +
+            (cols.outlet !== false
+              ? '<td data-column="outlet">' + delUnlinked(r.outlet) + "</td>"
+              : "") +
+            '<td data-column="date">' +
             opsDash(r.delivery_date || r.planned_date) +
             "</td>" +
+            (cols.sj_printed_at !== false
+              ? '<td data-column="sj_printed_at">' + delUnlinked(r.sj_printed_at) + "</td>"
+              : "") +
             (cols.address !== false
               ? '<td data-column="address">' +
                 (addr ? escapeHtml(addr) : '<span class="muted">BELUM TERSEDIA</span>') +
@@ -4978,7 +5024,11 @@
               : "") +
             '<td data-column="items">' +
             itemsLabel +
-            '</td><td data-column="qty">' +
+            "</td>" +
+            (cols.item_outlets !== false
+              ? '<td data-column="item_outlets">' + delUnlinked(r.item_outlets) + "</td>"
+              : "") +
+            '<td data-column="qty">' +
             opsNum(r.total_qty || r.qty_sj) +
             "</td>" +
             (cols.remarks !== false
@@ -4987,6 +5037,18 @@
                   ? escapeHtml(r.remarks)
                   : '<span class="muted">BELUM TERSEDIA</span>') +
                 "</td>"
+              : "") +
+            (cols.warehouse_signer !== false
+              ? '<td data-column="warehouse_signer">' + delUnlinked(r.warehouse_signer) + "</td>"
+              : "") +
+            (cols.goods_checker !== false
+              ? '<td data-column="goods_checker">' + delUnlinked(r.goods_checker) + "</td>"
+              : "") +
+            (cols.courier_signer !== false
+              ? '<td data-column="courier_signer">' + delUnlinked(r.courier_signer) + "</td>"
+              : "") +
+            (cols.recipient_signer !== false
+              ? '<td data-column="recipient_signer">' + delUnlinked(r.recipient_signer) + "</td>"
               : "") +
             '<td data-column="status">' +
             escapeHtml(DEL_STATUS[r.delivery_status] || r.delivery_status) +
@@ -5051,9 +5113,28 @@
         ["zone", "Zona"],
         ["expedition", "Ekspedisi"],
         ["remarks", "Catatan"],
+        ["customer_phone", "Telepon"],
+        ["outlet", "Outlet"],
+        ["sj_printed_at", "Tgl SJ Dicetak"],
+        ["item_outlets", "Outlet Per Item"],
+        ["warehouse_signer", "Paraf Gudang"],
+        ["goods_checker", "Pemeriksa"],
+        ["courier_signer", "Paraf Kurir"],
+        ["recipient_signer", "Paraf Penerima"],
       ]
         .map(function (pair) {
-          const forcedOff = delRingkas && (pair[0] === "address" || pair[0] === "remarks");
+          const forcedOff =
+            delRingkas &&
+            (pair[0] === "address" ||
+              pair[0] === "remarks" ||
+              pair[0] === "customer_phone" ||
+              pair[0] === "outlet" ||
+              pair[0] === "sj_printed_at" ||
+              pair[0] === "item_outlets" ||
+              pair[0] === "warehouse_signer" ||
+              pair[0] === "goods_checker" ||
+              pair[0] === "courier_signer" ||
+              pair[0] === "recipient_signer");
           const on = !forcedOff && (!ops.delCols || ops.delCols[pair[0]] !== false);
           return (
             '<label class="btn sm" data-ops="del-col-label" data-col="' +

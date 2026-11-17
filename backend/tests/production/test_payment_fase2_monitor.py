@@ -116,6 +116,74 @@ def test_monitor_financial_fields_never_invent_outstanding():
     assert fields["invoice_total"] is None
 
 
+def test_monitor_financial_fields_uses_verified_accurate_outstanding_only():
+    from app.services.production.payment_gate import accurate_outstanding_contract
+
+    contract = accurate_outstanding_contract()
+    assert contract["status"] == "DIRECTOR_LIVE_EVIDENCE"
+    assert contract["gateway_endpoint"] == "GET /sales-invoices[/{id}]"
+    assert contract["owing_field"] == "primeOwing"
+    assert contract["live_verified"] is True
+    assert contract["fail_closed"] is True
+
+    # Without verified Accurate payload → UNKNOWN (never invent from receipts).
+    assert (
+        monitor_financial_fields(
+            verified_amount="100.00",
+            payment_status="approved",
+            accurate_financial={"status": "PAID"},
+        )["financial_payment_status"]
+        == "UNKNOWN"
+    )
+    # verified=true without approved source → still UNKNOWN (fail-closed).
+    assert (
+        monitor_financial_fields(
+            verified_amount="100.00",
+            payment_status="approved",
+            accurate_financial={"verified": True, "status": "PAID"},
+        )["financial_payment_status"]
+        == "UNKNOWN"
+    )
+    # totalAmount-as-owing source rejected.
+    assert (
+        monitor_financial_fields(
+            verified_amount="100.00",
+            payment_status="approved",
+            accurate_financial={
+                "verified": True,
+                "source": "accurate_sales_invoice",
+                "status": "Belum Bayar",
+                "outstanding_amount": "1000.00",
+                "invoice_total": "1000.00",
+                "owing_source_key": "totalAmount",
+            },
+        )["financial_payment_status"]
+        == "UNKNOWN"
+    )
+    verified = monitor_financial_fields(
+        verified_amount="100.00",
+        payment_status="approved",
+        accurate_financial={
+            "verified": True,
+            "source": "accurate_sales_invoice",
+            "status": "PARTIAL",
+            "outstanding_amount": "250.00",
+            "invoice_total": "750.00",
+            "invoice_reference": "INV-1",
+            "paid_amount": "500.00",
+            "owing_source_key": "primeOwing",
+        },
+    )
+    assert verified["financial_payment_status"] == "Sebagian"
+    assert verified["financial_settlement_known"] is True
+    assert verified["financial_settlement_source"] == "accurate_sales_invoice"
+    assert verified["owing_source_key"] == "primeOwing"
+    assert verified["outstanding_amount"] == "250.00"
+    assert verified["invoice_total"] == "750.00"
+    assert verified["invoice_reference"] == "INV-1"
+    assert verified["production_approval_status"] == "approved"
+
+
 async def test_no_verified_payment_stays_pending(case):
     async with get_session_factory()() as session:
         user, job = await ctx(case, session)

@@ -59,6 +59,86 @@ def _require_live_ready(settings: GatewaySettings) -> AccurateClient:
     return client
 
 
+@router.get("/integration-coverage")
+async def integration_coverage(
+    settings: GatewaySettings = Depends(get_settings),
+) -> dict[str, Any]:
+    """G4 — declare proven Accurate read surfaces only (no invented endpoints)."""
+    mode = _mode(settings)
+    return {
+        "service": "accurate-read-gateway",
+        "mode": mode,
+        "read_only": True,
+        "live_writes": False,
+        "docs_ref": [
+            "Accurate OpenAPI: GET /api/sales-invoice/list.do|detail.do (sales_invoice_view)",
+            "Accurate OpenAPI: GET /api/delivery-order/list.do|detail.do (delivery_order_view)",
+            "SwaggerHub cpssoft/accurate-online-public-api",
+        ],
+        "proven_endpoints": [
+            {"method": "GET", "path": "/sales-orders", "upstream": "sales-order/list.do"},
+            {"method": "GET", "path": "/sales-orders/{key}", "upstream": "sales-order/detail.do"},
+            {"method": "GET", "path": "/receipts/{id}", "upstream": "sales-receipt/detail.do"},
+            {
+                "method": "GET",
+                "path": "/delivery-notes",
+                "upstream": "delivery-order/list.do",
+                "live_verified": True,
+                "note": "Director Live census_scan_pass; gateway deploy separate",
+            },
+            {
+                "method": "GET",
+                "path": "/delivery-notes/{id}",
+                "upstream": "delivery-order/detail.do",
+                "lookup": "prefer Accurate internal id (detail.do?id=)",
+                "live_verified": True,
+            },
+            {
+                "method": "GET",
+                "path": "/sales-invoices",
+                "upstream": "sales-invoice/list.do",
+                "live_verified": True,
+                "owing_field": "primeOwing",
+            },
+            {
+                "method": "GET",
+                "path": "/sales-invoices/{id}",
+                "upstream": "sales-invoice/detail.do",
+                "live_verified": True,
+                "owing_field": "primeOwing",
+            },
+        ],
+        "outstanding": {
+            "status": "DIRECTOR_LIVE_EVIDENCE",
+            "gateway_endpoint": "GET /sales-invoices[/{id}]",
+            "upstream_accurate_path": "/accurate/api/sales-invoice/list.do|detail.do",
+            "owing_field": "primeOwing",
+            "fail_closed": True,
+            "live_verified": True,
+            "live_sample_n": 20,
+            "note": (
+                "Director Live: primeOwing authoritative. Map Lunas/Belum Bayar/Sebagian "
+                "only from valid owing; else UNKNOWN. totalAmount is never sisa piutang."
+            ),
+        },
+        "sj_coverage": {
+            "status": "DIRECTOR_LIVE_EVIDENCE",
+            "list_endpoint": "GET /delivery-notes → delivery-order/list.do",
+            "detail_endpoint": "GET /delivery-notes/{internal_id}",
+            "discovery": [
+                "delivery-order/list.do → internal id → detail.do",
+                "pagination + dedup + metadata fail-closed",
+                "V3 loading events / SO links (secondary)",
+            ],
+            "full_accurate_sj_universe": False,
+            "census_scan_pass_director": True,
+            "atomic_snapshot_guaranteed": False,
+            "live_verified": True,
+            "fail_closed": True,
+        },
+    }
+
+
 @router.get("/sales-orders")
 async def list_sales_orders(
     customer: str | None = Query(default=None),
@@ -205,6 +285,163 @@ async def get_receipt(
     out["source"] = "accurate_live"
     out["live_verified"] = True
     return out
+
+
+@router.get("/sales-invoices")
+async def list_sales_invoices(
+    keywords: str | None = Query(default=None),
+    outstanding_only: bool | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=200),
+    settings: GatewaySettings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Outstanding source: official sales-invoice/list.do (live_verified only in live)."""
+    from app.reconcile import reconcile_id_pages
+
+    mode = _mode(settings)
+    if mode == "fixture":
+        items, total = fixtures.list_sales_invoices(
+            keywords=keywords,
+            outstanding_only=outstanding_only,
+            limit=limit,
+            page=page,
+        )
+        recon = reconcile_id_pages([items], claimed_total=total)
+        return {
+            "rows": items,
+            "items": items,
+            "total": total,
+            "accurate_total": total,
+            "page": page,
+            "pageSize": limit,
+            "source": "fixture",
+            "live_verified": False,
+            "reconciliation": recon,
+            "filter_incomplete": bool(recon.get("incomplete")),
+            "full_universe_verified": False,
+        }
+    try:
+        listed = await _require_live_ready(settings).list_sales_invoices(
+            keywords=keywords,
+            outstanding_only=outstanding_only,
+            limit=limit,
+            page=page,
+        )
+    except AccurateUpstreamError as exc:
+        raise _upstream_http(exc) from exc
+    rows = listed.get("rows") or []
+    recon = reconcile_id_pages([rows], claimed_total=listed.get("accurate_total"))
+    return {
+        "rows": rows,
+        "items": rows,
+        "total": listed.get("accurate_total")
+        if listed.get("accurate_total") is not None
+        else len(rows),
+        "accurate_total": listed.get("accurate_total"),
+        "page": listed.get("page", page),
+        "pageSize": listed.get("page_size", limit),
+        "source": "accurate_live",
+        "live_verified": True,
+        "reconciliation": recon,
+        "filter_incomplete": bool(
+            listed.get("filter_incomplete") or recon.get("incomplete")
+        ),
+        "full_universe_verified": False,
+    }
+
+
+@router.get("/sales-invoices/{invoice_id}")
+async def get_sales_invoice(
+    invoice_id: str,
+    settings: GatewaySettings = Depends(get_settings),
+) -> dict[str, Any]:
+    mode = _mode(settings)
+    if mode == "fixture":
+        row = fixtures.get_sales_invoice(invoice_id)
+        if row is None:
+            raise HTTPException(
+                404,
+                detail={
+                    "code": "document_not_found",
+                    "message": f"Invoice {invoice_id} tidak ada di fixture",
+                },
+            )
+        out = dict(row)
+        out["source"] = "fixture"
+        out["live_verified"] = False
+        out["verified"] = False
+        return out
+    try:
+        row = await _require_live_ready(settings).get_sales_invoice(invoice_id)
+    except AccurateUpstreamError as exc:
+        raise _upstream_http(exc) from exc
+    out = dict(row)
+    out["source"] = "accurate_live"
+    out["live_verified"] = True
+    # verified only when primeOwing mapped to a status (owing_known).
+    out["verified"] = bool(out.get("owing_known"))
+    return out
+
+
+@router.get("/delivery-notes")
+async def list_delivery_notes(
+    keywords: str | None = Query(default=None),
+    branch: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=200),
+    settings: GatewaySettings = Depends(get_settings),
+) -> dict[str, Any]:
+    """Official delivery-order/list.do — census not claimed from a single page."""
+    from app.reconcile import reconcile_id_pages
+
+    mode = _mode(settings)
+    if mode == "fixture":
+        items, total = fixtures.list_delivery_notes(
+            keywords=keywords, branch=branch, limit=limit, page=page
+        )
+        recon = reconcile_id_pages([items], claimed_total=total)
+        return {
+            "rows": items,
+            "items": items,
+            "total": total,
+            "accurate_total": total,
+            "page": page,
+            "pageSize": limit,
+            "source": "fixture",
+            "live_verified": False,
+            "full_accurate_sj_universe": False,
+            "atomic_snapshot_guaranteed": False,
+            "reconciliation": recon,
+            "filter_incomplete": bool(recon.get("incomplete")),
+            "discovery": "list.do → internal id → detail.do",
+        }
+    try:
+        listed = await _require_live_ready(settings).list_delivery_notes(
+            keywords=keywords, branch=branch, limit=limit, page=page
+        )
+    except AccurateUpstreamError as exc:
+        raise _upstream_http(exc) from exc
+    rows = listed.get("rows") or []
+    recon = reconcile_id_pages([rows], claimed_total=listed.get("accurate_total"))
+    return {
+        "rows": rows,
+        "items": rows,
+        "total": listed.get("accurate_total")
+        if listed.get("accurate_total") is not None
+        else len(rows),
+        "accurate_total": listed.get("accurate_total"),
+        "page": listed.get("page", page),
+        "pageSize": listed.get("page_size", limit),
+        "source": "accurate_live",
+        "live_verified": True,
+        "full_accurate_sj_universe": False,
+        "atomic_snapshot_guaranteed": False,
+        "reconciliation": recon,
+        "filter_incomplete": bool(
+            listed.get("filter_incomplete") or recon.get("incomplete")
+        ),
+        "discovery": "list.do → internal id → detail.do",
+    }
 
 
 @router.get("/delivery-notes/{dn_id}")
