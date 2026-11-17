@@ -62,8 +62,8 @@ def test_derive_pack_done_uses_packing_batch_not_orphan_alias_only():
     lines = [SimpleNamespace(production_process="print", so_line_id="L1")]
     assignments = [SimpleNamespace(status="active", so_line_id="L1")]
     prep = [
-        SimpleNamespace(role="screener", qty=Decimal("1")),
-        SimpleNamespace(role="helper", qty=Decimal("100")),
+        SimpleNamespace(role="screener", qty=Decimal("1"), so_line_id="L1"),
+        SimpleNamespace(role="helper", qty=Decimal("100"), so_line_id="L1"),
     ]
     samples = [SimpleNamespace(status="approved")]
     events = [

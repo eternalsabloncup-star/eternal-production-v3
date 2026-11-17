@@ -58,7 +58,9 @@ async def test_inbox_no_fabricated_approval_or_qty():
     assert row["production_status"] == "Baru"
     assert row["total_quantity"] is None
     assert row["line_items"] is None
-    assert data["mode"] == "live"
+    # Fake/local gateway without Accurate live_verified must not claim Live.
+    assert data["mode"] == "unverified"
+    assert data["live_verified"] is not True
 
 
 @pytest.mark.asyncio

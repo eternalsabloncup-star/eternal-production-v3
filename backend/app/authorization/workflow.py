@@ -6,7 +6,7 @@ from app.authorization.catalog import CATALOG
 from app.core.errors import AppError
 from app.authorization.models import AccessState
 from app.authorization.evaluator import Resource, evaluate, validate_grant
-from app.authorization.workflow_map import WORKFLOW, PAYROLL, INBOX
+from app.authorization.workflow_map import WORKFLOW, PAYROLL, INBOX, SETTINGS_PROD
 from app.authorization.ownership import owned
 from app.models.production.job import ProductionJob
 from app.models.production.schedule import ScheduleAssignment
@@ -93,7 +93,13 @@ def role_for(capability):
 async def authorize_request(session,user,request):
     endpoint=request.scope.get('endpoint')
     module=getattr(endpoint,'__module__',''); name=getattr(endpoint,'__name__','')
-    maps={'app.api.production.workflow':WORKFLOW,'app.api.production.operations':WORKFLOW,'app.api.production.payroll':PAYROLL,'app.api.production_inbox':INBOX}
+    maps={
+        'app.api.production.workflow': WORKFLOW,
+        'app.api.production.operations': WORKFLOW,
+        'app.api.production.payroll': PAYROLL,
+        'app.api.production_inbox': INBOX,
+        'app.api.production.payment_settings_api': SETTINGS_PROD,
+    }
     mapping=maps.get(module)
     if mapping is None:
         if module.startswith('app.authorization.'): return  # separately guarded new routes
@@ -156,7 +162,11 @@ async def authorize_request(session,user,request):
         if job is not None and assignment.job_id!=job.id: raise HTTPException(403,'Cross-job assignment denied')
         job=await session.get(ProductionJob,assignment.job_id)
     if name=='get_job_by_so':
-        job=await session.scalar(select(ProductionJob).where(ProductionJob.accurate_so_number==params['so_number']))
+        from app.models.production.job import LIFECYCLE_ACTIVE
+        job=await session.scalar(select(ProductionJob).where(
+            ProductionJob.accurate_so_number==params['so_number'],
+            ProductionJob.lifecycle_status==LIFECYCLE_ACTIVE,
+        ))
         if job is None: raise HTTPException(404,'Job not found')
     branch=job.branch_id if job else body.get('branch_id')
     if name=='machine_update':

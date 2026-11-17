@@ -114,6 +114,18 @@ async def _ready_job(client: AsyncClient, h: dict, so: str) -> tuple[int, int]:
         headers=h,
         json={"reason": "authorized bypass"},
     )
+    from app.models.production.prep import JobLineQty
+
+    async with get_session_factory()() as session:
+        session.add(
+            JobLineQty(
+                job_id=job_id,
+                so_line_id="line-1",
+                po_qty=Decimal("50"),
+                production_process="print",
+            )
+        )
+        await session.commit()
     asg = (
         await client.post(
             f"/api/v1/production/jobs/{job_id}/schedule/assignments",

@@ -8,6 +8,7 @@ _ROWS = {
     'order.read': ('order.read',),
     'job.read': ('job.read', 'job.board.read', 'task.read', 'delivery.schedule.read', 'machine.read', 'report.production.read', 'assignee.read'),
     'job.create': ('job.create', 'job.source_sync'),
+    'job.cancel': ('job.cancel',),
     'design.upload': ('design.version.create', 'design.approval_link.create'),
     'design.approve': ('design.decision.record',),
     'design.bypass': ('design.bypass.create',),
@@ -66,12 +67,16 @@ _manual = {
     'job.export', 'job.print', 'task.export', 'report.production.export', 'payroll.export', 'payroll.print',
     'assignment.ownership.manage', 'assignment.delegation.manage',
     'design.approval_link.revoke', 'tracking.link.revoke',
+    'job.cancel',  # default Direktur; explicit grant for other roles
 }
 _admin = {
     'settings.user.read', 'settings.user.create', 'settings.user.update', 'settings.user.deactivate',
     'settings.user.password_reset', 'settings.group.read', 'settings.group.manage',
     'settings.membership.manage', 'settings.grant.manage', 'settings.effective_access.read',
     'settings.access_audit.read', 'settings.access_audit.export',
+    # Fase 3 production settings (PostgreSQL) — mapped for enforced; no auto-import from legacy.
+    'settings.payment_approval.read', 'settings.payment_approval.manage',
+    'settings.branch.read', 'settings.branch.manage',
 }
 _global = _admin | {'payroll.rate.read', 'payroll.rate.manage', 'evidence.capability.read', 'capability.read'}
 CATALOG = MappingProxyType({

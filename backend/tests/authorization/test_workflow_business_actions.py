@@ -39,6 +39,11 @@ async def test_secondary_workflow_actions_under_enforced_mode(ready, monkeypatch
     rcp = await post(f'/{job}/payment/receipts', {'accurate_receipt_id': 'RCV-1'})
     assert rcp.status_code == 200, rcp.text
     assert (await post(f"/payment/receipts/{rcp.json()['id']}/revalidate", {'reason': 'recheck evidence', 'idempotency_key': 'reval-act-01'})).status_code == 200
+    from decimal import Decimal as _D
+    from app.models.production.prep import JobLineQty
+    async with db() as s:
+        s.add(JobLineQty(job_id=job, so_line_id='line-1', po_qty=_D('100'), production_process='print'))
+        await s.commit()
     asg = await post(f'/{job}/schedule/assignments', {'so_line_id': 'line-1', 'color_pass': 1, 'operator_name': 'Rizki', 'machine_name': 'M1', 'work_date': str(date.today()), 'qty_planned': '100'})
     assert asg.status_code == 200, asg.text
     aid = asg.json()['id']

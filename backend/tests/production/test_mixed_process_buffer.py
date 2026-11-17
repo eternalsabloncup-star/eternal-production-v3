@@ -205,7 +205,11 @@ async def test_non_print_ready_only_after_warehouse_confirmation(client: AsyncCl
     assert ok.status_code == 200, ok.text
     replay = await client.post(f"{J}/{jid}/packing", headers=h, json={
         "so_line_id": "L1", "qty_physical": "2000", "idempotency_key": "wh-full-0001", "evidence_ref": "cek-fisik-01"})
-    assert replay.status_code == 409
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["id"] == ok.json()["id"]
+    mismatch = await client.post(f"{J}/{jid}/packing", headers=h, json={
+        "so_line_id": "L1", "qty_physical": "1", "idempotency_key": "wh-full-0001", "evidence_ref": "cek-fisik-01"})
+    assert mismatch.status_code == 409
     row = (await _rows(client, h))["items"][0]
     assert row["ready_warehouse"] == "2000" and row["gesut_target"] == "0" and row["delivered"] is None
     assert row["buffer_status"] == "Tidak perlu gesut · Ready gudang"

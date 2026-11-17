@@ -11,7 +11,9 @@ WORKFLOW = {
  'payment_receipts_list': ('payment.evidence.read', ('job.read',)),
  'payment_unsynced_list': ('payment.evidence.read', ('job.read',)),
  'deliveries_list': ('delivery.schedule.read', ('job.read',)),
+ 'delivery_sj_detail': ('delivery.schedule.read', ('job.read',)),
  'buffer_monitor': ('delivery.schedule.read', ('job.read',)),
+ 'production_schedule_list': ('job.read', ('job.read',)),
  'delivery_plan_save': ('delivery.plan.manage', ('delivery.manage',)),
  'delivery_plan_history': ('delivery.schedule.read', ('job.read',)),
  'drift_acknowledge': ('job.qty_drift.acknowledge', ('schedule.manage',)),
@@ -27,6 +29,8 @@ WORKFLOW = {
  'get_job_board': ('job.board.read', ('job.read',)),
  'get_loading_authority': ('loading.authority.read', ('job.read',)),
  'get_job': ('job.read', ('job.read',)),
+ 'cancel_gate_preview': ('job.cancel', ('job.cancel',)),
+ 'cancel_production_job': ('job.cancel', ('job.cancel',)),
  'design_upload': ('design.version.create', ('design.upload',)),
  'design_decide': ('design.decision.record', ('design.approve',)),
  'design_approval_link': ('design.approval_link.create', ('design.upload',)),
@@ -69,10 +73,25 @@ PAYROLL = {
 }
 INBOX = {'inbox': ('inbox.read', ('inbox.read',)), 'order_detail': ('order.read', ('order.read',)),
          'permissions_catalog': ('capability.read', ())}
+# Fase 3 production settings endpoints — must be mapped or enforced fails closed.
+SETTINGS_PROD = {
+ 'payment_approval_settings_get': ('settings.payment_approval.read', ('job.read',)),
+ 'payment_approval_settings_put': ('settings.payment_approval.manage', ('job.read',)),
+ 'payment_approval_settings_audit': ('settings.payment_approval.read', ('job.read',)),
+ 'settings_branches_effective': ('settings.branch.read', ('job.read',)),
+ 'settings_branch_create': ('settings.branch.manage', ()),
+ 'settings_branch_update': ('settings.branch.manage', ()),
+ 'settings_branch_get': ('settings.branch.read', ('job.read',)),
+ 'settings_branch_audit': ('settings.branch.manage', ()),
+ 'settings_machines_summary': ('machine.read', ('job.read',)),
+}
 SENSITIVE_FIELDS = {
  'payment_receipts': 'payment.evidence.read', 'payment_bypasses': 'payment.evidence.read',
  'events': 'audit.production.read', 'prep_events': 'audit.production.read',
 }
 # Aggregate job views require branch-wide grants, not an assignment-only grant.
-COLLECTIONS = {'payment_receipts_list', 'payment_unsynced_list', 'deliveries_list', 'buffer_monitor', 'machines_list', 'payroll_runs_list', 'report_summary', 'assignees_list', 'list_team_tasks', 'list_team_tasks_with_sync', 'inbox', 'order_detail',
-               'permissions_catalog', 'evidence_capability'}
+COLLECTIONS = {'payment_receipts_list', 'payment_unsynced_list', 'deliveries_list', 'delivery_sj_detail', 'buffer_monitor', 'production_schedule_list', 'machines_list', 'payroll_runs_list', 'report_summary', 'assignees_list', 'list_team_tasks', 'list_team_tasks_with_sync', 'inbox', 'order_detail',
+               'permissions_catalog', 'evidence_capability',
+               'payment_approval_settings_get', 'payment_approval_settings_audit',
+               'settings_branches_effective', 'settings_branch_get',
+               'settings_branch_audit', 'settings_machines_summary'}

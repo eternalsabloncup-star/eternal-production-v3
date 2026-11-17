@@ -26,9 +26,16 @@ async def _setup(ready, monkeypatch):
     mock_receipts(monkeypatch, {'/receipts/RCV-1': {'id': '2101', 'sales_order_number': SO, 'sales_order_id': '2100', 'branch': {'id': 'A'}, 'amount': '1500000'},
                                 '/receipts/2101': {'id': '2101', 'sales_order_number': SO, 'sales_order_id': '2100', 'branch': {'id': 'A'}, 'amount': '1500000'}})
     assert (await post(f'/{job}/payment/receipts', {'accurate_receipt_id': 'RCV-1'})).status_code == 200
+    from decimal import Decimal as _D
+    from app.models.production.prep import JobLineQty
+    async with db() as s:
+        s.add(JobLineQty(job_id=job, so_line_id='line-1', po_qty=_D('100'), production_process='print'))
+        await s.commit()
     aid = (await post(f'/{job}/schedule/assignments', {'so_line_id': 'line-1', 'color_pass': 1, 'operator_name': 'Rizki', 'machine_name': 'M1', 'work_date': str(date.today()), 'qty_planned': '100'})).json()['id']
-    await post(f'/{job}/prep/screener', {'so_line_id': 'line-1', 'qty': '2', 'po_qty': '100', 'screen_size': 'kecil', 'evidence_ref': 's1', 'idempotency_key': 'prep-s-0001', 'assignment_id': aid})
-    await post(f'/{job}/prep/helper', {'so_line_id': 'line-1', 'qty': '80', 'po_qty': '100', 'evidence_ref': 'c1', 'idempotency_key': 'prep-h-0001', 'assignment_id': aid})
+    scr = await post(f'/{job}/prep/screener', {'so_line_id': 'line-1', 'qty': '2', 'po_qty': '100', 'screen_size': 'kecil', 'evidence_ref': 's1', 'idempotency_key': 'prep-s-0001', 'assignment_id': aid})
+    assert scr.status_code == 200, scr.text
+    cup = await post(f'/{job}/prep/helper', {'so_line_id': 'line-1', 'qty': '80', 'po_qty': '100', 'evidence_ref': 'c1', 'idempotency_key': 'prep-h-0001', 'assignment_id': aid})
+    assert cup.status_code == 200, cup.text
     s = (await post(f'/{job}/samples', {'file_name': 's.jpg', 'storage_key': 'samples/1.jpg', 'assignment_id': aid})).json()['id']
     await post(f'/samples/{s}/decision', {'decision': 'approved', 'bypass': True, 'reason': 'test setup bypass'})
     out = await post(f'/{job}/outputs', {'assignment_id': aid, 'qty_physical': '40', 'qty_pass_ops': '40', 'color_pass': 1, 'idempotency_key': 'out-idem-01', 'lot_code': 'L1'})

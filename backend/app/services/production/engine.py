@@ -219,6 +219,20 @@ def _coerce_urgent_state(value) -> str | None:
     return None
 
 
+async def find_active_job_by_so(
+    session: AsyncSession, accurate_so_number: str
+) -> ProductionJob | None:
+    """Return the single active job for an SO, if any (never cancelled history)."""
+    from app.models.production.job import LIFECYCLE_ACTIVE
+
+    return await session.scalar(
+        select(ProductionJob).where(
+            ProductionJob.accurate_so_number == accurate_so_number,
+            ProductionJob.lifecycle_status == LIFECYCLE_ACTIVE,
+        )
+    )
+
+
 async def ensure_job(
     session: AsyncSession,
     user: User,
@@ -232,21 +246,20 @@ async def ensure_job(
     line_items: list[dict] | None = None,
     commit: bool = True,
 ) -> ProductionJob:
-    """Create or refresh job. Classifications stay null/unknown unless explicit.
+    """Create or refresh the active job. Classifications stay null/unknown unless explicit.
 
     commit=False leaves the write pending in the caller's transaction (bulk sync).
+    Cancelled jobs are never reactivated. Re-input after cancel creates a distinct
+    active job; cancelled history stays queryable by job id.
     """
+    from app.models.production.job import LIFECYCLE_ACTIVE
     from app.services.production.prep import sync_job_lines_from_so_detail
 
     _require(user, P.JOB_CREATE)
     _branch(user, branch_id)
     buffer_v = _coerce_buffer_stock(buffer_stock)
     urgent_v = _coerce_urgent_state(urgent_state)
-    existing = await session.scalar(
-        select(ProductionJob).where(
-            ProductionJob.accurate_so_number == accurate_so_number
-        )
-    )
+    existing = await find_active_job_by_so(session, accurate_so_number)
     if existing:
         _branch(user, existing.branch_id)
         if accurate_id and not existing.accurate_id:
@@ -258,7 +271,7 @@ async def ensure_job(
             existing.buffer_stock = buffer_v
         if urgent_state is not None:
             existing.urgent_state = urgent_v
-        if line_items:
+        if line_items is not None:
             await sync_job_lines_from_so_detail(session, existing, line_items)
         if not commit:
             await session.flush()
@@ -274,12 +287,29 @@ async def ensure_job(
         buffer_stock=buffer_v,
         urgent_state=urgent_v,
         processing_status="Baru",
+        lifecycle_status=LIFECYCLE_ACTIVE,
     )
-    session.add(job)
-    await session.flush()
+    try:
+        async with session.begin_nested():
+            session.add(job)
+            await session.flush()
+    except IntegrityError:
+        # Concurrent re-input raced on partial UNIQUE — adopt the winner.
+        winner = await find_active_job_by_so(session, accurate_so_number)
+        if winner is None:
+            raise HTTPException(409, "Konflik re-input SO — coba ulang")
+        _branch(user, winner.branch_id)
+        if line_items is not None:
+            await sync_job_lines_from_so_detail(session, winner, line_items)
+        if not commit:
+            await session.flush()
+            return winner
+        await session.commit()
+        await session.refresh(winner)
+        return winner
     if line_items:
         await sync_job_lines_from_so_detail(session, job, line_items)
-    # Keep inbox WO mirror in sync.
+    # Keep inbox WO mirror in sync (one WO per SO number — not lifecycle-scoped).
     wo = await session.scalar(
         select(WorkOrder).where(WorkOrder.accurate_so_number == accurate_so_number)
     )
@@ -338,6 +368,9 @@ async def job_needs_design_gate(
 async def gates_open_for_schedule(
     job: ProductionJob, session: AsyncSession | None = None
 ) -> None:
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     needs_design = await job_needs_design_gate(session, job)
     if needs_design:
         if job.design_status == "bypassed":
@@ -497,6 +530,35 @@ async def decide_design(
 # ---- Payment ----
 
 
+def _parse_paid_at(raw) -> datetime | None:
+    """Parse Accurate paid_at when present; never invent a timestamp."""
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=UTC)
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        # Support date-only Accurate transDate and ISO datetimes.
+        if len(text) == 10 and text[4] == "-" and text[7] == "-":
+            text = text + "T00:00:00+00:00"
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+async def _maybe_clear_payment_review(session: AsyncSession, job: ProductionJob) -> None:
+    """Clear review flag only when verified evidence or active bypass reopens the gate."""
+    from app.services.production.payment_gate import effective_status
+
+    if job.payment_review_required and await effective_status(session, job.id) in {
+        "approved",
+        "bypassed",
+    }:
+        job.payment_review_required = False
+
+
 async def revalidate_receipt(session, user, receipt_id, *, reason, idempotency_key):
     """Explicit, fail-closed verification; never revive invalidated evidence."""
     import hashlib
@@ -539,11 +601,17 @@ async def revalidate_receipt(session, user, receipt_id, *, reason, idempotency_k
         row.evidence_verified = True
         row.amount = evidence["amount"]
         row.accurate_receipt_number = evidence.get("accurate_receipt_number")
+        paid = _parse_paid_at(evidence.get("paid_at"))
+        if paid is not None:
+            row.paid_at = paid
         result.update(verified=True, amount=str(row.amount), live_verified=evidence["live_verified"],
-                      source=evidence.get("source"), payload_status=evidence["payload_status"])
+                      source=evidence.get("source"), payload_status=evidence["payload_status"],
+                      paid_at=row.paid_at.isoformat() if row.paid_at else None)
     await session.flush()
     await _refresh_payment_gate(session, job)
-    result.update(payment_status=job.payment_status, before=before)
+    await _maybe_clear_payment_review(session, job)
+    result.update(payment_status=job.payment_status, before=before,
+                  payment_review_required=bool(job.payment_review_required))
     session.add(ProductionEvent(job_id=job.id, event_type="payment_receipt_revalidated",
         actor_user_id=user.id, idempotency_key=key, reason=reason.strip(), payload_json=json.dumps(result)))
     await session.commit()
@@ -598,23 +666,30 @@ async def record_payment_receipt(
             raise HTTPException(409, "Receipt sudah memiliki idempotency key berbeda")
         if idempotency_key and existing.idempotency_key is None:
             existing.idempotency_key = idempotency_key
+        paid = _parse_paid_at(evidence.get("paid_at"))
         if existing.status == "valid" and not existing.evidence_verified:
             existing.amount = evidence["amount"]
             existing.evidence_verified = True
+            if paid is not None:
+                existing.paid_at = paid
             session.add(ProductionEvent(
                 job_id=job.id, event_type="payment_receipt_reverified",
                 idempotency_key=f"pay-reverified:{existing.id}", actor_user_id=user.id,
                 payload_json=json.dumps({"receipt_id": existing.id}),
             ))
+        elif existing.status == "valid" and paid is not None and existing.paid_at is None:
+            existing.paid_at = paid
         await session.flush()
         # Do not revive invalidated evidence on an idempotent replay.
         await _refresh_payment_gate(session, job)
+        await _maybe_clear_payment_review(session, job)
         await session.commit()
         return existing
     row = PaymentReceiptRef(
         job_id=job.id, accurate_receipt_id=rid,
         accurate_receipt_number=evidence.get("accurate_receipt_number"),
         amount=evidence["amount"], evidence_verified=True,
+        paid_at=_parse_paid_at(evidence.get("paid_at")),
         idempotency_key=idempotency_key, status="valid", recorded_by=user.id,
         note=(note or "") + f" | evidence:{evidence['mode']}:{evidence['payload_status']}",
     )
@@ -622,12 +697,14 @@ async def record_payment_receipt(
     try:
         await session.flush()
         await _refresh_payment_gate(session, job)
+        await _maybe_clear_payment_review(session, job)
         await _mark_terproses(session, job)
         session.add(ProductionEvent(
             job_id=job.id, event_type="payment_receipt_verified",
             idempotency_key=f"pay-receipt:{row.id}", actor_user_id=user.id,
             payload_json=json.dumps({"receipt_id": row.id, "accurate_receipt_id": rid,
-                                     "amount": str(row.amount)}),
+                                     "amount": str(row.amount),
+                                     "paid_at": row.paid_at.isoformat() if row.paid_at else None}),
         ))
         await session.commit()
     except IntegrityError as exc:
@@ -643,33 +720,82 @@ async def bypass_payment(
     job: ProductionJob,
     *,
     reason: str,
+    idempotency_key: str | None = None,
 ) -> PaymentBypass:
-    _require(user, P.PAYMENT_BYPASS)
+    # Direktur default mirrors job.cancel — never trust client-supplied role/perms.
+    if not P.user_may_bypass_payment(user):
+        raise HTTPException(
+            403,
+            "Izin production.payment.bypass tidak mencukupi (Direktur atau grant eksplisit)",
+        )
+    from app.services.production.payment_settings import bypass_enabled as settings_bypass_enabled
+
+    if not await settings_bypass_enabled(session):
+        raise HTTPException(
+            403,
+            "Bypass payment dinonaktifkan di Pengaturan Approval Payment",
+        )
     job = await _lock_payment_job(session, user, job)
     if not reason.strip():
         raise HTTPException(422, "Bypass payment memerlukan alasan")
+    key = idempotency_key.strip() if idempotency_key else None
+    if key is not None and not 8 <= len(key) <= 120:
+        raise HTTPException(422, "Idempotency key tidak valid")
+    from app.services.production.payment_gate import effective_status
+
+    gate_before = await effective_status(session, job.id)
+    if key:
+        existing = await session.scalar(
+            select(PaymentBypass).where(
+                PaymentBypass.job_id == job.id,
+                PaymentBypass.idempotency_key == key,
+            )
+        )
+        if existing is not None:
+            if existing.reason != reason.strip():
+                raise HTTPException(409, "Idempotency key dipakai untuk alasan bypass berbeda")
+            await _refresh_payment_gate(session, job)
+            await _maybe_clear_payment_review(session, job)
+            await session.commit()
+            return existing
     row = PaymentBypass(
         job_id=job.id,
         reason=reason.strip(),
         authorized_by=user.id,
+        idempotency_key=key,
+        gate_before=gate_before,
         active=True,
     )
     session.add(row)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(409, "Idempotency key bypass sudah digunakan") from exc
     await _refresh_payment_gate(session, job)
+    await _maybe_clear_payment_review(session, job)
     await _mark_terproses(session, job)
+    event_key = key or (
+        f"pay-bypass:{job.id}:{user.id}:"
+        f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
+    )
     session.add(
         ProductionEvent(
             job_id=job.id,
             event_type="payment_bypass_authorized",
-            idempotency_key=(
-                f"pay-bypass:{job.id}:{user.id}:"
-                f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S%f')}"
-            ),
+            idempotency_key=f"pay-bypass-event:{event_key}" if key else event_key,
             actor_user_id=user.id,
             reason=reason.strip(),
-            payload_json=(
-                f'{{"permission":"{P.PAYMENT_BYPASS}","actor_user_id":{user.id}}}'
+            payload_json=json.dumps(
+                {
+                    "permission": P.PAYMENT_BYPASS,
+                    "actor_user_id": user.id,
+                    "bypass_id": row.id,
+                    "gate_before": gate_before,
+                    "gate_after": job.payment_status,
+                    "idempotency_key": key,
+                    "accurate_outstanding_unchanged": True,
+                }
             ),
         )
     )
@@ -696,12 +822,25 @@ async def revoke_payment_bypass(
     await session.refresh(row)
     if not row.active:
         raise HTTPException(409, "Bypass sudah dicabut")
+    from app.services.production.payment_gate import (
+        effective_status,
+        job_has_production_progress,
+    )
+
+    gate_before = await effective_status(session, job.id)
+    had_progress = await job_has_production_progress(session, job.id)
     row.active = False
     row.revoked_by = user.id
     row.revoke_reason = reason
     row.revoked_at = datetime.now(UTC)
     await session.flush()
     await _refresh_payment_gate(session, job)
+    gate_after = job.payment_status
+    exception = bool(
+        had_progress and gate_before == "bypassed" and gate_after == "pending"
+    )
+    if exception:
+        job.payment_review_required = True
     session.add(
         ProductionEvent(
             job_id=job.id,
@@ -712,9 +851,16 @@ async def revoke_payment_bypass(
             ),
             actor_user_id=user.id,
             reason=reason.strip(),
-            payload_json=(
-                f'{{"bypass_id":{row.id},"permission":"{P.PAYMENT_REVOKE}",'
-                f'"actor_user_id":{user.id}}}'
+            payload_json=json.dumps(
+                {
+                    "bypass_id": row.id,
+                    "permission": P.PAYMENT_REVOKE,
+                    "actor_user_id": user.id,
+                    "gate_before": gate_before,
+                    "gate_after": gate_after,
+                    "financial_exception": exception,
+                    "payment_review_required": bool(job.payment_review_required),
+                }
             ),
         )
     )
@@ -743,10 +889,27 @@ async def invalidate_receipt(
         await _refresh_payment_gate(session, job)
         await session.commit()
         return row
+    from app.services.production.payment_gate import (
+        effective_status,
+        job_has_production_progress,
+    )
+
+    gate_before = await effective_status(session, job.id)
+    had_progress = await job_has_production_progress(session, job.id)
     row.status = "invalidated"
     row.note = (row.note or "") + f" | invalidated: {reason}"
     await session.flush()
     await _refresh_payment_gate(session, job)
+    gate_after = job.payment_status
+    # Financial exception: production already progressed and gate lost verified evidence.
+    # Never delete or rewrite physical production history.
+    exception = bool(
+        had_progress
+        and gate_before == "approved"
+        and gate_after == "pending"
+    )
+    if exception:
+        job.payment_review_required = True
     # Append-only audit event (never silent overwrite).
     session.add(
         ProductionEvent(
@@ -755,12 +918,41 @@ async def invalidate_receipt(
             idempotency_key=f"pay-invalidate:{row.id}:{int(datetime.now(UTC).timestamp())}",
             actor_user_id=user.id,
             reason=reason.strip(),
-            payload_json=(
-                f'{{"receipt_id":{row.id},"accurate_receipt_id":'
-                f'"{row.accurate_receipt_id}"}}'
+            payload_json=json.dumps(
+                {
+                    "receipt_id": row.id,
+                    "accurate_receipt_id": row.accurate_receipt_id,
+                    "gate_before": gate_before,
+                    "gate_after": gate_after,
+                    "financial_exception": exception,
+                    "payment_review_required": bool(job.payment_review_required),
+                    "physical_history_preserved": True,
+                }
             ),
         )
     )
+    if exception:
+        session.add(
+            ProductionEvent(
+                job_id=job.id,
+                event_type="payment_financial_exception",
+                idempotency_key=(
+                    f"pay-fin-exc:{row.id}:{int(datetime.now(UTC).timestamp())}"
+                ),
+                actor_user_id=user.id,
+                reason=reason.strip(),
+                payload_json=json.dumps(
+                    {
+                        "receipt_id": row.id,
+                        "requires_authorized_review": True,
+                        "note": (
+                            "Verified payment lost after production progress; "
+                            "physical output/SJ/POD history unchanged"
+                        ),
+                    }
+                ),
+            )
+        )
     await session.commit()
     await session.refresh(row)
     return row
@@ -782,9 +974,14 @@ async def _resolve_operator(
     from app.authorization.service import load_access
 
     scoped = False
+    # Nested savepoint: load_access may fail (missing auth tables / shadow probe)
+    # without poisoning the outer schedule transaction used by legacy fallback.
     try:
-        access = await load_access(session, target.id, lock=False)
-        scoped = evaluate(access, "output.record", Resource(job.branch_id, None)).allowed
+        async with session.begin_nested():
+            access = await load_access(session, target.id, lock=False)
+            scoped = evaluate(
+                access, "output.record", Resource(job.branch_id, None)
+            ).allowed
     except Exception:
         scoped = False
     legacy = (
@@ -1138,10 +1335,12 @@ async def upload_sample(
 ) -> SampleVersion:
     _require(user, P.SAMPLE_UPLOAD)
     _branch(user, job.branch_id)
+    sample_line_id: str | None = None
     if assignment_id is not None:
         sample_asg = await session.get(ScheduleAssignment, assignment_id)
         if sample_asg is not None and sample_asg.job_id == job.id:
             await _reject_non_print_print_chain(session, job.id, sample_asg.so_line_id)
+            sample_line_id = str(sample_asg.so_line_id or "").strip() or None
     else:
         from app.models.production.prep import JobLineQty
 
@@ -1152,6 +1351,11 @@ async def upload_sample(
             (ln.production_process or "").strip() == "non_print" for ln in sample_lines
         ):
             raise HTTPException(409, _NON_PRINT_NOT_PRINT_CHAIN)
+    from app.services.production.prep import require_print_preps_ready_for_sample
+
+    await require_print_preps_ready_for_sample(
+        session, job, so_line_id=sample_line_id
+    )
     max_v = await session.scalar(
         select(func.coalesce(func.max(SampleVersion.version_no), 0)).where(
             SampleVersion.job_id == job.id
@@ -1191,22 +1395,16 @@ async def decide_sample(
     if decision not in {"approved", "rejected", "revised"}:
         raise HTTPException(422, "Keputusan sample tidak valid")
     if decision == "approved":
-        from app.models.production.prep import PrepState
+        from app.services.production.prep import require_print_preps_ready_for_sample
 
-        screen = await session.scalar(
-            select(func.coalesce(func.sum(PrepState.qty), 0)).where(
-                PrepState.job_id == job.id, PrepState.role == "screener"
-            )
+        sample_line_id = None
+        if ver.assignment_id is not None:
+            asg = await session.get(ScheduleAssignment, ver.assignment_id)
+            if asg is not None and asg.job_id == job.id:
+                sample_line_id = str(asg.so_line_id or "").strip() or None
+        await require_print_preps_ready_for_sample(
+            session, job, so_line_id=sample_line_id
         )
-        prepared = await session.scalar(
-            select(func.coalesce(func.sum(PrepState.qty), 0)).where(
-                PrepState.job_id == job.id, PrepState.role == "helper"
-            )
-        )
-        if Decimal(screen or 0) <= 0 or Decimal(prepared or 0) <= 0:
-            raise HTTPException(
-                409, "Sample approval membutuhkan screener & helper prep > 0"
-            )
     ver.status = decision
     ver.decision_by = user.id
     ver.decision_reason = reason
@@ -1230,6 +1428,9 @@ async def confirm_output(
     lot_code: str | None = None,
     evidence_ref: str | None = None,
 ) -> ProductionEvent:
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.OUTPUT_CONFIRM)
     _branch(user, job.branch_id)
     assignment = await session.get(ScheduleAssignment, assignment_id)
@@ -1256,6 +1457,35 @@ async def confirm_output(
                 raise HTTPException(409, "Sample wajib disetujui sebelum output cetak")
     if qty_physical <= 0:
         raise HTTPException(422, "Qty fisik harus > 0")
+    if not idempotency_key or not 8 <= len(idempotency_key.strip()) <= 120:
+        raise HTTPException(422, "idempotency_key wajib 8-120 karakter")
+    idempotency_key = idempotency_key.strip()
+    qty_ops = qty_pass_ops if qty_pass_ops is not None else qty_physical
+    job_id = job.id
+    actor_id = user.id
+    so_line_id = assignment.so_line_id
+
+    def _same_output(row: ProductionEvent) -> bool:
+        return (
+            row.job_id == job_id
+            and row.event_type == "output_confirmed"
+            and row.assignment_id == assignment_id
+            and row.qty_physical == qty_physical
+            and row.qty_pass_ops == qty_ops
+            and int(row.color_pass or 1) == int(color_pass)
+            and (row.lot_code or None) == (lot_code or None)
+            and (row.so_line_id or None) == (so_line_id or None)
+        )
+
+    # Idempotent replay before insert — same key+payload returns prior event.
+    prior = await session.scalar(
+        select(ProductionEvent).where(ProductionEvent.idempotency_key == idempotency_key)
+    )
+    if prior is not None:
+        if not _same_output(prior):
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return prior
+
     remaining = (
         assignment.qty_planned
         - assignment.qty_confirmed
@@ -1295,16 +1525,16 @@ async def confirm_output(
             if color_pass == 1 and Decimal(already or 0) + qty_physical > prepared:
                 raise HTTPException(409, "Output melebihi qty helper siap")
     event = ProductionEvent(
-        job_id=job.id,
+        job_id=job_id,
         assignment_id=assignment_id,
         event_type="output_confirmed",
-        so_line_id=assignment.so_line_id,
+        so_line_id=so_line_id,
         color_pass=color_pass,
         lot_code=lot_code,
         qty_physical=qty_physical,
-        qty_pass_ops=qty_pass_ops if qty_pass_ops is not None else qty_physical,
+        qty_pass_ops=qty_ops,
         idempotency_key=idempotency_key,
-        actor_user_id=user.id,
+        actor_user_id=actor_id,
         evidence_ref=evidence_ref,
     )
     session.add(event)
@@ -1312,7 +1542,20 @@ async def confirm_output(
         await session.flush()
     except IntegrityError as exc:
         await session.rollback()
-        raise HTTPException(409, "Idempotency key duplikat / concurrent submit") from exc
+        session.expunge_all()
+        raced = await session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.idempotency_key == idempotency_key
+            )
+        )
+        if raced is None:
+            raise HTTPException(
+                409, "Idempotency key duplikat / concurrent submit"
+            ) from exc
+        if not _same_output(raced):
+            raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+        # Concurrent same-key same-payload: return canonical prior (no double qty).
+        return raced
     assignment.qty_confirmed = assignment.qty_confirmed + qty_physical
     if (
         assignment.qty_confirmed + assignment.qty_cancelled_remaining
@@ -1337,6 +1580,9 @@ async def record_reject(
     reason: str,
     idempotency_key: str,
 ) -> ProductionEvent:
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.REJECT_RECORD)
     _branch(user, job.branch_id)
     if qty_physical <= 0 or not reason.strip():
@@ -1375,11 +1621,14 @@ async def verify_reject(
     reason: str | None = None,
 ) -> ProductionEvent:
     """Authorized verification emits a compensating reject_verified event."""
+    from app.services.production.lifecycle import require_job_active
+
     _require(user, P.REJECT_VERIFY)
     src = await session.get(ProductionEvent, event_id)
     if src is None or src.event_type != "reject":
         raise HTTPException(404, "Reject event tidak ditemukan")
     job = await get_job(session, src.job_id)
+    require_job_active(job)
     _branch(user, job.branch_id)
     if approved_qty <= 0 or approved_qty > Decimal(src.qty_physical or 0):
         raise HTTPException(422, "Qty verifikasi reject tidak valid")
@@ -1417,6 +1666,9 @@ async def correct_output(
     idempotency_key: str,
 ) -> ProductionEvent:
     """Compensating event — never silently overwrite confirmed output."""
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.OUTPUT_CONFIRM)
     _branch(user, job.branch_id)
     if not reason.strip():
@@ -1426,14 +1678,23 @@ async def correct_output(
     src = await session.get(ProductionEvent, source_event_id)
     if src is None or src.job_id != job.id or src.event_type != "output_confirmed":
         raise HTTPException(404, "Output event sumber tidak ditemukan")
+    # Snapshot primitives before commit/rollback — expired ORM attrs after
+    # IntegrityError+rollback must not trigger sync lazy-load (MissingGreenlet).
+    job_id = job.id
+    reason_norm = reason.strip()
     payload_json = f'{{"source_output_id":{src.id}}}'
+    source_assignment_id = src.assignment_id
+    source_so_line_id = src.so_line_id
+    source_color_pass = src.color_pass
+    source_lot_code = src.lot_code
+    actor_id = user.id
 
     def _same(row: ProductionEvent) -> bool:
         return (
-            row.job_id == job.id
+            row.job_id == job_id
             and row.event_type == "output_correction"
             and row.qty_physical == qty_physical_delta
-            and (row.reason or "") == reason.strip()
+            and (row.reason or "") == reason_norm
             and row.payload_json == payload_json
         )
 
@@ -1445,23 +1706,23 @@ async def correct_output(
             raise HTTPException(409, "Idempotency key payload tidak cocok")
         return prior
     event = ProductionEvent(
-        job_id=job.id,
-        assignment_id=src.assignment_id,
+        job_id=job_id,
+        assignment_id=source_assignment_id,
         event_type="output_correction",
-        so_line_id=src.so_line_id,
-        color_pass=src.color_pass,
-        lot_code=src.lot_code,
+        so_line_id=source_so_line_id,
+        color_pass=source_color_pass,
+        lot_code=source_lot_code,
         qty_physical=qty_physical_delta,
         qty_pass_ops=qty_physical_delta,
         idempotency_key=idempotency_key,
-        actor_user_id=user.id,
-        reason=reason.strip(),
+        actor_user_id=actor_id,
+        reason=reason_norm,
         payload_json=payload_json,
     )
     session.add(event)
     try:
-        if src.assignment_id:
-            assignment = await session.get(ScheduleAssignment, src.assignment_id)
+        if source_assignment_id:
+            assignment = await session.get(ScheduleAssignment, source_assignment_id)
             if assignment:
                 assignment.qty_confirmed = assignment.qty_confirmed + qty_physical_delta
                 if assignment.qty_confirmed < 0:
@@ -1469,12 +1730,14 @@ async def correct_output(
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        orig = exc.orig
-        if (
-            getattr(orig, "sqlstate", None) != "23505"
-            or "uq_production_events_idempotency" not in str(orig)
-        ):
+        orig = getattr(exc, "orig", None)
+        sqlstate = getattr(orig, "sqlstate", None)
+        # asyncpg may wrap; also inspect str for unique violation text
+        detail = str(orig or exc)
+        if sqlstate != "23505" and "uq_production_events_idempotency" not in detail:
             raise
+        # Clear expired identity-map state from the failed unit of work.
+        session.expunge_all()
         raced = await session.scalar(
             select(ProductionEvent).where(ProductionEvent.idempotency_key == idempotency_key)
         )
@@ -1503,20 +1766,61 @@ async def record_helper_output_verification(
     Never rewrites operator history. Cumulative verified per source event cannot
     exceed operator net for that event. Packing eligibility uses this pool.
     """
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.OUTPUT_HELPER_VERIFY)
     _branch(user, job.branch_id)
     if qty_physical <= 0:
         raise HTTPException(422, "Qty verifikasi helper harus > 0")
+    if not idempotency_key or not 8 <= len(idempotency_key.strip()) <= 120:
+        raise HTTPException(422, "idempotency_key wajib 8-120 karakter")
+    idempotency_key = idempotency_key.strip()
     src = await session.get(ProductionEvent, source_output_event_id)
     if src is None or src.job_id != job.id or src.event_type != "output_confirmed":
         raise HTTPException(404, "Output operator sumber tidak ditemukan")
     await _reject_non_print_print_chain(session, job.id, src.so_line_id)
+
+    job_id = job.id
+    src_id = src.id
+    reason_norm = (reason or "").strip() or None
+    evidence_norm = evidence_ref
+    actor_id = user.id
+    assignment_id = src.assignment_id
+    so_line_id = src.so_line_id
+    color_pass = src.color_pass or PHYSICAL_CUP_COLOR_PASS
+    lot_code = src.lot_code
+    operator_actor = src.actor_user_id
+
+    def _same_helper(row: ProductionEvent) -> bool:
+        if (
+            row.job_id != job_id
+            or row.event_type != HELPER_VERIFIED_EVENT
+            or Decimal(row.qty_physical or 0) != qty_physical
+            or (row.evidence_ref or None) != (evidence_norm or None)
+            or (row.reason or None) != reason_norm
+        ):
+            return False
+        try:
+            data = json.loads(row.payload_json or "{}")
+        except json.JSONDecodeError:
+            return False
+        return int(data.get("source_output_event_id") or 0) == src_id
+
+    prior = await session.scalar(
+        select(ProductionEvent).where(ProductionEvent.idempotency_key == idempotency_key)
+    )
+    if prior is not None:
+        if not _same_helper(prior):
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return prior
+
     # Operator net for this source = confirmed + corrections tied to it.
     corrections = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
+            ProductionEvent.job_id == job_id,
             ProductionEvent.event_type == "output_correction",
-            ProductionEvent.payload_json.contains(f'"source_output_id":{src.id}'),
+            ProductionEvent.payload_json.contains(f'"source_output_id":{src_id}'),
         )
     )
     operator_net = Decimal(src.qty_physical or 0) + Decimal(corrections or 0)
@@ -1524,10 +1828,10 @@ async def record_helper_output_verification(
         operator_net = Decimal("0")
     already = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
+            ProductionEvent.job_id == job_id,
             ProductionEvent.event_type == HELPER_VERIFIED_EVENT,
             ProductionEvent.payload_json.contains(
-                f'"source_output_event_id":{src.id}'
+                f'"source_output_event_id":{src_id}'
             ),
         )
     )
@@ -1542,16 +1846,16 @@ async def record_helper_output_verification(
     # Lock source row to serialize concurrent verifies.
     await session.execute(
         select(ProductionEvent)
-        .where(ProductionEvent.id == src.id)
+        .where(ProductionEvent.id == src_id)
         .with_for_update()
     )
     # Re-check after lock.
     already2 = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
+            ProductionEvent.job_id == job_id,
             ProductionEvent.event_type == HELPER_VERIFIED_EVENT,
             ProductionEvent.payload_json.contains(
-                f'"source_output_event_id":{src.id}'
+                f'"source_output_event_id":{src_id}'
             ),
         )
     )
@@ -1562,26 +1866,26 @@ async def record_helper_output_verification(
             f"Verifikasi melebihi sisa output operator (remaining={remaining2})",
         )
     payload = {
-        "source_output_event_id": src.id,
-        "assignment_id": src.assignment_id,
-        "color_pass": int(src.color_pass or PHYSICAL_CUP_COLOR_PASS),
-        "operator_actor_user_id": src.actor_user_id,
-        "helper_actor_user_id": user.id,
-        "reason": (reason or "").strip() or None,
+        "source_output_event_id": src_id,
+        "assignment_id": assignment_id,
+        "color_pass": int(color_pass or PHYSICAL_CUP_COLOR_PASS),
+        "operator_actor_user_id": operator_actor,
+        "helper_actor_user_id": actor_id,
+        "reason": reason_norm,
     }
     event = ProductionEvent(
-        job_id=job.id,
-        assignment_id=src.assignment_id,
+        job_id=job_id,
+        assignment_id=assignment_id,
         event_type=HELPER_VERIFIED_EVENT,
-        so_line_id=src.so_line_id,
-        color_pass=src.color_pass or PHYSICAL_CUP_COLOR_PASS,
-        lot_code=src.lot_code,
+        so_line_id=so_line_id,
+        color_pass=color_pass,
+        lot_code=lot_code,
         qty_physical=qty_physical,
         qty_pass_ops=qty_physical,
         idempotency_key=idempotency_key,
-        actor_user_id=user.id,
-        evidence_ref=evidence_ref,
-        reason=(reason or "").strip() or None,
+        actor_user_id=actor_id,
+        evidence_ref=evidence_norm,
+        reason=reason_norm,
         payload_json=json.dumps(payload, separators=(",", ":")),
     )
     session.add(event)
@@ -1589,7 +1893,19 @@ async def record_helper_output_verification(
         await session.flush()
     except IntegrityError as exc:
         await session.rollback()
-        raise HTTPException(409, "Idempotency key duplikat / concurrent verify") from exc
+        session.expunge_all()
+        raced = await session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.idempotency_key == idempotency_key
+            )
+        )
+        if raced is None:
+            raise HTTPException(
+                409, "Idempotency key duplikat / concurrent verify"
+            ) from exc
+        if not _same_helper(raced):
+            raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+        return raced
     await _mark_terproses(session, job)
     await session.commit()
     await session.refresh(event)
@@ -1610,6 +1926,9 @@ async def cancel_sj(
     Rejects when unreversed Loading (or POD) exists for the SJ. Capacity release
     requires a separate authorized durable reversal (out of scope here).
     """
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
     sj_id = (accurate_sj_id or "").strip()
@@ -1710,39 +2029,69 @@ async def record_packing(
     idempotency_key: str,
     evidence_ref: str | None = None,
 ) -> ProductionEvent:
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.PACKING_RECORD)
     _branch(user, job.branch_id)
     if qty_physical <= 0:
         raise HTTPException(422, "Qty packing harus > 0")
+    if not idempotency_key or not 8 <= len(idempotency_key.strip()) <= 120:
+        raise HTTPException(422, "idempotency_key wajib 8-120 karakter")
+    idempotency_key = idempotency_key.strip()
     from app.models.production.prep import JobLineQty
 
+    job_id = job.id
+    actor_id = user.id
+    so_line = (so_line_id or "").strip()
+    lot_norm = lot_code
+    evidence_norm = (evidence_ref or "").strip() or None
+
+    def _same_packing(row: ProductionEvent) -> bool:
+        return (
+            row.job_id == job_id
+            and row.event_type in PACKING_EVENT_TYPES
+            and (row.so_line_id or "") == so_line
+            and Decimal(row.qty_physical or 0) == qty_physical
+            and (row.lot_code or None) == (lot_norm or None)
+            and (row.evidence_ref or None) == evidence_norm
+        )
+
+    prior = await session.scalar(
+        select(ProductionEvent).where(ProductionEvent.idempotency_key == idempotency_key)
+    )
+    if prior is not None:
+        if not _same_packing(prior):
+            raise HTTPException(409, "Idempotency key payload tidak cocok")
+        return prior
+
     locked = await session.scalar(
-        select(ProductionJob).where(ProductionJob.id == job.id).with_for_update()
+        select(ProductionJob).where(ProductionJob.id == job_id).with_for_update()
     )
     if locked is None:
         raise HTTPException(404, "Production job tidak ditemukan")
     line_row = await session.scalar(
         select(JobLineQty).where(
-            JobLineQty.job_id == job.id, JobLineQty.so_line_id == so_line_id
+            JobLineQty.job_id == job_id, JobLineQty.so_line_id == so_line
         )
     )
     process = ((line_row.production_process or "") if line_row is not None else "").strip()
+    # Never invent print for unclassified lines — fail closed regardless of
+    # legacy fixture flags that disable REQUIRE_SYNCED_LINE_QTY.
     if process not in {"print", "non_print"}:
-        if _classification_enforced():
-            raise HTTPException(409, _UNCLASSIFIED_PACKING)
-        process = "print"
+        raise HTTPException(409, _UNCLASSIFIED_PACKING)
     if process == "non_print":
         await _require_payment_released(session, job)
         if line_row is None or line_row.po_qty is None:
             raise HTTPException(422, "Line non-print belum tersinkron")
-        if not (evidence_ref and evidence_ref.strip()):
+        if not evidence_norm:
             raise HTTPException(422, "Bukti konfirmasi gudang wajib")
         packed = Decimal(
             await session.scalar(
                 select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-                    ProductionEvent.job_id == job.id,
+                    ProductionEvent.job_id == job_id,
                     ProductionEvent.event_type.in_(list(PACKING_EVENT_TYPES)),
-                    ProductionEvent.so_line_id == so_line_id,
+                    ProductionEvent.so_line_id == so_line,
                 )
             )
             or 0
@@ -1753,19 +2102,19 @@ async def record_packing(
                 f"Konfirmasi gudang melebihi sisa PO (po={line_row.po_qty}, sudah={packed})",
             )
         event = ProductionEvent(
-            job_id=job.id,
+            job_id=job_id,
             event_type=CANONICAL_PACKING_EVENT,
-            so_line_id=so_line_id,
-            lot_code=lot_code,
+            so_line_id=so_line,
+            lot_code=lot_norm,
             qty_physical=qty_physical,
             idempotency_key=idempotency_key,
-            actor_user_id=user.id,
-            evidence_ref=evidence_ref.strip(),
+            actor_user_id=actor_id,
+            evidence_ref=evidence_norm,
             payload_json=json.dumps(
                 {
                     "authority": "warehouse_confirmation",
-                    "so_line_id": so_line_id,
-                    "evidence_ref": evidence_ref.strip(),
+                    "so_line_id": so_line,
+                    "evidence_ref": evidence_norm,
                 },
                 separators=(",", ":"),
                 sort_keys=True,
@@ -1776,19 +2125,27 @@ async def record_packing(
             await session.commit()
         except IntegrityError as exc:
             await session.rollback()
-            raise HTTPException(409, "Idempotency key duplikat") from exc
+            session.expunge_all()
+            raced = await session.scalar(
+                select(ProductionEvent).where(
+                    ProductionEvent.idempotency_key == idempotency_key
+                )
+            )
+            if raced is None or not _same_packing(raced):
+                raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+            return raced
         await session.refresh(event)
         return event
     # Required passes from schedule for this SO line (default pass 1 if none).
     asg_rows = (
         await session.scalars(
             select(ScheduleAssignment).where(
-                ScheduleAssignment.job_id == job.id,
-                ScheduleAssignment.so_line_id == so_line_id,
+                ScheduleAssignment.job_id == job_id,
+                ScheduleAssignment.so_line_id == so_line,
             )
         )
     ).all()
-    required = required_color_passes_from_assignments(asg_rows, so_line_id=so_line_id)
+    required = required_color_passes_from_assignments(asg_rows, so_line_id=so_line)
     # Packing authority = helper-verified pool (min across required passes).
     # Operator output alone is never packable stock. Never sum multi-color passes.
     # Owner decision: Loading is capped by this packing-verified quantity per SO line.
@@ -1796,18 +2153,18 @@ async def record_packing(
     for pass_no in sorted(required):
         verified = await session.scalar(
             select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-                ProductionEvent.job_id == job.id,
+                ProductionEvent.job_id == job_id,
                 ProductionEvent.event_type.in_(list(HELPER_VERIFIED_EVENT_TYPES)),
-                ProductionEvent.so_line_id == so_line_id,
+                ProductionEvent.so_line_id == so_line,
                 func.coalesce(ProductionEvent.color_pass, PHYSICAL_CUP_COLOR_PASS)
                 == pass_no,
             )
         )
         rejected = await session.scalar(
             select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-                ProductionEvent.job_id == job.id,
+                ProductionEvent.job_id == job_id,
                 ProductionEvent.event_type.in_(list(REJECT_EVENT_TYPES)),
-                ProductionEvent.so_line_id == so_line_id,
+                ProductionEvent.so_line_id == so_line,
                 func.coalesce(ProductionEvent.color_pass, PHYSICAL_CUP_COLOR_PASS)
                 == pass_no,
             )
@@ -1816,9 +2173,9 @@ async def record_packing(
     eligible = min(pass_nets) if pass_nets else Decimal("0")
     packed = await session.scalar(
         select(func.coalesce(func.sum(ProductionEvent.qty_physical), 0)).where(
-            ProductionEvent.job_id == job.id,
+            ProductionEvent.job_id == job_id,
             ProductionEvent.event_type.in_(list(PACKING_EVENT_TYPES)),
-            ProductionEvent.so_line_id == so_line_id,
+            ProductionEvent.so_line_id == so_line,
         )
     )
     available = eligible - Decimal(packed or 0)
@@ -1831,21 +2188,29 @@ async def record_packing(
             f"(eligible={available})",
         )
     event = ProductionEvent(
-        job_id=job.id,
+        job_id=job_id,
         event_type=CANONICAL_PACKING_EVENT,
-        so_line_id=so_line_id,
-        lot_code=lot_code,
+        so_line_id=so_line,
+        lot_code=lot_norm,
         qty_physical=qty_physical,
         idempotency_key=idempotency_key,
-        actor_user_id=user.id,
-        evidence_ref=evidence_ref,
+        actor_user_id=actor_id,
+        evidence_ref=evidence_norm,
     )
     session.add(event)
     try:
         await session.commit()
     except IntegrityError as exc:
         await session.rollback()
-        raise HTTPException(409, "Idempotency key duplikat") from exc
+        session.expunge_all()
+        raced = await session.scalar(
+            select(ProductionEvent).where(
+                ProductionEvent.idempotency_key == idempotency_key
+            )
+        )
+        if raced is None or not _same_packing(raced):
+            raise HTTPException(409, "Idempotency key payload tidak cocok") from exc
+        return raced
     await session.refresh(event)
     return event
 
@@ -2181,9 +2546,9 @@ async def _physical_readiness_qty(
         return packed, None, ""
     po_qty = Decimal(line.po_qty) if line.po_qty is not None else None
     process = (line.production_process or "").strip()
+    # Unknown process always fail-closed for Loading readiness (never invent print).
     if process not in {"print", "non_print"}:
-        if _classification_enforced():
-            return None, po_qty, "unknown_process"
+        return None, po_qty, "unknown_process"
     evidence, packed = await _confirmed_packing_qty(session, job_id, so_line_id)
     if evidence <= 0:
         return None, po_qty, "no_evidence"
@@ -2204,6 +2569,9 @@ async def record_loading(
     evidence_ref: str | None = None,
 ) -> ProductionEvent:
     """Confirm Loading within SJ line capacity and valid packed qty."""
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
     sj_id = (accurate_sj_id or "").strip()
@@ -2514,6 +2882,9 @@ async def cancel_loading(
     evidence_ref: str | None = None,
 ) -> ProductionEvent:
     """confirmation_cancel only — physical_return uses request/approve APIs."""
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
     kind = (cancel_kind or "").strip() or LOADING_CANCEL_CONFIRMATION
@@ -3109,6 +3480,9 @@ async def record_pod(
     it never substitutes for the four attachment requirements.
     Historical POD rows without attachments remain readable and are not relabeled.
     """
+    from app.services.production.lifecycle import require_job_active
+
+    require_job_active(job)
     _require(user, P.DELIVERY_MANAGE)
     _branch(user, job.branch_id)
     receiver_name = (receiver_name or "").strip()
@@ -3271,11 +3645,9 @@ async def tracking_timeline(
 async def find_job_by_so(
     session: AsyncSession, user: User, so_number: str
 ) -> ProductionJob | None:
-    """Read-only lookup — never creates a job."""
+    """Read-only lookup of the active job — never creates; never returns cancelled."""
     _require(user, P.JOB_READ)
-    job = await session.scalar(
-        select(ProductionJob).where(ProductionJob.accurate_so_number == so_number)
-    )
+    job = await find_active_job_by_so(session, so_number)
     if job is None:
         return None
     _branch(user, job.branch_id)
@@ -3514,8 +3886,14 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
             "urgent_state": job.urgent_state,
             "design_status": job.design_status,
             "payment_status": payment_status,
+            "production_approval_status": payment_status,
+            "payment_review_required": bool(getattr(job, "payment_review_required", False)),
             "sample_status": job.sample_status,
             "processing_status": job.processing_status,
+            "lifecycle_status": job.lifecycle_status or "active",
+            "cancelled_at": job.cancelled_at.isoformat() if job.cancelled_at else None,
+            "cancel_reason": job.cancel_reason,
+            "cancel_gate": job.cancel_gate,
         },
         "design_versions": [
             {
@@ -3536,7 +3914,10 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                 "accurate_receipt_id": r.accurate_receipt_id,
                 "accurate_receipt_number": r.accurate_receipt_number,
                 "amount": str(r.amount) if r.amount is not None else None,
+                "paid_at": r.paid_at.isoformat() if getattr(r, "paid_at", None) else None,
+                "evidence_verified": bool(r.evidence_verified),
                 "status": r.status,
+                "recorded_at": r.created_at.isoformat() if r.created_at else None,
             }
             for r in receipts
         ],
@@ -3545,7 +3926,12 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                 "id": b.id,
                 "reason": b.reason,
                 "active": b.active,
+                "gate_before": getattr(b, "gate_before", None),
+                "idempotency_key": getattr(b, "idempotency_key", None),
+                "authorized_by": b.authorized_by,
+                "created_at": b.created_at.isoformat() if b.created_at else None,
                 "revoke_reason": b.revoke_reason,
+                "revoked_at": b.revoked_at.isoformat() if b.revoked_at else None,
             }
             for b in bypasses
         ],
@@ -3616,6 +4002,8 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                     and str(ln.source_qty) in (e.payload_json or "")
                     for e in events
                 ),
+                "line_status": ln.line_status or "active",
+                "revision_note": ln.revision_note,
             }
             for ln in lines
         ],
@@ -3637,6 +4025,7 @@ async def job_board(session: AsyncSession, user: User, job: ProductionJob) -> di
                 "accurate_sj_number": e.accurate_sj_number,
                 "accurate_sj_line_id": e.accurate_sj_line_id,
                 "actor_user_id": e.actor_user_id,
+                "idempotency_key": e.idempotency_key,
                 "payload_json": e.payload_json,
                 "evidence_ref": e.evidence_ref,
                 "reason": e.reason,
@@ -3959,13 +4348,62 @@ def derive_team_tasks_for_job(
         not in {"cancelled", "canceled", "void"}
     ]
     has_schedule = len(active_assignments) > 0
-    screener_done = any(
-        getattr(p, "role", None) == "screener" and Decimal(getattr(p, "qty", 0) or 0) > 0
-        for p in prep_states
-    )
-    helper_done = any(
-        getattr(p, "role", None) == "helper" and Decimal(getattr(p, "qty", 0) or 0) > 0
-        for p in prep_states
+    scheduled_line_ids = {
+        str(getattr(a, "so_line_id", "") or "").strip()
+        for a in active_assignments
+        if str(getattr(a, "so_line_id", "") or "").strip()
+    }
+    line_by_id = {
+        str(getattr(ln, "so_line_id", "") or "").strip(): ln
+        for ln in lines
+        if str(getattr(ln, "so_line_id", "") or "").strip()
+    }
+    # Prep READY scope = scheduled lines with canonical production_process=print only.
+    # UNKNOWN / missing classification never becomes print and blocks prep tasks.
+    print_scheduled_ids: set[str] = set()
+    unclassified_scheduled_ids: set[str] = set()
+    for lid in scheduled_line_ids:
+        ln = line_by_id.get(lid)
+        if ln is None:
+            unclassified_scheduled_ids.add(lid)
+            continue
+        if str(getattr(ln, "line_status", "active") or "active") != "active":
+            continue
+        proc = (getattr(ln, "production_process", None) or "").strip().lower()
+        if proc == "print":
+            print_scheduled_ids.add(lid)
+        elif proc == "non_print":
+            continue
+        else:
+            unclassified_scheduled_ids.add(lid)
+
+    def _prep_role_ready(role: str) -> bool:
+        """READY only when every scheduled print line has qty>0 for the role."""
+        if unclassified_scheduled_ids:
+            return False
+        if print_scheduled_ids:
+            return all(
+                any(
+                    getattr(p, "role", None) == role
+                    and str(getattr(p, "so_line_id", "") or "").strip() == lid
+                    and Decimal(getattr(p, "qty", 0) or 0) > 0
+                    for p in prep_states
+                )
+                for lid in print_scheduled_ids
+            )
+        # Legacy / no scheduled print lines: any evidence keeps prior behaviour.
+        return any(
+            getattr(p, "role", None) == role and Decimal(getattr(p, "qty", 0) or 0) > 0
+            for p in prep_states
+        )
+
+    screener_done = _prep_role_ready("screener")
+    helper_done = _prep_role_ready("helper")
+    classification_block_reason = (
+        "Klasifikasi line belum resolved (UNKNOWN/hilang): "
+        + ", ".join(sorted(unclassified_scheduled_ids))
+        if unclassified_scheduled_ids
+        else None
     )
     pending_sample = [s for s in samples if getattr(s, "status", None) == "pending"]
     approved_sample = [
@@ -4049,17 +4487,35 @@ def derive_team_tasks_for_job(
                 )
         # else: not visible
 
-        # Screen + Prepare Cup — only after valid schedule; parallel.
+        # Screen + Prepare Cup — only after valid schedule; parallel; print-classified only.
         if has_schedule:
-            tasks.append(
-                _task_row(job, "screen", "done" if screener_done else "actionable")
-            )
-            tasks.append(
-                _task_row(job, "prepare", "done" if helper_done else "actionable")
-            )
+            if classification_block_reason:
+                tasks.append(
+                    _task_row(
+                        job,
+                        "screen",
+                        "blocked",
+                        reason=classification_block_reason,
+                    )
+                )
+                tasks.append(
+                    _task_row(
+                        job,
+                        "prepare",
+                        "blocked",
+                        reason=classification_block_reason,
+                    )
+                )
+            else:
+                tasks.append(
+                    _task_row(job, "screen", "done" if screener_done else "actionable")
+                )
+                tasks.append(
+                    _task_row(job, "prepare", "done" if helper_done else "actionable")
+                )
 
-        # Downstream print chain — only after prep evidence.
-        if has_schedule and screener_done and helper_done:
+        # Downstream print chain — only after prep evidence on classified print lines.
+        if has_schedule and screener_done and helper_done and not unclassified_scheduled_ids:
             if approved_sample:
                 tasks.append(_task_row(job, "sample", "done"))
                 tasks.append(_task_row(job, "sample_approve", "done"))
@@ -4254,16 +4710,21 @@ async def list_payment_receipts(
     receipt_status: str | None = None,
     receipts: str | None = None,
     branch: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    review_required: bool | None = None,
     page: int = 1,
     page_size: int = 25,
 ) -> dict:
     """Per-PO payment monitor: one row per job (with or without receipts), read-only.
 
     Derived from PaymentReceiptRef/PaymentBypass through the existing payment gate; no ledger copy.
+    Invoice outstanding / fully-paid settlement is intentionally null until Accurate
+    receivable allocation is an Owner-approved contract.
     """
     _require(user, P.JOB_READ)
     from app.authorization.workflow import branch_allowed
-    from app.services.production.payment_gate import status_expression
+    from app.services.production.payment_gate import monitor_financial_fields, status_expression
 
     page = max(1, int(page))
     page_size = min(100, max(1, int(page_size)))
@@ -4279,6 +4740,8 @@ async def list_payment_receipts(
                 PaymentReceiptRef.evidence_verified.is_(True),
                 PaymentReceiptRef.amount > 0,
             ).label("verified_amount"),
+            func.max(PaymentReceiptRef.paid_at).label("latest_paid_at"),
+            func.max(PaymentReceiptRef.created_at).label("latest_receipt_at"),
         )
         .group_by(PaymentReceiptRef.job_id)
         .subquery()
@@ -4289,7 +4752,14 @@ async def list_payment_receipts(
     if branch:
         allowed = [b for b in allowed if b == branch]
     base = (
-        select(ProductionJob, st.c.payment_status, count_col.label("receipt_count"), agg.c.verified_amount)
+        select(
+            ProductionJob,
+            st.c.payment_status,
+            count_col.label("receipt_count"),
+            agg.c.verified_amount,
+            agg.c.latest_paid_at,
+            agg.c.latest_receipt_at,
+        )
         .join(st, st.c.job_id == ProductionJob.id)
         .outerjoin(agg, agg.c.job_id == ProductionJob.id)
         .where(ProductionJob.branch_id.in_(allowed or [""]))
@@ -4306,6 +4776,21 @@ async def list_payment_receipts(
             .where(PaymentReceiptRef.job_id == ProductionJob.id, PaymentReceiptRef.status == receipt_status)
             .exists()
         )
+    if review_required is True:
+        base = base.where(ProductionJob.payment_review_required.is_(True))
+    elif review_required is False:
+        base = base.where(ProductionJob.payment_review_required.is_(False))
+    # Date filter uses Accurate paid_at when present, else local receipt recorded_at.
+    if date_from is not None or date_to is not None:
+        day_expr = func.coalesce(PaymentReceiptRef.paid_at, PaymentReceiptRef.created_at)
+        date_exists = select(PaymentReceiptRef.id).where(
+            PaymentReceiptRef.job_id == ProductionJob.id
+        )
+        if date_from is not None:
+            date_exists = date_exists.where(day_expr >= date_from)
+        if date_to is not None:
+            date_exists = date_exists.where(day_expr <= date_to)
+        base = base.where(date_exists.exists())
     term = (q or "").strip()
     if term:
         like = "%" + term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
@@ -4326,40 +4811,122 @@ async def list_payment_receipts(
     )).all()
     job_ids = [job.id for job, *_ in rows]
     by_job: dict[int, list] = {}
+    bypass_by_job: dict[int, list] = {}
     bypassed: set[int] = set()
     if job_ids:
         for r in (await session.scalars(
             select(PaymentReceiptRef).where(PaymentReceiptRef.job_id.in_(job_ids)).order_by(PaymentReceiptRef.id.desc())
         )).all():
             by_job.setdefault(r.job_id, []).append(r)
-        bypassed = set((await session.scalars(
-            select(PaymentBypass.job_id).where(PaymentBypass.job_id.in_(job_ids), PaymentBypass.active.is_(True))
-        )).all())
-    items = [
-        {
-            "job_id": job.id,
-            "so_number": job.accurate_so_number,
-            "customer_name": job.customer_name,
-            "branch_id": job.branch_id,
-            "payment_status": status,
-            "bypass_active": job.id in bypassed,
-            "receipt_count": int(count),
-            "verified_amount": str(verified) if verified is not None else None,
-            "receipts": [
-                {
-                    "receipt_id": r.id,
-                    "accurate_receipt_id": r.accurate_receipt_id,
-                    "accurate_receipt_number": r.accurate_receipt_number,
-                    "amount": str(r.amount) if r.amount is not None else None,
-                    "receipt_status": r.status,
-                    "evidence_verified": bool(r.evidence_verified),
-                    "recorded_at": r.created_at.isoformat() if r.created_at else None,
-                }
+        for b in (await session.scalars(
+            select(PaymentBypass).where(PaymentBypass.job_id.in_(job_ids)).order_by(PaymentBypass.id.desc())
+        )).all():
+            bypass_by_job.setdefault(b.job_id, []).append(b)
+            if b.active:
+                bypassed.add(b.job_id)
+    from app.services.production.payment_settings import bypass_enabled as settings_bypass_enabled
+
+    bypass_on = await settings_bypass_enabled(session)
+    actor_can_bypass = P.user_may_bypass_payment(user) and bypass_on
+    # Resolve bypass author display names (audit identity — never invent).
+    author_ids = {
+        int(b.authorized_by)
+        for blist in bypass_by_job.values()
+        for b in blist
+        if b.authorized_by is not None
+    }
+    author_names: dict[int, str] = {}
+    if author_ids:
+        for u in (
+            await session.scalars(select(User).where(User.id.in_(sorted(author_ids))))
+        ).all():
+            name = (u.display_name or u.username or "").strip()
+            if name:
+                author_names[int(u.id)] = name
+    # Bypass author visible only to actors who may authorize bypass (audit-sensitive).
+    show_bypass_author = bool(P.user_may_bypass_payment(user))
+    items = []
+    for job, status, count, verified, latest_paid_at, latest_receipt_at in rows:
+        verified_s = str(verified) if verified is not None else None
+        fin = monitor_financial_fields(verified_amount=verified_s, payment_status=status)
+        active_bypass = next((b for b in bypass_by_job.get(job.id, []) if b.active), None)
+        latest_bypass = active_bypass.created_at if active_bypass else None
+        last_parts = [t for t in (latest_paid_at, latest_receipt_at, latest_bypass, job.updated_at) if t]
+        last_updated = max(last_parts).isoformat() if last_parts else None
+        # Canonical approval_at — NOT last_updated_at:
+        # approved → earliest valid verified positive receipt recorded_at (gate-open evidence)
+        # bypassed → active bypass created_at
+        # pending → null (UI: Belum tersedia)
+        approval_at = None
+        if status == "approved":
+            gate_times = [
+                r.created_at
                 for r in by_job.get(job.id, [])
-            ],
-        }
-        for job, status, count, verified in rows
-    ]
+                if r.status == "valid"
+                and bool(r.evidence_verified)
+                and r.amount is not None
+                and r.amount > 0
+                and r.created_at is not None
+            ]
+            if gate_times:
+                approval_at = min(gate_times).isoformat()
+        elif status == "bypassed" and latest_bypass is not None:
+            approval_at = latest_bypass.isoformat()
+        bypass_by = None
+        if show_bypass_author and active_bypass is not None:
+            uid = int(active_bypass.authorized_by) if active_bypass.authorized_by is not None else None
+            if uid is not None:
+                bypass_by = author_names.get(uid) or None
+        items.append(
+            {
+                "job_id": job.id,
+                "so_number": job.accurate_so_number,
+                "customer_name": job.customer_name,
+                "branch_id": job.branch_id,
+                "payment_status": status,
+                "bypass_active": job.id in bypassed,
+                "can_bypass": bool(actor_can_bypass and status == "pending" and job.id not in bypassed),
+                "payment_review_required": bool(getattr(job, "payment_review_required", False)),
+                "receipt_count": int(count),
+                "verified_amount": verified_s,
+                "payment_date": latest_paid_at.isoformat() if latest_paid_at else None,
+                "last_updated_at": last_updated,
+                "approval_at": approval_at,
+                "bypass_by": bypass_by,
+                **fin,
+                "receipts": [
+                    {
+                        "receipt_id": r.id,
+                        "accurate_receipt_id": r.accurate_receipt_id,
+                        "accurate_receipt_number": r.accurate_receipt_number,
+                        "amount": str(r.amount) if r.amount is not None else None,
+                        "paid_at": r.paid_at.isoformat() if getattr(r, "paid_at", None) else None,
+                        "receipt_status": r.status,
+                        "evidence_verified": bool(r.evidence_verified),
+                        "recorded_at": r.created_at.isoformat() if r.created_at else None,
+                    }
+                    for r in by_job.get(job.id, [])
+                ],
+                "bypasses": [
+                    {
+                        "bypass_id": b.id,
+                        "active": b.active,
+                        "reason": b.reason,
+                        "gate_before": getattr(b, "gate_before", None),
+                        "authorized_by": b.authorized_by if show_bypass_author else None,
+                        "authorized_by_name": (
+                            author_names.get(int(b.authorized_by))
+                            if show_bypass_author and b.authorized_by is not None
+                            else None
+                        ),
+                        "created_at": b.created_at.isoformat() if b.created_at else None,
+                        "revoked_at": b.revoked_at.isoformat() if b.revoked_at else None,
+                        "revoke_reason": b.revoke_reason,
+                    }
+                    for b in bypass_by_job.get(job.id, [])
+                ],
+            }
+        )
     return {"items": items, "total": total, "page": page, "page_size": page_size,
             "has_more": page * page_size < total}
 

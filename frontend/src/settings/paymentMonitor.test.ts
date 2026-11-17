@@ -17,8 +17,10 @@ it('missing amounts render as Belum terverifikasi, never zero',()=>{
 });
 it('payment mutations mark the monitor stale and the list stays read-only',()=>{
   expect(src).toMatch(/taskRequestSequence\+\+;\s*if \(typeof window\.v3PaymentMonitorRefresh === "function"\)/);
-  const block=src.slice(src.indexOf('const rm ='),src.indexOf('(async function bootLive'));
+  // Monitor list itself stays read-only; settings PUT lives in a separate payCfg block.
+  const block=src.slice(src.indexOf('const rm ='),src.indexOf('window.v3PaymentMonitorRefresh'));
   expect(block).not.toMatch(/method:\s*"(POST|PATCH|PUT|DELETE)"/);
+  expect(src).toContain('/production/settings/payment-approval');
 });
 it('detail opens by official job id from the API, not the Inbox cache, and never invents zero',()=>{
   const open=src.slice(src.indexOf('async function rmOpen'),src.indexOf('function rmView()'));
@@ -32,9 +34,18 @@ it('detail opens by official job id from the API, not the Inbox cache, and never
 });
 it('states coverage and never labels the verified sum as an official allocation',()=>{
   const view=src.slice(src.indexOf('function rmView()'),src.indexOf('window.v36ReceiptView ='));
-  expect(view).toContain('belum menjadi job V3');
-  expect(view).toContain('bukan penanda lunas');
-  expect(view).not.toMatch(/alokasi/i);
+  expect(view).toMatch(/sudah menjadi job V3|belum menjadi job V3/);
+  expect(view).toMatch(/bukan.*penanda lunas|tidak dipetakan/i);
+  expect(view).toMatch(/Outstanding\/invoice Accurate tidak dipetakan|Outstanding Accurate tidak dipetakan/);
+  expect(view).toContain('v3-rm-from');
+  expect(view).not.toMatch(/\balokasi resmi\b/i);
   const open=src.slice(src.indexOf('async function rmOpen'),src.indexOf('function rmView()'));
   expect(open).toContain('Detail Accurate tidak tersedia');
+});
+it('distinguishes production gate from Accurate settlement and surfaces financial exceptions',()=>{
+  expect(src).toContain('Gate produksi');
+  expect(src).toContain('payment_review_required');
+  expect(src).toContain('Exception keuangan');
+  expect(src).toMatch(/idempotency_key:\s*bypassKey/);
+  expect(src).toContain('date_from');
 });

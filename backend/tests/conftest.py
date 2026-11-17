@@ -51,3 +51,21 @@ def _legacy_fixtures_without_synced_lines(request, monkeypatch):
         monkeypatch.setattr(engine, "REQUIRE_SYNCED_LINE_QTY", False)
     if "strict_loading_cap" not in request.keywords:
         monkeypatch.setattr(engine, "ENFORCE_LOADING_PACKING_CAP", False)
+
+
+@pytest.fixture(autouse=True)
+def _payment_bypass_setting_compat(request, monkeypatch):
+    """Most suites predate Settings SoT. Default test env treats bypass_enabled as on.
+
+    Tests that assert the Settings gate use marker ``respect_payment_bypass_setting``.
+    Production default for new installs remains bypass_enabled=false.
+    """
+    if "respect_payment_bypass_setting" in request.keywords:
+        return
+
+    async def _enabled(_session):
+        return True
+
+    import app.services.production.payment_settings as pay_settings
+
+    monkeypatch.setattr(pay_settings, "bypass_enabled", _enabled)

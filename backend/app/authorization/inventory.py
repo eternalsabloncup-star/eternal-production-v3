@@ -12,6 +12,7 @@ import sys
 
 from sqlalchemy import select, text
 
+from app.authorization.accounts import AccountCredential
 from app.authorization.catalog import CATALOG, LEGACY_MAPPING, compatibility_inventory
 from app.authorization.service import load_access
 from app.authorization.shadow import Probe, compare
@@ -44,7 +45,7 @@ def _probes(user, access):
     return probes
 
 
-def user_report(user, access) -> dict:
+def user_report(user, access, *, missing_credential: bool = False) -> dict:
     report = compare(user, access, _probes(user, access))
     narrowing = [r for r in report['comparisons'] if r['legacy'] and not r['candidate']]
     widening = [r for r in report['comparisons'] if r['candidate'] and not r['legacy']]
@@ -57,24 +58,40 @@ def user_report(user, access) -> dict:
         'mapping': compatibility_inventory(list(user.permissions or [])),
         'narrowing': narrowing, 'widening': widening,
         'unresolved_mapping': report['unresolved_mapping'], 'unknown_legacy': report['unknown_legacy'],
-        'blocking': bool(narrowing or blocking_widening or report['unresolved_mapping'] or report['unknown_legacy']),
+        'missing_credential': bool(missing_credential),
+        'blocking': bool(
+            narrowing
+            or blocking_widening
+            or report['unresolved_mapping']
+            or report['unknown_legacy']
+            or missing_credential
+        ),
     }
 
 
-async def build(session) -> dict:
-    await session.execute(text('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'))
+async def build(session, *, declare_readonly: bool = True) -> dict:
+    # CLI starts a fresh txn and declares READ ONLY. HTTP callers already hold a
+    # request transaction that may have read rows; skip SET TRANSACTION there.
+    if declare_readonly:
+        await session.execute(text('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY'))
     users = (await session.scalars(select(User).order_by(User.id))).all()
     rows, inactive, revision = [], [], None
+    missing_credential_ids: list[int] = []
     for user in users:
         access = await load_access(session, user.id, lock=False)
         revision = access.revision
         if not access.active:
             inactive.append(user.id)
             continue
-        rows.append(user_report(user, access))
+        cred = await session.get(AccountCredential, user.id)
+        missing = cred is None
+        if missing:
+            missing_credential_ids.append(user.id)
+        rows.append(user_report(user, access, missing_credential=missing))
     return {
         'access_revision': revision, 'users': rows, 'inactive_user_ids': inactive,
         'blocking_user_ids': [r['user_id'] for r in rows if r['blocking']],
+        'missing_credential_user_ids': missing_credential_ids,
         'cutover_review_clear': bool(rows) and not any(r['blocking'] for r in rows),
         'automatic_import_allowed': False, 'writes_performed': False,
     }
@@ -100,6 +117,7 @@ def target(url: str) -> dict:
 
 def summarize(report: dict) -> dict:
     rows = report['users']
+    missing_ids = list(report.get('missing_credential_user_ids') or [])
     return {
         'access_revision': report['access_revision'], 'users_checked': len(rows),
         'inactive_users': len(report['inactive_user_ids']), 'directors': sum(r['director'] for r in rows),
@@ -107,6 +125,8 @@ def summarize(report: dict) -> dict:
         'users_with_widening_non_director': sum(bool(r['widening']) and not r['director'] for r in rows),
         'users_with_unknown_legacy': sum(bool(r['unknown_legacy']) for r in rows),
         'users_with_unresolved_mapping': sum(bool(r['unresolved_mapping']) for r in rows),
+        'users_with_missing_credential': len(missing_ids),
+        'missing_credential_user_ids': missing_ids,
         'blocking_user_ids': report['blocking_user_ids'], 'cutover_review_clear': report['cutover_review_clear'],
         'automatic_import_allowed': False, 'writes_performed': False,
     }

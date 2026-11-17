@@ -92,6 +92,18 @@ export const OFFICIAL_TASK_CARD_DEFS = [
     label: "Packing Barang Non-Cetak",
     verb: "Konfirmasi packing",
   },
+  {
+    id: "loading",
+    role: "Driver",
+    label: "Loading / Muat Barang",
+    verb: "Kerjakan loading",
+  },
+  {
+    id: "delivery",
+    role: "Driver",
+    label: "Pengiriman / POD",
+    verb: "Kerjakan pengiriman",
+  },
 ] as const;
 
 export function mapOfficialTasksToRows(

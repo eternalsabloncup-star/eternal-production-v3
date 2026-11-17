@@ -248,6 +248,32 @@ def normalize_summary(row: dict) -> dict:
     }
 
 
+def _gateway_provenance(payload: dict) -> dict:
+    """Honest Accurate provenance — never label fixture/unverified reads as live."""
+    source = str(payload.get("source") or "accurate_gateway").strip() or "accurate_gateway"
+    if "live_verified" in payload:
+        live_verified: bool | None = bool(payload.get("live_verified"))
+    elif source == "fixture":
+        live_verified = False
+    elif source in {"accurate_live", "live"}:
+        live_verified = True
+    else:
+        live_verified = None
+    if live_verified is True:
+        mode = "live"
+    elif source == "fixture":
+        mode = "fixture"
+    else:
+        # Unknown or explicitly unverified gateway payload — not Accurate Live.
+        mode = "unverified"
+    return {
+        "source": source,
+        "mode": mode,
+        "live_verified": live_verified,
+        "filter_incomplete": bool(payload.get("filter_incomplete")),
+    }
+
+
 async def list_sales_orders(
     gateway: ReadGateway, *, page: int, limit: int, keyword: str
 ) -> dict:
@@ -261,13 +287,21 @@ async def list_sales_orders(
         raise HTTPException(502, "Gateway mengembalikan daftar SO tidak valid")
     normalized = [normalize_summary(row) for row in rows if isinstance(row, dict)]
     normalized = [row for row in normalized if row]
+    provenance = _gateway_provenance(payload if isinstance(payload, dict) else {})
+    total_raw = payload.get("total")
+    try:
+        total = int(total_raw) if total_raw is not None else len(normalized)
+    except (TypeError, ValueError):
+        total = len(normalized)
     return {
         "rows": normalized,
-        "total": int(payload.get("total") or len(normalized)),
+        "total": total,
         "page": page,
         "pageSize": limit,
-        "source": "accurate_gateway",
-        "mode": "live",
+        "source": provenance["source"],
+        "mode": provenance["mode"],
+        "live_verified": provenance["live_verified"],
+        "filter_incomplete": provenance["filter_incomplete"],
     }
 
 

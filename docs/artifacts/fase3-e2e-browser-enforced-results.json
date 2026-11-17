@@ -1,0 +1,315 @@
+{
+  "summary": {
+    "ok": true,
+    "pass": 14,
+    "fail": 0,
+    "authMode": "enforced"
+  },
+  "rows": [
+    {
+      "role": "System",
+      "action": "Login reports workflow_authorization",
+      "http": 200,
+      "authMode": "enforced",
+      "dbBefore": "—",
+      "dbAfter": "system_director=true",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "workflow_authorization": "enforced",
+        "settings_enabled": true,
+        "system_director": true
+      }
+    },
+    {
+      "role": "Designer",
+      "action": "Upload desain (enforced UI)",
+      "http": 200,
+      "authMode": "enforced",
+      "dbBefore": "versions=0",
+      "dbAfter": "versions=1",
+      "openPath": "openTask",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "mut": {
+          "clicked": true,
+          "hit": {
+            "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/design/versions",
+            "status": 200,
+            "method": "POST",
+            "ms": 28
+          }
+        },
+        "open": {
+          "path": "openTask",
+          "kind": "design_upload"
+        }
+      }
+    },
+    {
+      "role": "Direktur",
+      "action": "Design+payment bypass (Full Access)",
+      "http": "200/200",
+      "authMode": "enforced",
+      "dbAfter": "design=bypassed;payment=bypassed",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "dmut": {
+          "clicked": true,
+          "hit": {
+            "url": "http://127.0.0.1:4188/api/v1/production/jobs/design/versions/1/decision",
+            "status": 200,
+            "method": "POST",
+            "ms": 23
+          }
+        },
+        "pmut": {
+          "clicked": true,
+          "hit": {
+            "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/payment/bypass",
+            "status": 200,
+            "method": "POST",
+            "ms": 31
+          }
+        },
+        "system_director": true
+      }
+    },
+    {
+      "role": "Kepala Produksi",
+      "action": "Assignment (enforced)",
+      "http": 200,
+      "authMode": "enforced",
+      "dbAfter": "assignment_id=1",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "clicked": true,
+        "hit": {
+          "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/schedule/assignments",
+          "status": 200,
+          "method": "POST",
+          "ms": 36
+        }
+      }
+    },
+    {
+      "role": "Screener",
+      "action": "Prep screen (enforced)",
+      "http": 200,
+      "authMode": "enforced",
+      "dbAfter": "prep_screener",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "clicked": true,
+        "hit": {
+          "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/prep/screener",
+          "status": 200,
+          "method": "POST",
+          "ms": 41
+        }
+      }
+    },
+    {
+      "role": "Helper",
+      "action": "Prep helper (enforced)",
+      "http": 200,
+      "authMode": "enforced",
+      "dbAfter": "prep_helper",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "clicked": true,
+        "hit": {
+          "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/prep/helper",
+          "status": 200,
+          "method": "POST",
+          "ms": 24
+        }
+      }
+    },
+    {
+      "role": "Operator",
+      "action": "Sample upload (enforced)",
+      "http": 200,
+      "authMode": "enforced",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "clicked": true,
+        "hit": {
+          "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/samples",
+          "status": 200,
+          "method": "POST",
+          "ms": 20
+        }
+      }
+    },
+    {
+      "role": "Kepala Produksi",
+      "action": "Sample approve (enforced)",
+      "http": 200,
+      "authMode": "enforced",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "clicked": true,
+        "hit": {
+          "url": "http://127.0.0.1:4188/api/v1/production/jobs/samples/1/decision",
+          "status": 200,
+          "method": "POST",
+          "ms": 24
+        }
+      }
+    },
+    {
+      "role": "Operator",
+      "action": "Output + sticky idempotency double-click/retry",
+      "http": "200/undefined/undefined",
+      "authMode": "enforced",
+      "dbBefore": "0 output",
+      "dbAfter": "events=1;qty=40;id=4",
+      "audit": true,
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "mut": {
+          "clicked": true,
+          "hit": {
+            "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/outputs",
+            "status": 200,
+            "method": "POST",
+            "ms": 24
+          }
+        },
+        "dup": {
+          "clicked": true,
+          "hit": null
+        },
+        "retry": {
+          "clicked": true,
+          "hit": null
+        },
+        "keyBefore": [],
+        "keyAfterFirst": {
+          "keys": [
+            "out::1|1|40|1|L1"
+          ],
+          "committed": true,
+          "key": "out-mwish5v4-5vuw3cxu"
+        },
+        "note": "dup/retry may be 409 reconciled or short-circuit; DB must stay single event qty 40"
+      }
+    },
+    {
+      "role": "Helper",
+      "action": "Verify+packing (enforced)",
+      "http": "200/200",
+      "authMode": "enforced",
+      "dbAfter": "output_helper_verified,packing_batch",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "hv": {
+          "clicked": true,
+          "hit": {
+            "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/outputs/4/helper-verifications",
+            "status": 200,
+            "method": "POST",
+            "ms": 26
+          }
+        },
+        "pack": {
+          "clicked": true,
+          "hit": {
+            "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/packing",
+            "status": 200,
+            "method": "POST",
+            "ms": 25
+          }
+        }
+      }
+    },
+    {
+      "role": "Driver",
+      "action": "Loading+POD (enforced)",
+      "http": "200/200/200",
+      "authMode": "enforced",
+      "dbAfter": "loading,pod",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "auth": {
+          "clicked": true,
+          "hit": {
+            "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/loading-authority?accurate_sj_id=sj-browser&accurate_sj_number=SJ%2FBROWSER%2F001&accurate_sj_line_id=SL-1&so_line_id=line-print",
+            "status": 200,
+            "method": "GET",
+            "ms": 18
+          }
+        },
+        "load": {
+          "clicked": true,
+          "hit": {
+            "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/loading",
+            "status": 200,
+            "method": "POST",
+            "ms": 27
+          }
+        },
+        "podHit": {
+          "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/pod",
+          "status": 200,
+          "method": "POST"
+        },
+        "types": [
+          "payment_bypass_authorized",
+          "prep_screener",
+          "prep_helper",
+          "output_confirmed",
+          "output_helper_verified",
+          "packing_batch",
+          "loading",
+          "pod"
+        ]
+      }
+    },
+    {
+      "role": "NoGrant",
+      "action": "GET job tanpa ScopedGrant",
+      "http": 403,
+      "authMode": "enforced",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "error": {
+          "code": "http_error",
+          "message": "Capability denied: job.read"
+        }
+      }
+    },
+    {
+      "role": "WrongBranch",
+      "action": "GET job branch-a dengan grant branch-b",
+      "http": 403,
+      "authMode": "enforced",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "error": {
+          "code": "http_error",
+          "message": "Resource scope denied"
+        }
+      }
+    },
+    {
+      "role": "Designer",
+      "action": "Payment bypass ditolak (enforced)",
+      "http": 403,
+      "authMode": "enforced",
+      "verdict": "PASS_MUTATION",
+      "detail": {
+        "clicked": true,
+        "hit": {
+          "url": "http://127.0.0.1:4188/api/v1/production/jobs/1/payment/bypass",
+          "status": 403,
+          "method": "POST",
+          "ms": 11
+        }
+      }
+    }
+  ],
+  "authMode": "enforced",
+  "head_base": "d110f5fb3b63605ca4e0ecada36c701cc732f6da",
+  "note": "checkpoint gate; residual risk: lost-response retry not browser-proven"
+}

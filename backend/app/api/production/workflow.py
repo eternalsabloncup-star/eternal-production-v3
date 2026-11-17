@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
@@ -77,6 +77,7 @@ class PaymentReceiptBody(BaseModel):
 
 class PaymentBypassBody(BaseModel):
     reason: str
+    idempotency_key: str | None = Field(default=None, min_length=8, max_length=120)
 
 
 class RevokeBody(BaseModel):
@@ -244,6 +245,10 @@ async def _job_summary(job, session) -> dict:
         "payment_status": await effective_status(session, job.id),
         "sample_status": job.sample_status,
         "processing_status": job.processing_status,
+        "lifecycle_status": getattr(job, "lifecycle_status", None) or "active",
+        "cancelled_at": job.cancelled_at.isoformat() if getattr(job, "cancelled_at", None) else None,
+        "cancel_reason": getattr(job, "cancel_reason", None),
+        "cancel_gate": getattr(job, "cancel_gate", None),
     }
 
 
@@ -288,6 +293,9 @@ async def payment_receipts_list(
     receipt_status: str | None = Query(None, pattern="^(valid|invalidated|reversed)$"),
     receipts: str | None = Query(None, pattern="^(with|without)$"),
     branch: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    review_required: bool | None = None,
     page: int = Query(1, ge=1),
     page_size: int = Query(25, ge=1, le=100),
     session: AsyncSession = Depends(get_db_session),
@@ -295,8 +303,18 @@ async def payment_receipts_list(
 ):
     """Official per-PO payment monitor, with or without receipts (read-only, branch scoped)."""
     return await engine.list_payment_receipts(
-        session, user, q=q, payment_status=payment_status, receipt_status=receipt_status,
-        receipts=receipts, branch=branch, page=page, page_size=page_size,
+        session,
+        user,
+        q=q,
+        payment_status=payment_status,
+        receipt_status=receipt_status,
+        receipts=receipts,
+        branch=branch,
+        date_from=date_from,
+        date_to=date_to,
+        review_required=review_required,
+        page=page,
+        page_size=page_size,
     )
 
 
@@ -408,6 +426,55 @@ async def get_loading_authority(
         accurate_sj_number=accurate_sj_number,
         accurate_sj_line_id=accurate_sj_line_id,
         so_line_id=so_line_id,
+    )
+
+
+class CancelJobBody(BaseModel):
+    reason: str = Field(min_length=5, max_length=2000)
+    idempotency_key: str = Field(min_length=8, max_length=120)
+    confirm_review: bool = False
+
+
+@router.get("/{job_id}/cancel-gate")
+async def cancel_gate_preview(
+    job_id: int,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    """Preview cancel classification without mutating state."""
+    from app.services.production import lifecycle as life
+
+    from app.services.production.permissions import user_may_cancel_job
+
+    job = await engine.get_job(session, job_id)
+    if not user_may_cancel_job(user):
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            403,
+            "Izin production.job.cancel tidak mencukupi (Direktur atau grant eksplisit)",
+        )
+    engine._branch(user, job.branch_id)
+    return await life.classify_cancel_gate(session, job)
+
+
+@router.post("/{job_id}/cancel")
+async def cancel_production_job(
+    job_id: int,
+    body: CancelJobBody,
+    session: AsyncSession = Depends(get_db_session),
+    user: User = Depends(get_current_user),
+):
+    """Soft-cancel ProductionJob. Never hard-deletes history or Accurate docs."""
+    from app.services.production import lifecycle as life
+
+    return await life.cancel_job(
+        session,
+        user,
+        job_id,
+        reason=body.reason,
+        idempotency_key=body.idempotency_key,
+        confirm_review=body.confirm_review,
     )
 
 
@@ -558,8 +625,19 @@ async def payment_bypass(
     user: User = Depends(get_current_user),
 ):
     job = await engine.get_job(session, job_id)
-    row = await engine.bypass_payment(session, user, job, reason=body.reason)
-    return {"id": row.id, "active": row.active}
+    row = await engine.bypass_payment(
+        session,
+        user,
+        job,
+        reason=body.reason,
+        idempotency_key=body.idempotency_key,
+    )
+    return {
+        "id": row.id,
+        "active": row.active,
+        "gate_before": getattr(row, "gate_before", None),
+        "idempotency_key": getattr(row, "idempotency_key", None),
+    }
 
 
 @router.post("/payment/bypass/{bypass_id}/revoke")
@@ -678,6 +756,8 @@ async def prep_screener(
     return {
         "id": state.id,
         "role": state.role,
+        "prep_kind": prep_svc.PREP_KIND_BY_ROLE.get(state.role, "prepare_screen"),
+        "label": "Prepare Screen",
         "qty": str(state.qty),
         "screen_size": state.screen_size,
         "helper_remaining_vs_po": str(remaining),
@@ -691,6 +771,7 @@ async def prep_helper(
     session: AsyncSession = Depends(get_db_session),
     user: User = Depends(get_current_user),
 ):
+    """Prepare Cup — same physical event as role=helper (no duplicate event type)."""
     job = await engine.get_job(session, job_id)
     state = await prep_svc.set_preparation(
         session,
@@ -710,6 +791,8 @@ async def prep_helper(
     return {
         "id": state.id,
         "role": state.role,
+        "prep_kind": "prepare_cup",
+        "label": "Prepare Cup",
         "qty": str(state.qty),
         "remaining_vs_po": str(remaining),
     }
@@ -1175,6 +1258,12 @@ async def tracking(
                 "event_type": e.event_type,
                 "qty_physical": str(e.qty_physical) if e.qty_physical is not None else None,
                 "qty_pass_ops": str(e.qty_pass_ops) if e.qty_pass_ops is not None else None,
+                "assignment_id": e.assignment_id,
+                "so_line_id": e.so_line_id,
+                "color_pass": e.color_pass,
+                "lot_code": e.lot_code,
+                "actor_user_id": e.actor_user_id,
+                "idempotency_key": e.idempotency_key,
                 "accurate_sj_number": e.accurate_sj_number,
                 "created_at": e.created_at.isoformat() if e.created_at else None,
             }

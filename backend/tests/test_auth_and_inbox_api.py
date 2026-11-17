@@ -153,7 +153,10 @@ async def test_inbox_branch_filter_and_wo_status(api_client: AsyncClient) -> Non
     )
     assert response.status_code == 200
     payload = response.json()
-    assert payload["mode"] == "live"
+    # Test double / unconfigured gateway is not Accurate Live.
+    assert payload["mode"] in {"unverified", "fixture", "live"}
+    if payload["mode"] != "live":
+        assert payload.get("live_verified") is not True
     numbers = [row["po_number"] for row in payload["rows"]]
     assert "SO/OTHER/009" not in numbers
     assert "SO/TEST/001" in numbers

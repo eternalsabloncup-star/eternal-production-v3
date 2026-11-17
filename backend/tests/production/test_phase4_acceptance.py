@@ -312,6 +312,19 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
     )
     assert bad.status_code == 409
 
+    from app.models.production.prep import JobLineQty
+
+    async with get_session_factory()() as session:
+        session.add(
+            JobLineQty(
+                job_id=jid,
+                so_line_id="line-1",
+                po_qty=Decimal("100"),
+                production_process="print",
+            )
+        )
+        await session.commit()
+
     # Two operators, two color passes, partial qty
     asg1 = (
         await client.post(
@@ -394,7 +407,7 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
             },
         )
     assert out1.status_code == 200, out1.text
-    # Duplicate click / retry same idempotency
+    # Duplicate click / retry same idempotency → 200 replay, one event.
     dup = await client.post(
         f"/api/v1/production/jobs/{jid}/outputs",
         headers=h,
@@ -405,7 +418,29 @@ async def test_phase4_full_workflow_qty_multi_op_color(client: AsyncClient):
             "idempotency_key": "out-pass-a1",
         },
     )
-    assert dup.status_code == 409
+    assert dup.status_code == 200, dup.text
+    assert dup.json()["id"] == out1.json()["id"]
+    tr = await client.get(f"/api/v1/production/jobs/{jid}/tracking", headers=h)
+    a1_outs = [
+        e
+        for e in tr.json()["events"]
+        if e["event_type"] == "output_confirmed"
+        and e.get("idempotency_key") == "out-pass-a1"
+    ]
+    assert len(a1_outs) == 1
+    assert a1_outs[0]["qty_physical"] in ("30", "30.000", "30.0")
+    mismatch = await client.post(
+        f"/api/v1/production/jobs/{jid}/outputs",
+        headers=h,
+        json={
+            "assignment_id": asg1["id"],
+            "qty_physical": "31",
+            "color_pass": 1,
+            "idempotency_key": "out-pass-a1",
+        },
+    )
+    assert mismatch.status_code == 409, mismatch.text
+    assert "payload tidak cocok" in mismatch.text
 
     out1b = await client.post(
         f"/api/v1/production/jobs/{jid}/outputs",

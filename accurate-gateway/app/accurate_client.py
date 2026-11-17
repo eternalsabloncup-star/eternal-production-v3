@@ -11,7 +11,8 @@ Bootstrap:
 Business GETs on returned host:
   /accurate/api/sales-order/list.do|detail.do
   /accurate/api/sales-receipt/detail.do
-  /accurate/api/delivery-order/detail.do
+  /accurate/api/delivery-order/list.do|detail.do
+  /accurate/api/sales-invoice/list.do|detail.do
 
 HTTP 308: do not reuse stale signed headers — update host and re-sign.
 Never reuse ERP V1 secrets. Never log credentials.
@@ -29,7 +30,9 @@ from app.accurate_auth import auth_headers, normalize_host
 from app.config import GatewaySettings
 from app.normalize import (
     normalize_delivery_note,
+    normalize_delivery_note_list_item,
     normalize_receipt,
+    normalize_sales_invoice,
     normalize_sales_order,
     normalize_sales_order_list_item,
 )
@@ -514,6 +517,66 @@ class AccurateClient:
             )
         return normalize_receipt(row)
 
+    async def list_delivery_notes(
+        self,
+        *,
+        keywords: str | None = None,
+        branch: str | None = None,
+        limit: int = 50,
+        page: int = 1,
+    ) -> dict[str, Any]:
+        """Official: GET /accurate/api/delivery-order/list.do (scope delivery_order_view)."""
+        page_n = max(1, int(page or 1))
+        page_size = max(1, min(int(limit or 50), 200))
+        params: dict[str, Any] = {
+            "fields": "id,number,statusName,status,customer,customerId,customerName,"
+            "branch,branchId,branchName,shipDate,transDate",
+            "sp.pageSize": page_size,
+            "sp.page": page_n,
+        }
+        if keywords:
+            params["filter.keywords.op"] = "CONTAIN"
+            params["filter.keywords.val"] = keywords
+        upstream_branch = False
+        if branch and str(branch).strip().isdigit():
+            params["filter.branchId.op"] = "EQUAL"
+            params["filter.branchId.val"] = int(str(branch).strip())
+            upstream_branch = True
+        data = await self._request(
+            "GET", "/accurate/api/delivery-order/list.do", params=params
+        )
+        rows = data.get("d") or data.get("data") or []
+        if not isinstance(rows, list):
+            raise AccurateUpstreamError(
+                "accurate_list_shape",
+                "delivery-order/list shape tidak dikenali",
+                status_code=502,
+            )
+        out = [
+            normalize_delivery_note_list_item(r) for r in rows if isinstance(r, dict)
+        ]
+        filter_incomplete = False
+        if branch and not upstream_branch:
+            needle = branch.lower()
+            before = len(out)
+            out = [
+                r
+                for r in out
+                if needle in str((r.get("branch") or {}).get("name", "")).lower()
+                or needle == str((r.get("branch") or {}).get("id", "")).lower()
+            ]
+            if len(out) != before:
+                filter_incomplete = True
+        accurate_total = self._extract_list_total(data, len(out))
+        return {
+            "rows": out,
+            "accurate_total": accurate_total,
+            "page": page_n,
+            "page_size": page_size,
+            "filter_incomplete": filter_incomplete,
+            "upstream_branch_filter": upstream_branch,
+        }
+
     async def get_delivery_note(self, dn_id: str) -> dict[str, Any]:
         params: dict[str, Any]
         if str(dn_id).isdigit():
@@ -533,3 +596,74 @@ class AccurateClient:
                 status_code=502,
             )
         return normalize_delivery_note(row)
+
+    async def list_sales_invoices(
+        self,
+        *,
+        keywords: str | None = None,
+        outstanding_only: bool | None = None,
+        limit: int = 50,
+        page: int = 1,
+    ) -> dict[str, Any]:
+        """Official: GET /accurate/api/sales-invoice/list.do (scope sales_invoice_view)."""
+        page_n = max(1, int(page or 1))
+        page_size = max(1, min(int(limit or 50), 200))
+        params: dict[str, Any] = {
+            # Request owing fields when Accurate returns them on list; detail still
+            # required for authoritative primeOwing (list totalAmount ≠ sisa).
+            "fields": (
+                "id,number,statusName,status,customer,customerId,customerName,"
+                "branch,branchId,branchName,transDate,totalAmount,"
+                "primeOwing,owingAmount,owing,paidAmount"
+            ),
+            "sp.pageSize": page_size,
+            "sp.page": page_n,
+        }
+        if keywords:
+            params["filter.keywords.op"] = "CONTAIN"
+            params["filter.keywords.val"] = keywords
+        if outstanding_only is True:
+            params["filter.outstanding"] = True
+            params["outstandingFilter"] = "true"
+        elif outstanding_only is False:
+            params["filter.outstanding"] = False
+            params["outstandingFilter"] = "false"
+        data = await self._request(
+            "GET", "/accurate/api/sales-invoice/list.do", params=params
+        )
+        rows = data.get("d") or data.get("data") or []
+        if not isinstance(rows, list):
+            raise AccurateUpstreamError(
+                "accurate_list_shape",
+                "sales-invoice/list shape tidak dikenali",
+                status_code=502,
+            )
+        out = [normalize_sales_invoice(r) for r in rows if isinstance(r, dict)]
+        accurate_total = self._extract_list_total(data, len(out))
+        return {
+            "rows": out,
+            "accurate_total": accurate_total,
+            "page": page_n,
+            "page_size": page_size,
+            "filter_incomplete": False,
+        }
+
+    async def get_sales_invoice(self, invoice_id: str) -> dict[str, Any]:
+        params: dict[str, Any]
+        if str(invoice_id).isdigit():
+            params = {"id": int(invoice_id)}
+        else:
+            params = {"number": invoice_id}
+        data = await self._request(
+            "GET",
+            "/accurate/api/sales-invoice/detail.do",
+            params=params,
+        )
+        row = data.get("d") or data.get("data") or data
+        if not isinstance(row, dict):
+            raise AccurateUpstreamError(
+                "accurate_invoice_shape",
+                "sales-invoice/detail shape tidak dikenali",
+                status_code=502,
+            )
+        return normalize_sales_invoice(row)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import HTTPException
@@ -12,7 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.production.event import ProductionEvent
 from app.models.production.job import ProductionJob
-from app.models.production.prep import JobLineQty, PrepEvent, PrepState
+from app.models.production.prep import (
+    LINE_STATUS_ACTIVE,
+    LINE_STATUS_CONFLICT,
+    LINE_STATUS_REMOVED,
+    JobLineQty,
+    PrepEvent,
+    PrepState,
+)
 from app.models.production.schedule import ScheduleAssignment
 from app.models.user import User
 from app.services.production import permissions as P
@@ -22,8 +30,16 @@ from app.services.production.engine import (
     _require,
     gates_open_for_schedule,
 )
+from app.services.production.lifecycle import require_job_active
 
 SCREEN_SIZES = frozenset({"kecil", "besar"})
+# Contract: role=helper on a print line IS Prepare Cup (no parallel physical event type).
+PREP_ROLE_SCREEN = "screener"
+PREP_ROLE_CUP = "helper"
+PREP_KIND_BY_ROLE = {
+    PREP_ROLE_SCREEN: "prepare_screen",
+    PREP_ROLE_CUP: "prepare_cup",
+}
 
 
 def _normalize_production_process(value: str | None) -> str:
@@ -33,6 +49,31 @@ def _normalize_production_process(value: str | None) -> str:
     if normalized in {"print", "non_print", "unknown"}:
         return normalized
     return "unknown"
+
+
+async def _line_has_committed_work(
+    session: AsyncSession, job_id: int, so_line_id: str
+) -> bool:
+    for stmt in (
+        select(func.count())
+        .select_from(ScheduleAssignment)
+        .where(
+            ScheduleAssignment.job_id == job_id,
+            ScheduleAssignment.so_line_id == so_line_id,
+        ),
+        select(func.count())
+        .select_from(ProductionEvent)
+        .where(
+            ProductionEvent.job_id == job_id,
+            ProductionEvent.so_line_id == so_line_id,
+        ),
+        select(func.count())
+        .select_from(PrepState)
+        .where(PrepState.job_id == job_id, PrepState.so_line_id == so_line_id),
+    ):
+        if int(await session.scalar(stmt) or 0) > 0:
+            return True
+    return False
 
 
 async def upsert_job_line_qty(
@@ -62,29 +103,44 @@ async def upsert_job_line_qty(
             po_qty=po_qty,
             accurate_item_id=(accurate_item_id or None),
             production_process=process,
+            line_status=LINE_STATUS_ACTIVE,
         )
         session.add(row)
     else:
+        # Reappearing source line clears removed marker when qty/process reconcile.
+        if row.line_status == LINE_STATUS_REMOVED:
+            row.line_status = LINE_STATUS_ACTIVE
+            row.removed_from_source_at = None
+            row.revision_note = None
+        if from_accurate and production_process is not None:
+            prev = (row.production_process or "unknown").strip().lower()
+            if prev != process and await _line_has_committed_work(
+                session, job.id, so_line_id
+            ):
+                row.line_status = LINE_STATUS_CONFLICT
+                row.revision_note = (
+                    f"Klasifikasi berubah {prev} → {process} sementara line sudah beraktivitas"
+                )
+                # Do not silently rewrite classification once work exists.
+                if accurate_item_id is not None:
+                    row.accurate_item_id = accurate_item_id or None
+                await session.flush()
+                return row
         if from_accurate and row.po_qty != po_qty:
-            committed = await session.scalar(
-                select(func.count()).select_from(ScheduleAssignment).where(
-                    ScheduleAssignment.job_id == job.id,
-                    ScheduleAssignment.so_line_id == so_line_id,
-                )
-            ) or await session.scalar(
-                select(func.count()).select_from(ProductionEvent).where(
-                    ProductionEvent.job_id == job.id,
-                    ProductionEvent.so_line_id == so_line_id,
-                )
-            ) or await session.scalar(
-                select(func.count()).select_from(PrepState).where(
-                    PrepState.job_id == job.id, PrepState.so_line_id == so_line_id
-                )
-            )
+            committed = await _line_has_committed_work(session, job.id, so_line_id)
             if committed:
-                # Historical approvals and quantities stay; the change is surfaced for review.
+                completed = await _confirmed_pass1(session, job.id, so_line_id)
+                # Historical approvals and quantities stay; change is surfaced for review.
                 row.source_qty = po_qty
                 row.drift_detected_at = func.now()
+                if po_qty < completed:
+                    row.line_status = LINE_STATUS_CONFLICT
+                    row.revision_note = (
+                        f"Qty Accurate {po_qty} < qty completed {completed}"
+                    )
+                elif row.line_status != LINE_STATUS_CONFLICT:
+                    row.line_status = LINE_STATUS_ACTIVE
+                    row.revision_note = "Qty Accurate berubah setelah aktivitas — butuh review"
                 if accurate_item_id is not None:
                     row.accurate_item_id = accurate_item_id or None
                 await session.flush()
@@ -92,6 +148,11 @@ async def upsert_job_line_qty(
         if from_accurate and row.po_qty == po_qty and row.source_qty is not None:
             row.source_qty = None
             row.drift_detected_at = None
+            if row.line_status == LINE_STATUS_CONFLICT and not (
+                row.revision_note or ""
+            ).startswith("Klasifikasi"):
+                row.line_status = LINE_STATUS_ACTIVE
+                row.revision_note = None
         if row.po_qty != po_qty:
             if from_accurate:
                 row.source_qty = None
@@ -113,6 +174,9 @@ async def upsert_job_line_qty(
         # Helper/screener qty updates must not clobber Accurate classification.
         if production_process is not None:
             row.production_process = process
+        if from_accurate and row.line_status != LINE_STATUS_CONFLICT:
+            row.line_status = LINE_STATUS_ACTIVE
+            row.removed_from_source_at = None
     await session.flush()
     return row
 
@@ -126,8 +190,12 @@ async def sync_job_lines_from_so_detail(
 
     Slice 1M: unverified / missing / non-finite quantity must not become a
     production line with verified zero — eligibility rejects those rows.
+    Fase 1C: lines missing from Accurate are marked removed/conflict — never
+    hard-deleted. Does not fake a successful silent sync.
     """
+    require_job_active(job)
     synced: list[JobLineQty] = []
+    seen_ids: set[str] = set()
     for line in line_items:
         if not isinstance(line, dict):
             continue
@@ -171,7 +239,26 @@ async def sync_job_lines_from_so_detail(
             production_process=line.get("production_process"),
             from_accurate=True,
         )
+        seen_ids.add(line_id)
         synced.append(row)
+
+    existing_rows = (
+        await session.scalars(select(JobLineQty).where(JobLineQty.job_id == job.id))
+    ).all()
+    now = datetime.now(UTC)
+    for row in existing_rows:
+        if row.so_line_id in seen_ids:
+            continue
+        if await _line_has_committed_work(session, job.id, row.so_line_id):
+            row.line_status = LINE_STATUS_CONFLICT
+            row.revision_note = (
+                "Line hilang dari Accurate sementara sudah ada assignment/progress"
+            )
+        else:
+            row.line_status = LINE_STATUS_REMOVED
+            row.removed_from_source_at = now
+            row.revision_note = "Line dihapus dari sumber Accurate"
+    await session.flush()
     return synced
 
 
@@ -225,10 +312,24 @@ async def set_preparation(
             JobLineQty.job_id == job.id, JobLineQty.so_line_id == so_line_id
         )
     )
-    if existing_line is not None and (existing_line.production_process or "").strip() == "non_print":
+    # Classification is canonical (Accurate sync / explicit JobLineQty). Never invent PRINT.
+    if existing_line is None:
         raise HTTPException(
             409,
-            "Line non-print tidak masuk alur cetak. Packing langsung setelah payment dan bukti fisik.",
+            "Klasifikasi line belum tersedia (JobLineQty hilang). "
+            "Sinkronkan line dari sumber canonical sebelum Prepare Screen/Cup.",
+        )
+    proc_existing = _normalize_production_process(existing_line.production_process)
+    if proc_existing == "non_print":
+        raise HTTPException(
+            409,
+            "Line non-print tidak mendapat Prepare Screen/Cup. Packing langsung setelah payment dan bukti fisik.",
+        )
+    if proc_existing != "print":
+        raise HTTPException(
+            409,
+            "Klasifikasi line masih UNKNOWN — Prepare Screen/Cup ditolak sampai "
+            "production_process=print dari sumber canonical (bukan dari aksi prep).",
         )
     await gates_open_for_schedule(job, session)
     if qty < 0:
@@ -261,6 +362,7 @@ async def set_preparation(
         if asg is None or asg.job_id != job.id:
             raise HTTPException(404, "Assignment tidak valid untuk persiapan")
 
+    # Qty ceiling update only — never rewrite production_process from prep payload.
     if po_qty is not None:
         await upsert_job_line_qty(session, job, so_line_id=so_line_id, po_qty=po_qty)
 
@@ -269,11 +371,14 @@ async def set_preparation(
             JobLineQty.job_id == job.id, JobLineQty.so_line_id == so_line_id
         )
     )
-    if role == "helper":
-        if line is None:
-            raise HTTPException(422, "PO line qty wajib sebelum helper prepare")
+    if line is None or _normalize_production_process(line.production_process) != "print":
+        raise HTTPException(
+            409,
+            "Prepare Screen/Cup hanya untuk line cetak terklasifikasi (production_process=print).",
+        )
+    if role == PREP_ROLE_CUP:
         if qty > line.po_qty:
-            raise HTTPException(409, "Helper qty melebihi PO line")
+            raise HTTPException(409, "Prepare Cup qty melebihi PO line")
         confirmed = await _confirmed_pass1(session, job.id, so_line_id)
         if qty < confirmed:
             raise HTTPException(
@@ -364,7 +469,20 @@ async def helper_prepared_qty(
         select(PrepState).where(
             PrepState.job_id == job_id,
             PrepState.so_line_id == so_line_id,
-            PrepState.role == "helper",
+            PrepState.role == PREP_ROLE_CUP,
+        )
+    )
+    return Decimal(state.qty) if state else Decimal("0")
+
+
+async def screener_prepared_qty(
+    session: AsyncSession, job_id: int, so_line_id: str
+) -> Decimal:
+    state = await session.scalar(
+        select(PrepState).where(
+            PrepState.job_id == job_id,
+            PrepState.so_line_id == so_line_id,
+            PrepState.role == PREP_ROLE_SCREEN,
         )
     )
     return Decimal(state.qty) if state else Decimal("0")
@@ -382,3 +500,106 @@ async def remaining_helper_qty(
     if line is None:
         return Decimal("0")
     return Decimal(line.po_qty) - prepared
+
+
+async def require_print_preps_ready_for_sample(
+    session: AsyncSession,
+    job: ProductionJob,
+    *,
+    so_line_id: str | None = None,
+) -> None:
+    """Sample upload/approve only after Prepare Screen AND Prepare Cup READY per print line.
+
+    Parallel: screen and cup do not wait on each other; both must be READY before sample.
+    Multi-line: one READY line never authorizes another PENDING line.
+    UNKNOWN / missing classification never counts as print and never opens the gate.
+    """
+    line_map = {
+        str(ln.so_line_id): ln
+        for ln in (
+            await session.scalars(select(JobLineQty).where(JobLineQty.job_id == job.id))
+        ).all()
+        if str(getattr(ln, "so_line_id", "") or "").strip()
+    }
+
+    if so_line_id:
+        candidate_ids = [str(so_line_id).strip()]
+    else:
+        scheduled = (
+            await session.scalars(
+                select(ScheduleAssignment.so_line_id).where(
+                    ScheduleAssignment.job_id == job.id,
+                    ScheduleAssignment.status.in_(["active", "completed"]),
+                )
+            )
+        ).all()
+        candidate_ids = sorted(
+            {
+                str(lid).strip()
+                for lid in scheduled
+                if str(lid or "").strip()
+            }
+        )
+        if not candidate_ids:
+            candidate_ids = [
+                lid
+                for lid, ln in line_map.items()
+                if str(getattr(ln, "line_status", LINE_STATUS_ACTIVE) or LINE_STATUS_ACTIVE)
+                == LINE_STATUS_ACTIVE
+                and _normalize_production_process(getattr(ln, "production_process", None))
+                == "print"
+            ]
+
+    unresolved: list[str] = []
+    pending_prep: list[str] = []
+    checked_print = 0
+    for lid in candidate_ids:
+        ln = line_map.get(lid)
+        if ln is None:
+            unresolved.append(lid)
+            continue
+        status = str(getattr(ln, "line_status", LINE_STATUS_ACTIVE) or LINE_STATUS_ACTIVE)
+        if status != LINE_STATUS_ACTIVE:
+            continue
+        proc = _normalize_production_process(getattr(ln, "production_process", None))
+        if proc == "non_print":
+            continue
+        if proc != "print":
+            unresolved.append(lid)
+            continue
+        checked_print += 1
+        screen = await screener_prepared_qty(session, job.id, lid)
+        cup = await helper_prepared_qty(session, job.id, lid)
+        if screen <= 0 or cup <= 0:
+            pending_prep.append(lid)
+
+    if unresolved:
+        raise HTTPException(
+            409,
+            "Sample ditolak — klasifikasi line belum resolved (bukan print canonical): "
+            + ", ".join(unresolved),
+        )
+    if pending_prep:
+        raise HTTPException(
+            409,
+            "Sample menunggu Prepare Screen + Prepare Cup READY pada line: "
+            + ", ".join(pending_prep),
+        )
+
+    if checked_print == 0:
+        # Legacy job without scheduled/classified print lines: job-level evidence.
+        screen = await session.scalar(
+            select(func.coalesce(func.sum(PrepState.qty), 0)).where(
+                PrepState.job_id == job.id, PrepState.role == PREP_ROLE_SCREEN
+            )
+        )
+        cup = await session.scalar(
+            select(func.coalesce(func.sum(PrepState.qty), 0)).where(
+                PrepState.job_id == job.id, PrepState.role == PREP_ROLE_CUP
+            )
+        )
+        if Decimal(screen or 0) <= 0 or Decimal(cup or 0) <= 0:
+            raise HTTPException(
+                409,
+                "Sample membutuhkan Prepare Screen READY dan Prepare Cup READY",
+            )
