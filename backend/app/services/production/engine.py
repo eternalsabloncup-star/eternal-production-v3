@@ -4828,13 +4828,55 @@ async def list_payment_receipts(
 
     bypass_on = await settings_bypass_enabled(session)
     actor_can_bypass = P.user_may_bypass_payment(user) and bypass_on
+    # Resolve bypass author display names (audit identity — never invent).
+    author_ids = {
+        int(b.authorized_by)
+        for blist in bypass_by_job.values()
+        for b in blist
+        if b.authorized_by is not None
+    }
+    author_names: dict[int, str] = {}
+    if author_ids:
+        for u in (
+            await session.scalars(select(User).where(User.id.in_(sorted(author_ids))))
+        ).all():
+            name = (u.display_name or u.username or "").strip()
+            if name:
+                author_names[int(u.id)] = name
+    # Bypass author visible only to actors who may authorize bypass (audit-sensitive).
+    show_bypass_author = bool(P.user_may_bypass_payment(user))
     items = []
     for job, status, count, verified, latest_paid_at, latest_receipt_at in rows:
         verified_s = str(verified) if verified is not None else None
         fin = monitor_financial_fields(verified_amount=verified_s, payment_status=status)
-        latest_bypass = next((b.created_at for b in bypass_by_job.get(job.id, []) if b.active), None)
+        active_bypass = next((b for b in bypass_by_job.get(job.id, []) if b.active), None)
+        latest_bypass = active_bypass.created_at if active_bypass else None
         last_parts = [t for t in (latest_paid_at, latest_receipt_at, latest_bypass, job.updated_at) if t]
         last_updated = max(last_parts).isoformat() if last_parts else None
+        # Canonical approval_at — NOT last_updated_at:
+        # approved → earliest valid verified positive receipt recorded_at (gate-open evidence)
+        # bypassed → active bypass created_at
+        # pending → null (UI: Belum tersedia)
+        approval_at = None
+        if status == "approved":
+            gate_times = [
+                r.created_at
+                for r in by_job.get(job.id, [])
+                if r.status == "valid"
+                and bool(r.evidence_verified)
+                and r.amount is not None
+                and r.amount > 0
+                and r.created_at is not None
+            ]
+            if gate_times:
+                approval_at = min(gate_times).isoformat()
+        elif status == "bypassed" and latest_bypass is not None:
+            approval_at = latest_bypass.isoformat()
+        bypass_by = None
+        if show_bypass_author and active_bypass is not None:
+            uid = int(active_bypass.authorized_by) if active_bypass.authorized_by is not None else None
+            if uid is not None:
+                bypass_by = author_names.get(uid) or None
         items.append(
             {
                 "job_id": job.id,
@@ -4849,6 +4891,8 @@ async def list_payment_receipts(
                 "verified_amount": verified_s,
                 "payment_date": latest_paid_at.isoformat() if latest_paid_at else None,
                 "last_updated_at": last_updated,
+                "approval_at": approval_at,
+                "bypass_by": bypass_by,
                 **fin,
                 "receipts": [
                     {
@@ -4869,7 +4913,12 @@ async def list_payment_receipts(
                         "active": b.active,
                         "reason": b.reason,
                         "gate_before": getattr(b, "gate_before", None),
-                        "authorized_by": b.authorized_by,
+                        "authorized_by": b.authorized_by if show_bypass_author else None,
+                        "authorized_by_name": (
+                            author_names.get(int(b.authorized_by))
+                            if show_bypass_author and b.authorized_by is not None
+                            else None
+                        ),
                         "created_at": b.created_at.isoformat() if b.created_at else None,
                         "revoked_at": b.revoked_at.isoformat() if b.revoked_at else None,
                         "revoke_reason": b.revoke_reason,

@@ -1,58 +1,61 @@
-# Production Final Audit Matrix — Tahap C2 (Buffer Isolation Final Verification)
+# Production Final Audit Matrix — Tahap E3
 
-**Tanggal (WIB / Asia/Jakarta):** 2026-11-16
-**Mode:** BROWSER VERIFICATION — NO COMMIT · NO PUSH
-**HEAD baseline:** `e49186ae748905e002083b150bbe8b963c4b1d60`
-**Branch:** `cursor/epv3-production-schedule-83bf`
+**Tanggal (WIB / Asia/Jakarta):** 2026-11-17
+**Mode:** E3 FOUR GAPS FIX — product FE/BE lokal · NO COMMIT · NO PUSH
+**HEAD committed:** `2132797a0ec4c3c5a73dfc8a28ee4c126e543b3c`
+**WIP:** E1 Ringkas/BUF-path + E2 docs + E3 four columns (lokal)
+**Inventaris:** [`production-final-frontend-control-inventory.md`](./production-final-frontend-control-inventory.md)
+**SC decisions:** [`production-html-source-conflict-decisions.md`](./production-html-source-conflict-decisions.md)
 **PR #15 OPEN · PR #14 HOLD · authz legacy**
 
-## Preflight WIP (exact)
+## Rekap kontrol
+| Status | N |
+|---|---:|
+| TOTAL unik | **202** |
+| SESUAI | **167** |
+| BERBEDA DISETUJUI | **17** |
+| TIDAK SESUAI | **0** |
+| NOT TESTED | **0** |
+| SOURCE CONFLICT | **8** |
+| BLOCKED | **10** |
 
-| Path | Status |
-|---|---|
-| `frontend/public/production.html` | M — Buffer demo block + settings Live |
-| `frontend/public/live-runtime.js` | M — guardDemoBufferMutations + live testid |
-| `frontend/src/live/bufferPreviewIsolation.test.ts` | ?? — Vitest isolasi |
-| `docs/production-final-audit-matrix.md` | ?? |
-| `docs/production-final-audit-report.md` | ?? |
-| `docs/production-final-v1-v3-html-audit-plan.md` | ?? (dilindungi) |
-| `docs/production-live-readiness-audit.md` | M |
-| WIP asing | **Tidak ada** |
+Checksum: 167+17+0+0+8+10 = **202**.
 
-Disposable DB C2: `epv3_c2_buf_2a5eeed2ee_test` · API `:8021` · evidence `/tmp/epv3-c2-buffer-evidence.json`
+## Perubahan vs E2 baseline
+| Dari | Ke | N | ID |
+|---|---|---:|---|
+| TIDAK SESUAI | SESUAI | 4 | approval_at, bypass_by, helper_qty, gate_reason |
+| BLOCKED | (tetap) | 8 | delivery COL — tidak diubah E3 |
+| SOURCE CONFLICT | (tetap) | 8 | SC-01…07 + MOD-kontrol — belum APPROVED |
 
----
+## Field mapping ringkas (4 gap E3)
+| ID | Final | Canonical V3 | Sheet Live | Status |
+|---|---|---|---|---|
+| COL-payments-approval_at | sheet col | `approval_at` (receipt/bypass created_at; ≠ last_updated_at) | Tanggal Approval FULL_ONLY | SESUAI |
+| COL-payments-bypass_by | sheet col | `bypass_by` = authorized_by name if PAYMENT_BYPASS | Bypass Oleh FULL_ONLY | SESUAI |
+| COL-schedule-helper_qty | sheet col | `qty_helper_prepared` from PrepState helper | Qty Helper FULL_ONLY | SESUAI |
+| COL-tasks-gate_reason | sheet col | tasks `reason` → Prasyarat | gate_reason FULL_ONLY | SESUAI |
+| 8× COL-delivery-* | sheet cols | null / no key / Accurate | absen | BLOCKED |
 
-## Browser E2E — Live vs Preview (15/15 PASS)
+## Source conflict
+Lihat keputusan doc — **8 tetap SOURCE CONFLICT**. Tidak di-APPROVED otomatis.
 
-| ID | Uji | Hasil | Bukti |
-|---|---|---|---|
-| C2-L01 | Live monitor `data-testid=buffer-live-monitor` | **PASS** | browser |
-| C2-L02 | Tidak ada `buffer-demo-monitor` di Live | **PASS** | browser |
-| C2-L03 | GET `/production/ops/buffer` → 200 + row `SO/C2/BUFFER-LIVE` | **PASS** | network+DOM |
-| C2-L04 | Demo `setOrderFlag`/`changeGlobalSetting` → toast error, bukan sukses | **PASS** | browser |
-| C2-L05 | Settings prioritas Live tanpa % SoT | **PASS** | `buffer-settings-live` |
-| C2-L06 | Refresh tetap Live, bukan demo | **PASS** | browser |
-| C2-L07 | PG events sebelum=sesudah (1); `buffer_stock` tetap true | **PASS** | PostgreSQL |
-| C2-P01 | Preview `?epv3_preview=fixture` → demo labeled | **PASS** | browser |
-| C2-P02 | Preview bukan live monitor | **PASS** | browser |
-| C2-P03 | Preview tidak fetch ops/buffer | **PASS** | network |
-| C2-P04 | Preview tidak menulis PG | **PASS** | events=1 |
-| C2-N01 | WrongBranch `c2.other` → 0 rows (scoped) | **PASS** | API |
-| C2-N02 | NoGrant `c2.nogrant` → 403 | **PASS** | API |
-| C2-N03 | Invalid token → tidak fake Buffer success | **PASS** | redirect `/` |
-| C2-UX | Nav Buffer, tab switch, loading→table, empty/error paths | **PASS** | settled UI + Accurate enrich jujur "gagal dimuat" |
+## Browser / tabel (E3)
+Evidence `/tmp/epv3-e3-browser-evidence.json` · screenshots `/opt/cursor/artifacts/E3-*.png`.
+16/16 PASS: API+UI approval_at/bypass_by/helper_qty/gate_reason; Ringkas hide; refresh; permission; 1366/1440; no full-page hscroll.
 
-Backend kontrak buffer: **tidak diubah**. pytest `test_buffer_monitor` 7 PASS.
+## Gap prioritas
+### P0
+- HTML APPROVED stamp (SC-07)
+- SJ Accurate list-all + 8 COL delivery BLOCKED
+- Enforced Live (SET-users)
 
----
+### P1
+- SC-02 menu Final-7 vs V3-extra
+- Commit/push WIP E1–E3 setelah keputusan Direktur
 
-## Residual (bukan blocker isolasi)
+### P2
+- SC struktur/JS/artefak (SC-01/03/06)
 
-| Item | Status |
-|---|---|
-| Accurate detail enrich di Buffer Live | Gagal jujur (tanpa gateway) — bukan fake-success |
-| HTML Final APPROVED / SOURCE CONFLICT | Terbuka (di luar C2) |
-| Accurate Live / SJ list-all / enforced | BLOCKED P0 (di luar C2) |
-
-**Verdict matriks C2 Buffer isolation: SIAP GIT** (working tree siap checkpoint saat Owner izinkan commit).
+## Verdict matriks
+**PARTIAL** — 4 TIDAK SESUAI ditutup (SESUAI); TIDAK SESUAI=0; BLOCKED 10; SC 8 terbuka; NO COMMIT.

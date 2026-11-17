@@ -3998,6 +3998,7 @@
         e: {
           status: status,
           note: task.reason || "",
+          gateReason: task.reason || task.gate_reason || "",
           updated: "V3 official",
           qty: 0,
           file: "",
@@ -4488,6 +4489,15 @@
       schedulingAllowed: !!row.scheduling_allowed,
       colorRowKey: row.row_key || (row.job_id + ":" + row.so_line_id),
       v3ScheduleApi: true,
+      // Prepare Cup qty from PrepState helper — null = Belum tersedia (not SO/output).
+      helperQtyPrepared:
+        row.qty_helper_prepared == null || row.qty_helper_prepared === ""
+          ? null
+          : scheduleNum(row.qty_helper_prepared),
+      prepared:
+        row.qty_helper_prepared == null || row.qty_helper_prepared === ""
+          ? null
+          : scheduleNum(row.qty_helper_prepared),
       _scheduleQty: {
         qty: lineQty,
         scheduled: allocated,
@@ -4867,7 +4877,13 @@
     if (ops.err.del) body = '<div class="flat-notice" role="alert">' + escapeHtml(ops.err.del) + ' <button type="button" class="btn sm" data-ops="del-reload">Coba lagi</button></div>';
     else if (!d) body = '<div class="flat-notice" role="status">Memuat jadwal pengiriman (satu baris per SJ)…</div>';
     else {
-      const cols = ops.delCols || {};
+      const ringkas = ops.delView === "ringkas";
+      // Final FULL_ONLY: customer_address/remarks (+ item detail) — hide address/remarks in Ringkas.
+      const cols = Object.assign({}, ops.delCols || {});
+      if (ringkas) {
+        cols.address = false;
+        cols.remarks = false;
+      }
       const items = delSortedItems(d.items || []);
       const head =
         '<th data-column="sj">' + delSortBtn("sj", "No. SJ") + "</th>" +
@@ -5025,8 +5041,11 @@
           '<button type="button" class="btn sm" data-ops="sj-detail-close">Tutup</button></section>';
       }
     }
+    const delRingkas = ops.delView === "ringkas";
     const colToggles =
       '<div class="row" id="v3-del-col-toggles" aria-label="Pengaturan kolom">' +
+      '<button type="button" class="btn sm' + (delRingkas ? " primary" : "") + '" data-testid="sheet-view-ringkas" data-ops="del-view" data-view="ringkas">Ringkas</button>' +
+      '<button type="button" class="btn sm' + (!delRingkas ? " primary" : "") + '" data-testid="sheet-view-lengkap" data-ops="del-view" data-view="lengkap">Lengkap</button> ' +
       [
         ["address", "Alamat"],
         ["zone", "Zona"],
@@ -5034,7 +5053,8 @@
         ["remarks", "Catatan"],
       ]
         .map(function (pair) {
-          const on = !ops.delCols || ops.delCols[pair[0]] !== false;
+          const forcedOff = delRingkas && (pair[0] === "address" || pair[0] === "remarks");
+          const on = !forcedOff && (!ops.delCols || ops.delCols[pair[0]] !== false);
           return (
             '<label class="btn sm" data-ops="del-col-label" data-col="' +
             pair[0] +
@@ -5042,6 +5062,7 @@
             pair[0] +
             '"' +
             (on ? " checked" : "") +
+            (forcedOff ? " disabled" : "") +
             "> " +
             escapeHtml(pair[1]) +
             "</label>"
@@ -5182,9 +5203,19 @@
       rmOpenRow({ job_id: Number(t.getAttribute("data-jid")), so_number: t.getAttribute("data-so"), branch_id: t.getAttribute("data-branch"), customer_name: t.getAttribute("data-cust") });
       return;
     }
+    if (act === "buf-view") {
+      ops.bufView = t.getAttribute("data-view") === "ringkas" ? "ringkas" : "lengkap";
+      if (typeof window.render === "function") window.render();
+      return;
+    }
     if (act === "buf-reload" || act === "buf-prev" || act === "buf-next") {
       ops.bufPage = act === "buf-next" ? (ops.bufPage || 1) + 1 : act === "buf-prev" ? Math.max(1, (ops.bufPage || 1) - 1) : (ops.bufPage || 1);
       ops.buf = null; ops.err.buf = ""; ops.ts = {};
+      if (typeof window.render === "function") window.render();
+      return;
+    }
+    if (act === "del-view") {
+      ops.delView = t.getAttribute("data-view") === "ringkas" ? "ringkas" : "lengkap";
       if (typeof window.render === "function") window.render();
       return;
     }
@@ -5297,6 +5328,9 @@
     const originalGo = window.go;
     window.go = function (target) {
       if (target === "contractMonitor") target = "inbox";
+      ops.bufView = "lengkap";
+      ops.delView = "lengkap";
+      if (typeof rm !== "undefined" && rm) rm.columnView = "lengkap";
       return originalGo.apply(this, arguments.length > 1 ? [target].concat([].slice.call(arguments, 1)) : [target]);
     };
   }
@@ -5329,20 +5363,35 @@
     }
     const d = ops.buf;
     const h = typeof window.heading === "function" ? window.heading : function (t) { return "<h1>" + t + "</h1>"; };
+    const ringkas = ops.bufView === "ringkas";
+    // Final FULL_ONLY has no buffer keys — Ringkas still required; hide secondary Sales PIC only.
+    const viewBar =
+      '<div class="row" style="gap:6px;flex-wrap:wrap;margin:8px 0">' +
+      '<button type="button" class="btn sm' + (ringkas ? " primary" : "") + '" data-testid="sheet-view-ringkas" data-ops="buf-view" data-view="ringkas">Ringkas</button>' +
+      '<button type="button" class="btn sm' + (!ringkas ? " primary" : "") + '" data-testid="sheet-view-lengkap" data-ops="buf-view" data-view="lengkap">Lengkap</button></div>';
     let body;
     if (ops.err.buf) body = "<div class=\"flat-notice\" role=\"alert\">" + escapeHtml(ops.err.buf) + " <button type=\"button\" class=\"btn sm\" data-ops=\"buf-reload\">Coba lagi</button></div>";
     else if (!d) body = "<div class=\"flat-notice\" role=\"status\">Memuat monitoring buffer...</div>";
     else if (!d.items.length) body = "<div class=\"flat-notice\">Tidak ada PO Buffer Stock aktif pada cabang Anda.</div>";
-    else body = "<div class=\"v36-table-container\"><table class=\"v36-table\"><thead><tr><th>Nomor PO Buffer</th><th>Nama Outlet / Gudang</th><th>Kode Barang</th><th>Nama Barang</th><th>Varian</th><th>Total Buffer Dipesan</th><th>Sudah Selesai Gesut</th><th>Sisa Belum Digesut</th><th>Ready Gudang (Siap Ambil)</th><th>Sudah Diambil / Terkirim</th><th>Status Buffer</th><th>Sales PIC</th><th>Detail</th></tr></thead><tbody>" +
+    else body = viewBar + "<div class=\"v36-table-container\"><table class=\"v36-table\"><thead><tr><th>Nomor PO Buffer</th><th>Nama Outlet / Gudang</th><th>Kode Barang</th><th>Nama Barang</th>" +
+      (ringkas ? "" : "<th>Varian</th>") +
+      "<th>Total Buffer Dipesan</th><th>Sudah Selesai Gesut</th><th>Sisa Belum Digesut</th><th>Ready Gudang (Siap Ambil)</th><th>Sudah Diambil / Terkirim</th><th>Status Buffer</th>" +
+      (ringkas ? "" : "<th>Sales PIC</th>") +
+      "<th>Detail</th></tr></thead><tbody>" +
       d.items.map(function (r) {
         const it = bufItem(r), o = it.o, l = it.line, failed = bufFailed[r.accurate_so_number] === true;
         const sales = o && o.salesName && o.salesName !== "Belum terverifikasi" ? o.salesName : null;
         const status = r.integrity === "INTEGRITY_CONFLICT" ? '<span title="' + escapeHtml(r.integrity_detail || "") + '">INTEGRITY_CONFLICT</span>' : bufText(r.buffer_status, failed);
-        return "<tr><td><b>" + escapeHtml(r.accurate_so_number) + "</b></td><td>" + bufText(r.customer_name || (o && o.name), failed) + "</td><td>" + bufText(l && l.item_code, failed) + "</td><td>" + bufText(l && l.name, failed) + "</td><td>" + bufText(l && l.color, failed) + "</td><td>" + bufQty(r.total_buffer) + "</td><td>" + bufQty(r.done_gesut) + "</td><td>" + bufQty(r.remaining_gesut) + "</td><td>" + bufQty(r.ready_warehouse) + "</td><td>" + bufQty(r.delivered) + "</td><td>" + status + "</td><td>" + bufText(sales, failed) + "</td><td><button type=\"button\" class=\"btn sm\" data-ops=\"buf-open\" data-jid=\"" + escapeHtml(r.job_id) + "\" data-so=\"" + escapeHtml(r.accurate_so_number) + "\" data-branch=\"" + escapeHtml(r.branch_id) + "\" data-cust=\"" + escapeHtml(r.customer_name || "") + "\">ⓘ Detail</button></td></tr>";
+        return "<tr><td><b>" + escapeHtml(r.accurate_so_number) + "</b></td><td>" + bufText(r.customer_name || (o && o.name), failed) + "</td><td>" + bufText(l && l.item_code, failed) + "</td><td>" + bufText(l && l.name, failed) + "</td>" +
+          (ringkas ? "" : "<td>" + bufText(l && l.color, failed) + "</td>") +
+          "<td>" + bufQty(r.total_buffer) + "</td><td>" + bufQty(r.done_gesut) + "</td><td>" + bufQty(r.remaining_gesut) + "</td><td>" + bufQty(r.ready_warehouse) + "</td><td>" + bufQty(r.delivered) + "</td><td>" + status + "</td>" +
+          (ringkas ? "" : "<td>" + bufText(sales, failed) + "</td>") +
+          "<td><button type=\"button\" class=\"btn sm\" data-ops=\"buf-open\" data-jid=\"" + escapeHtml(r.job_id) + "\" data-so=\"" + escapeHtml(r.accurate_so_number) + "\" data-branch=\"" + escapeHtml(r.branch_id) + "\" data-cust=\"" + escapeHtml(r.customer_name || "") + "\">ⓘ Detail</button></td></tr>";
       }).join("") + "</tbody></table></div>" +
       "<small>" + d.items.length + " baris dari " + d.total + " item buffer · halaman " + d.page + (d.page > 1 ? " <button type=\"button\" class=\"btn sm\" data-ops=\"buf-prev\">Sebelumnya</button>" : "") + (d.has_more ? " <button type=\"button\" class=\"btn sm\" data-ops=\"buf-next\">Berikutnya</button>" : "") + "</small>";
+    if (ops.err.buf || !d || !d.items.length) body = viewBar + body;
     return h("Monitoring Buffer Stock", "Penanda buffer resmi dari job V3 / detail Accurate") +
-      "<div class=\"flat-notice\" data-testid=\"buffer-live-monitor\">Hanya PO dengan flag Buffer Stock aktif (PostgreSQL). Qty dihitung dari event produksi V3 (gesut, packing, loading, POD); data tanpa sumber resmi tampil Belum terverifikasi. Buffer tidak menambah qty SO atau stok Accurate. Bukan data preview/fixture.</div>" + body;
+      "<div class=\"flat-notice\" data-testid=\"buffer-live-monitor\">Hanya PO dengan flag Buffer Stock aktif (PostgreSQL). Qty dihitung dari event produksi V3 (gesut, packing, loading, POD); data tanpa sumber resmi tampil Belum terverifikasi. Buffer tidak menambah qty SO atau stok Accurate. Bukan data preview/fixture. Live memakai GET /production/ops/buffer saja (path Final buffer-stock tidak dipanggil).</div>" + body;
   });
 
   // Monitoring Penerimaan (operasional): daftar resmi lintas PO dari
@@ -5364,6 +5413,7 @@
     detail: null,
     sort: { key: "so", dir: "asc" },
     cols: { evidence: true, financial: true },
+    columnView: "lengkap",
   };
   const RM_PAY = { approved: ["APPROVED", "Gate produksi: terverifikasi"], bypassed: ["BYPASSED", "Gate produksi: bypass"], pending: ["PENDING", "Gate produksi: menunggu"] };
   function rmSortValue(r, key) {
@@ -5449,6 +5499,15 @@
       : "";
     const showEv = !rm.cols || rm.cols.evidence !== false;
     const showFin = !rm.cols || rm.cols.financial !== false;
+    const showGateCols = rm.columnView !== "ringkas";
+    const approvalAt = r.approval_at
+      ? rmDate(r.approval_at)
+      : '<span class="muted">Belum tersedia</span>';
+    const bypassBy = r.bypass_by
+      ? escapeHtml(r.bypass_by)
+      : (r.bypass_active
+        ? '<span class="muted">Belum tersedia</span>'
+        : '<span class="muted">—</span>');
     return "<tr>" +
       '<td data-column="so"><b>' + escapeHtml(r.so_number) + "</b><br><small>" + escapeHtml(r.branch_id) + "</small></td>" +
       '<td data-column="customer">' + escapeHtml(r.customer_name || "Belum terverifikasi") + "</td>" +
@@ -5456,6 +5515,8 @@
       '<td data-column="amount">' + escapeHtml(amount) + "<br><small>" + escapeHtml(rmDate(r.payment_date)) + "</small></td>" +
       (showEv ? '<td data-column="evidence">' + evidence + (showFin ? "<br><small>" + settle + "</small><br><small>Status finansial: " + escapeHtml(finLabel) + "</small>" : "") + "</td>" : "") +
       '<td data-column="status"><span class="tag v165-status--' + (pay[0] === "APPROVED" ? "done" : pay[0] === "PENDING" ? "pending" : "process") + '">' + pay[1] + "</span><br><small>Sumber: " + escapeHtml(src) + "</small>" + (r.bypass_active ? "<br><small>Bypass aktif</small>" : "") + review + "</td>" +
+      (showGateCols ? '<td data-column="approval_at">' + approvalAt + "</td>" : "") +
+      (showGateCols ? '<td data-column="bypass_by">' + bypassBy + "</td>" : "") +
       '<td data-column="action">' + (none ? "" : '<button type="button" class="btn sm" data-rm="detail" data-jid="' + escapeHtml(r.job_id) + '">Detail</button> ') +
       '<button type="button" class="btn sm" data-rm="open" data-jid="' + escapeHtml(r.job_id) + '">Buka PO &amp; Payment</button>' +
       (r.can_bypass ? ' <button type="button" class="btn sm" data-rm="open" data-jid="' + escapeHtml(r.job_id) + '">Bypass…</button>' : "") +
@@ -5495,20 +5556,24 @@
     const sel = function (id, label, cur, opts) {
       return "<label>" + label + " <select id=\"" + id + "\">" + opts.map(function (o) { return "<option value=\"" + o[0] + "\"" + (cur === o[0] ? " selected" : "") + ">" + o[1] + "</option>"; }).join("") + "</select></label>";
     };
-    const showEv = !rm.cols || rm.cols.evidence !== false;
+    // Final FULL_ONLY: hide evidence + approval_at + bypass_by in Ringkas.
+    const showEv = rm.columnView !== "ringkas" && (!rm.cols || rm.cols.evidence !== false);
+    const showGateCols = rm.columnView !== "ringkas";
     let body;
     if (rm.loading && !d) body = "<div class=\"flat-notice\" role=\"status\">Memuat monitoring pembayaran…</div>";
     else if (rm.error) body = "<div class=\"flat-notice\" role=\"alert\"><b>Gagal memuat:</b> " + escapeHtml(rm.error) + " <button type=\"button\" class=\"btn sm\" data-rm=\"reload\">Coba lagi</button></div>";
     else {
       // Always keep sticky sheet chrome (so,customer) — empty filter still needs header geometry.
       const rows = d && d.items && d.items.length ? rmSortedItems(d.items) : [];
-      const colCount = 6 + (showEv ? 1 : 0);
+      const colCount = 6 + (showEv ? 1 : 0) + (showGateCols ? 2 : 0);
       const tbody = rows.length
         ? rows.map(rmRowHtml).join("")
         : '<tr><td colspan="' + colCount + '" class="sheetempty v165-state v165-state--empty" role="status"><b>Tidak ada data</b> Tidak ada PO sesuai filter. PO muncul setelah job V3 dibuat dari Inbox/Tugas Tim.</td></tr>';
       body =
         '<div class="row" id="v3-rm-col-toggles" style="gap:6px;flex-wrap:wrap;margin:8px 0">' +
-        '<label class="btn sm"><input type="checkbox" data-rm="col" data-col="evidence"' + (showEv ? " checked" : "") + "> Evidence</label>" +
+        '<button type="button" class="btn sm' + (rm.columnView === "ringkas" ? " primary" : "") + '" data-testid="sheet-view-ringkas" data-rm="view" data-view="ringkas">Ringkas</button>' +
+        '<button type="button" class="btn sm' + (rm.columnView === "lengkap" ? " primary" : "") + '" data-testid="sheet-view-lengkap" data-rm="view" data-view="lengkap">Lengkap</button>' +
+        '<label class="btn sm"><input type="checkbox" data-rm="col" data-col="evidence"' + (showEv ? " checked" : "") + (rm.columnView === "ringkas" ? " disabled" : "") + "> Evidence</label>" +
         '<button type="button" class="btn sm" onclick="typeof resetV3ColumnWidths===\'function\'&&resetV3ColumnWidths(\'epv3:colw:payment\')">Reset lebar kolom</button></div>' +
         '<div class="v36-table-container v3-rm-scroll" role="region" aria-label="Tabel monitoring penerimaan" tabindex="0">' +
         '<table class="v36-table excel-sheet v3-payment-sheet" data-v3-colw="epv3:colw:payment" data-v3-colw-locked="1" data-v3-sticky="so,customer">' +
@@ -5519,6 +5584,8 @@
         '<th data-column="amount">' + rmSortBtn("amount", "Nominal terverifikasi") + "</th>" +
         (showEv ? "<th data-column=\"evidence\">Evidence</th>" : "") +
         '<th data-column="status">' + rmSortBtn("status", "Status pembayaran") + "</th>" +
+        (showGateCols ? '<th data-column="approval_at" data-testid="col-approval-at">Tanggal Approval</th>' : "") +
+        (showGateCols ? '<th data-column="bypass_by" data-testid="col-bypass-by">Bypass Oleh</th>' : "") +
         "<th data-column=\"action\">Aksi</th></tr></thead><tbody>" +
         tbody +
         "</tbody></table></div>" +
@@ -5578,6 +5645,9 @@
     if (act === "prev" && rm.page > 1) { rm.page--; rm.stale = true; rm.detail = null; }
     else if (act === "next") { rm.page++; rm.stale = true; rm.detail = null; }
     else if (act === "reload") { rm.stale = true; }
+    else if (act === "view") {
+      rm.columnView = t.getAttribute("data-view") === "ringkas" ? "ringkas" : "lengkap";
+    }
     else if (act === "detail") { rm.detail = Number(t.getAttribute("data-jid")); }
     else if (act === "sort") {
       const key = t.getAttribute("data-key") || "so";

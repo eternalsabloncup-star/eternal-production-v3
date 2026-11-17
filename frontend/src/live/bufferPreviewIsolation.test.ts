@@ -35,4 +35,14 @@ describe("Buffer preview vs Live isolation (Tahap C P1)", () => {
     expect(runtime).toContain("__V3_PREVIEW_FIXTURE__");
     expect(html).toContain("epv3_preview=fixture");
   });
+
+  it("Live never calls obsolete Final path /api/v3/buffer-stock (BUF-path E1)", () => {
+    expect(runtime).not.toMatch(/opsLoad\([^)]*buffer-stock/);
+    expect(runtime).not.toMatch(/request\([^)]*buffer-stock/);
+    expect(runtime).not.toMatch(/fetch\([^)]*buffer-stock/);
+    expect(html).not.toMatch(/['"`][^'"`]*\/api\/v3\/buffer-stock/);
+    expect(runtime).toContain("/production/ops/buffer");
+    expect(runtime).toContain('data-ops="buf-view"');
+    expect(runtime).toContain('data-testid="sheet-view-ringkas"');
+  });
 });

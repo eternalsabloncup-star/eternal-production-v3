@@ -1437,6 +1437,24 @@ async def list_production_schedule(
             continue
         asg_by_line[(a.job_id, a.so_line_id)].append(a)
 
+    # Canonical Prepare Cup qty per line (PrepState role=helper) — not SO qty, not output.
+    from app.models.production.prep import PrepState
+    from app.services.production.prep import PREP_ROLE_CUP
+
+    helper_by_line: dict[tuple[int, str], Decimal] = {}
+    if job_ids:
+        for ps in (
+            await session.scalars(
+                select(PrepState).where(
+                    PrepState.job_id.in_(job_ids),
+                    PrepState.role == PREP_ROLE_CUP,
+                )
+            )
+        ).all():
+            key = (ps.job_id, str(ps.so_line_id or "").strip())
+            if key[1]:
+                helper_by_line[key] = Decimal(ps.qty or 0)
+
     output_rows = (
         await session.execute(
             select(
@@ -1514,6 +1532,7 @@ async def list_production_schedule(
             if hold
             else ("dijadwalkan" if line_asgs else "belum_dijadwalkan")
         )
+        helper_prepared = helper_by_line.get((job.id, str(ln.so_line_id or "").strip()))
         base = {
             "job_id": job.id,
             "accurate_so_number": job.accurate_so_number,
@@ -1527,6 +1546,8 @@ async def list_production_schedule(
             "qty_printed_done": str(done),
             "qty_unallocated": str(max(po_qty - allocated, Decimal(0))),
             "qty_unprinted": str(max(po_qty - done, Decimal(0))),
+            # Prepare Cup (helper) qty from PrepState — null when no prep row (Belum tersedia).
+            "qty_helper_prepared": str(helper_prepared) if helper_prepared is not None else None,
             "hold": hold,
             "hold_reason": hold_reason,
             "line_status": ln.line_status or "active",
